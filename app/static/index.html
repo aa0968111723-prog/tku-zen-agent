@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>淡江大學領袖禪學社 · AI 代理</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧘</text></svg>">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true"></span>
+    <div class="brand-text">
+      <strong>淡江大學領袖禪學社</strong>
+      <span>專屬 AI 代理</span>
+    </div>
+  </div>
+
+  <div class="controls">
+    <label class="field">
+      <span>產出落點</span>
+      <select id="destination">
+        <option value="local">本機</option>
+        <option value="drive">Google 雲端</option>
+        <option value="both">本機＋雲端</option>
+      </select>
+    </label>
+    <label class="field">
+      <span>模型</span>
+      <select id="model"></select>
+    </label>
+    <button id="reset" class="ghost" type="button" title="清空對話重新開始">新對話</button>
+  </div>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<main id="chat" class="chat" aria-live="polite">
+  <section class="welcome" id="welcome">
+    <h1>今天要做什麼？</h1>
+    <p class="lede">
+      我讀得到社團知識庫，也能直接把成品做出來 —— 試算表、企劃書、簡報、Google 表單。
+      說一句就好，不用給格式。
+    </p>
+    <div class="chips" id="chips">
+      <button type="button" data-prompt="幫我做一份 115 學年度上學期的社課排程表，18 週，每週一個主題，欄位要有週次、日期、主題、帶課者、需要準備的器材、備註。日期先留空給我自己填。">社課排程表</button>
+      <button type="button" data-prompt="幫我想這學期的招生策略，然後做成一份招生企劃書。要包含目標人數、招生管道、時程、分工、預算項目，還有實際可以用的文案範例。">招生企劃書</button>
+      <button type="button" data-prompt="做一份新生報名表的 Google 表單，要收基本資料、系級、怎麼知道我們社團的、有沒有靜坐經驗、想從社團得到什麼。">新生報名表</button>
+      <button type="button" data-prompt="幫我做一份期初茶會的流程表跟工作分配表，兩個工作表放同一個檔案。">期初茶會流程</button>
+      <button type="button" data-prompt="做一份社團經費預算表，涵蓋整個學年度，收入跟支出分開，支出要分社課、營隊、文宣、器材、雜支，最後要有小計跟結餘的公式。">經費預算表</button>
+      <button type="button" data-prompt="幫我寫三則招生用的 IG 貼文，語氣要生活化、貼近大學生，每則都要有 hashtag，做成一份文件。">IG 招生貼文</button>
+      <button type="button" data-prompt="做一份幹部交接手冊，說明每個職位在做什麼、一年的工作節奏、交接要交什麼東西。">幹部交接手冊</button>
+      <button type="button" data-prompt="做一份社課回饋問卷的 Google 表單，要能問出社員覺得哪裡有收穫、哪裡想調整。">社課回饋問卷</button>
+    </div>
+  </section>
+</main>
+
+<footer class="composer">
+  <div class="composer-inner">
+    <textarea id="input" rows="1" placeholder="例如：幫我做一份挑戰營的器材清單和分工表…（Enter 送出，Shift+Enter 換行）"></textarea>
+    <button id="send" type="button" aria-label="送出">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4Z"/></svg>
+    </button>
+  </div>
+  <p class="hint" id="hint"></p>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

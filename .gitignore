@@ -1,0 +1,18 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# 產出檔
+outputs/
+
+# Google 憑證與登入權杖 —— 絕對不要上傳
+data/google_credentials.json
+data/google_token.json
+data/
+
+# LINE 語料含真實對話與人名，不要進版控
+knowledge/語料/
+
+# 從共用雲端匯入的歷年檔案是社團內部資料，不要進版控
+knowledge/雲端文件/

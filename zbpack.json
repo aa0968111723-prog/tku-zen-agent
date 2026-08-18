@@ -1,0 +1,7 @@
+{
+  "build_command": "pip install -r requirements.txt",
+  "start_command": "python -m app",
+  "python": {
+    "entry": "app/__main__.py"
+  }
+}
