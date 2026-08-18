@@ -56,12 +56,50 @@ CORPUS_DIR = KNOWLEDGE_DIR / "語料"
 DRIVE_DOCS_DIR = KNOWLEDGE_DIR / "雲端文件"
 ENABLE_LINE_CORPUS = _bool("ENABLE_LINE_CORPUS", False)
 
+# ── 持久化 ───────────────────────────────────────────────────
+# session / project / artifact 都存這裡。原本只在 process memory，
+# 伺服器一重開就消失，多 process 部署還會互相看不到。
+DB_PATH = _path("DB_PATH", "data/agent.sqlite3")
+
+# ── 認證 ─────────────────────────────────────────────────────
+# local  = 單人本機模式，不需要登入，所有請求都是同一個使用者
+# token  = 部署模式，要先用 APP_ACCESS_TOKEN 換到身分才能用
+AUTH_MODE = (os.getenv("AUTH_MODE") or "").strip().lower()
+APP_ACCESS_TOKEN = (os.getenv("APP_ACCESS_TOKEN") or "").strip()
+
+# ── 當期狀態（本學期的真實資料）────────────────────────────────
+CURRENT_TERM_FILE = _path("CURRENT_TERM_FILE", "data/current_term.yaml")
+
+
+def auth_mode() -> str:
+    """沒明講的話：設了 APP_ACCESS_TOKEN 就是部署模式，否則本機單人。"""
+    if AUTH_MODE in {"local", "token"}:
+        return AUTH_MODE
+    return "token" if APP_ACCESS_TOKEN else "local"
+
 # ── 伺服器 ────────────────────────────────────────────────────
 HOST = (os.getenv("HOST") or "127.0.0.1").strip()
 PORT = int(os.getenv("PORT") or 8848)
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 (ROOT / "data").mkdir(parents=True, exist_ok=True)
+
+
+def bootstrap_current_term() -> None:
+    """第一次啟動時，從範本生一份可以編輯的本學期設定。
+
+    真實的 current_term.yaml 會填上社長與幹部姓名，屬於個資，所以不進版控；
+    進版控的是不含真實資料的 .example.yaml。
+    """
+    target = CURRENT_TERM_FILE
+    example = ROOT / "data" / "current_term.example.yaml"
+    if target.exists() or not example.exists():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+bootstrap_current_term()
 
 
 def missing_config() -> list[str]:
@@ -76,4 +114,10 @@ def missing_config() -> list[str]:
         problems.append("NVIDIA_API_KEY 格式看起來不對，正常應該以 nvapi- 開頭。")
     if DEFAULT_DESTINATION not in {"local", "drive", "both"}:
         problems.append(f"DEFAULT_DESTINATION 只能是 local / drive / both，目前是 {DEFAULT_DESTINATION!r}。")
+    if auth_mode() == "local" and HOST not in {"127.0.0.1", "localhost", ""}:
+        problems.append(
+            f"伺服器綁在 {HOST} 對外開放，但沒有設定 APP_ACCESS_TOKEN。"
+            "任何拿到網址的人都能使用並消耗你的 NVIDIA 額度，也看得到彼此的產出。"
+            "部署時請務必設定 APP_ACCESS_TOKEN。"
+        )
     return problems

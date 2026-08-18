@@ -1,5 +1,8 @@
-"""工具註冊表。刻意只留 5 個工具 —— 開源模型的工具選擇正確率，
-會隨工具數量增加而明顯下降。"""
+"""工具註冊表與 skill 篩選。
+
+每次請求只把該 skill 需要的工具 schema 送給模型。開源模型的工具選擇
+正確率會隨工具數量明顯下降，而且每個 schema 都要佔輸入 token。
+"""
 
 from __future__ import annotations
 
@@ -7,26 +10,63 @@ import inspect
 import traceback
 from typing import Any, Callable
 
-from . import document, gform, knowledge, slides, spreadsheet
+from . import document, examples, gform, knowledge, slides, spreadsheet, term
 
 _REGISTRY: dict[str, tuple[Callable[..., dict], dict]] = {
     "search_knowledge": (knowledge.search_knowledge, knowledge.SCHEMA),
+    "search_previous_examples": (examples.search_previous_examples, examples.SCHEMA),
+    "get_current_term": (term.get_current_term, term.SCHEMA),
     "create_spreadsheet": (spreadsheet.create_spreadsheet, spreadsheet.SCHEMA),
     "create_document": (document.create_document, document.SCHEMA),
     "create_slides": (slides.create_slides, slides.SCHEMA),
     "create_google_form": (gform.create_google_form, gform.SCHEMA),
 }
 
+# 全部工具的 schema。實際送給模型的是 schemas_for() 篩過的子集。
 SCHEMAS: list[dict] = [schema for _, schema in _REGISTRY.values()]
 
-# 給介面顯示用的中文名稱
 LABELS = {
     "search_knowledge": "查詢社團知識庫",
+    "search_previous_examples": "找歷年範例",
+    "get_current_term": "查本學期資料",
     "create_spreadsheet": "建立試算表",
     "create_document": "建立文件",
     "create_slides": "建立簡報",
     "create_google_form": "產生 Google 表單腳本",
 }
+
+
+def register(name: str, fn: Callable[..., dict], schema: dict, label: str = "") -> None:
+    """讓外部（測試、之後的擴充）掛新工具進來。"""
+    _REGISTRY[name] = (fn, schema)
+    LABELS.setdefault(name, label or name)
+    SCHEMAS.clear()
+    SCHEMAS.extend(s for _, s in _REGISTRY.values())
+
+
+def unregister(name: str) -> None:
+    _REGISTRY.pop(name, None)
+    LABELS.pop(name, None)
+    SCHEMAS.clear()
+    SCHEMAS.extend(s for _, s in _REGISTRY.values())
+
+
+def all_names() -> list[str]:
+    return list(_REGISTRY)
+
+
+def schemas_for(names: tuple[str, ...] | list[str]) -> list[dict]:
+    """只回傳指定工具的 schema。
+
+    未知名稱直接忽略而不是報錯 —— skill 定義裡列到還沒實作的工具時，
+    應該安靜降級，不該讓整個請求掛掉。
+    """
+    out: list[dict] = []
+    for name in names:
+        entry = _REGISTRY.get(name)
+        if entry:
+            out.append(entry[1])
+    return out or SCHEMAS
 
 
 def dispatch(name: str, arguments: dict[str, Any]) -> dict:

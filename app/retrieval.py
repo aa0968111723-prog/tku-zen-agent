@@ -1,9 +1,12 @@
-"""社團知識庫的本地檢索。
+"""社團知識庫的本地檢索（BM25 層）。
 
-刻意不用向量嵌入：
+刻意不用外部 embedding API：
   · 免費額度有限，每次提問都打 embedding API 太浪費
-  · BM25 + 中文字元二元組（bigram）對這種規模（幾百 KB）已經夠準
   · 完全離線，知識庫內容不會為了建索引而先送出去
+
+BM25 對中文專有名詞、活動名稱、歷史檔名特別有效，是整個檢索的骨幹。
+語意層（app/rag/semantic.py，本機 LSA）疊在這之上補「講同一件事但用詞不同」
+的情況，兩者用 RRF 融合，見 app/rag/hybrid.py。
 """
 
 from __future__ import annotations
@@ -15,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import config
+from .rag import metadata as rag_metadata
+from .rag import semantic
 
 _CJK = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 _ASCII_WORD = re.compile(r"[a-zA-Z0-9]+")
@@ -85,6 +90,7 @@ class Chunk:
     text: str
     heading: str = ""   # 標題路徑，額外加權用
     tier: float = TIER_ARCHIVE
+    meta: "object | None" = None   # rag.metadata.ChunkMeta，供 hybrid 重排用
 
     tokens: Counter = None      # type: ignore[assignment]
     length: int = 0
@@ -99,7 +105,9 @@ class Chunk:
         self.tokens = counts
 
 
-def _split_markdown(path: Path, label: str, tier: float = TIER_ARCHIVE) -> list[Chunk]:
+def _split_markdown(
+    path: Path, label: str, tier: float = TIER_ARCHIVE, source_type: str = "archive"
+) -> list[Chunk]:
     """依標題切段；過長的段落再依空行硬切。
 
     兩個刻意的取捨：
@@ -137,6 +145,7 @@ def _split_markdown(path: Path, label: str, tier: float = TIER_ARCHIVE) -> list[
                     text=piece,
                     heading=f"{label} {heading}",
                     tier=tier,
+                    meta=rag_metadata.infer(path, source, piece, source_type),
                 )
             )
 
@@ -204,29 +213,29 @@ class Index:
 
     def build(self) -> "Index":
         self.chunks = []
-        files: list[tuple[Path, str, float]] = []
+        files: list[tuple[Path, str, float, str]] = []
 
         kb = config.KNOWLEDGE_DIR / "00_社團知識庫.md"
         if kb.exists():
-            files.append((kb, "社團知識庫", TIER_CURATED))
+            files.append((kb, "社團知識庫", TIER_CURATED, "curated"))
 
         if config.PLAYBOOK_DIR.exists():
             for p in sorted(config.PLAYBOOK_DIR.glob("*.md")):
-                files.append((p, f"任務劇本／{p.stem}", TIER_CURATED))
+                files.append((p, f"任務劇本／{p.stem}", TIER_CURATED, "playbook"))
 
         # 共用雲端匯入的歷年文件（企劃書、細流、社評、社課、文案…）。
         # 跑過 scripts/ingest_drive.py 才會有這個資料夾 —— 執行腳本本身就是啟用動作。
         if config.DRIVE_DOCS_DIR.exists():
             for p in sorted(config.DRIVE_DOCS_DIR.rglob("*.md")):
-                files.append((p, f"歷年檔案／{p.parent.name}／{p.stem}", TIER_ARCHIVE))
+                files.append((p, f"歷年檔案／{p.parent.name}／{p.stem}", TIER_ARCHIVE, "archive"))
 
         if config.ENABLE_LINE_CORPUS and config.CORPUS_DIR.exists():
             for p in sorted(config.CORPUS_DIR.glob("*.md")):
-                files.append((p, f"歷史對話／{p.stem}", TIER_ARCHIVE))
+                files.append((p, f"歷史對話／{p.stem}", TIER_ARCHIVE, "conversation"))
 
-        for path, label, tier in files:
+        for path, label, tier, source_type in files:
             try:
-                self.chunks.extend(_split_markdown(path, label, tier))
+                self.chunks.extend(_split_markdown(path, label, tier, source_type))
             except OSError:
                 continue
 
@@ -237,8 +246,12 @@ class Index:
             for term in c.tokens:
                 self.df[term] += 1
         self.avg_len = (total / len(self.chunks)) if self.chunks else 1.0
-        self.sources = sorted({label.split("／")[0] for _, label, _ in files})
+        self.sources = sorted({label.split("／")[0] for _, label, _, _ in files})
         self.file_count = len(files)
+
+        # 語意層是加分項：建不起來（沒有 scipy、語料太小）就自動降級成純 BM25
+        self.fingerprint = f"{len(self.chunks)}:{int(total)}:{self.file_count}"
+        semantic.build(self.chunks, tokenize, self.fingerprint)
         return self
 
     MIN_CURATED_HITS = 2
@@ -343,12 +356,18 @@ class Index:
     LOW_CONFIDENCE = 3.0
 
     def stats(self) -> dict:
+        sem = semantic.get()
         return {
             "段落數": len(self.chunks),
             "檔案數": self.file_count,
             "來源": self.sources,
             "已載入雲端文件": config.DRIVE_DOCS_DIR.exists(),
             "已載入LINE語料": config.ENABLE_LINE_CORPUS,
+            "語意層": (
+                f"LSA {sem.doc_vectors.shape[1]} 維"  # type: ignore[union-attr]
+                if sem is not None
+                else f"未啟用（{semantic.unavailable_reason() or '尚未建立'}）"
+            ),
         }
 
 
@@ -358,5 +377,18 @@ _index: Index | None = None
 def get_index(rebuild: bool = False) -> Index:
     global _index
     if _index is None or rebuild:
+        if rebuild:
+            semantic.reset()
         _index = Index().build()
     return _index
+
+
+def build_context(queries: list[str], *, task_type: str = ""):
+    """對外的 hybrid 檢索入口（orchestrator 用）。
+
+    放在這裡而不是直接 import app.rag，是為了讓 app.rag 可以反過來
+    import app.retrieval 而不會循環。
+    """
+    from .rag.context import build_context as _build
+
+    return _build(queries, task_type=task_type)
