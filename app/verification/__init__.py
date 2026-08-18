@@ -344,14 +344,18 @@ def verify(
     text = _extract_text(path)
     report.text_length = len(text)
 
-    if report.kind in {"docx", "pptx", "md", "gs"} and len(text.strip()) < 40:
+    # 這條只抓「模型根本沒產出東西」。篇幅夠不夠是 required_sections 的職責，
+    # 門檻設高會把合法但簡短的文件（公告、回條）誤判成空檔。
+    if report.kind in {"docx", "pptx", "md", "gs"} and len(text.strip()) < 15:
         report.issues.append(
             Issue("has_content", "error", "檔案幾乎沒有內容。", "把完整內容寫進去，不要只給大綱。")
         )
 
     if not active or "no_health_claims" in active:
         _check_health_claims(text, report)
-    if not active or "not_religious_recruitment" in active:
+    # external_tone 與 not_religious_recruitment 是同一件事的兩個說法，
+    # 任一個出現就要做這個檢查
+    if not active or {"not_religious_recruitment", "external_tone"} & active:
         _check_religious_framing(text, report, external or "external_tone" in active)
     if not active or "no_stale_year_as_current" in active:
         _check_stale_year(text, report)

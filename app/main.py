@@ -77,7 +77,9 @@ async def index() -> HTMLResponse:
 
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]:
+async def health(_user_id: str = Depends(current_user)) -> dict[str, Any]:
+    """要先識別身分。這裡會吐出模型設定、知識庫規模、本學期缺哪些欄位，
+    部署模式下不該讓沒有存取碼的人看到。"""
     return orchestrator.health()
 
 

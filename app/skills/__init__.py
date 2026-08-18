@@ -114,11 +114,18 @@ SKILLS: tuple[Skill, ...] = (
     Skill(
         name="google_workspace",
         label="表單與試算表",
-        keywords=("google 表單", "google表單", "表單", "問卷", "回饋單", "意願調查", "統計表", "報名表單"),
+        keywords=(
+            "google 表單", "google表單", "表單", "問卷", "回饋單", "回饋", "意願調查",
+            "意見調查", "統計表", "報名表單", "調查表",
+        ),
         tools=("search_previous_examples", "create_google_form", "create_spreadsheet"),
         task_type="documents",
         artifacts_expected=("form",),
         playbook_hints=("表單設計",),
+        # 「問卷」「表單」講的是**要產出什麼**，比「社課」「茶會」這種
+        # 只說明主題的活動名詞更能決定路由。權重反映這個差別 ——
+        # 否則「社課回饋問卷」會被歸成活動籌備，拿不到表單工具。
+        weight=1.25,
         extra_guidance="問卷一定要有開放題，而且要問「怎麼知道我們的」——那題直接決定招生管道成效。",
     ),
     Skill(
