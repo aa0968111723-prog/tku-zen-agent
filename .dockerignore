@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.pytest_cache/
+
+# 金鑰與本機狀態絕對不能進映像檔
+.env
+data/*.sqlite3
+data/google_credentials.json
+data/google_token.json
+
+# 產出檔與私人語料
+outputs/
+knowledge/語料/
+
+tests/
+docs/
+*.md
+!README.md

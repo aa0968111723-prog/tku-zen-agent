@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,6 +22,76 @@ from . import config
 
 class LLMError(RuntimeError):
     pass
+
+
+# ── 模型路由 ─────────────────────────────────────────────────
+# 不同階段對模型的要求不一樣：分類/改寫要快，長文與工具呼叫要穩。
+# 使用者在介面上選的模型永遠優先（override），這裡只是沒指定時的預設。
+MODEL_ROUTES: dict[str, str] = {
+    "classify": "meta/llama-3.1-8b-instruct",   # 短、量大、要求低
+    "execute": "",                              # 空 = 用 config.NVIDIA_MODEL
+    "longform": "",
+}
+
+
+def route_model(task: str = "execute") -> str:
+    """依任務類型挑模型。沒設定就退回使用者的主力模型。"""
+    return (MODEL_ROUTES.get(task) or config.NVIDIA_MODEL).strip()
+
+
+# ── 連線池 ───────────────────────────────────────────────────
+# 原本每次呼叫都 `async with httpx.AsyncClient()`，等於每一輪工具呼叫
+# 都重新做一次 TCP + TLS 握手。改成共用一個 client。
+_client: httpx.AsyncClient | None = None
+_client_lock = asyncio.Lock()
+
+_telemetry: dict[str, Any] = {
+    "requests": 0,
+    "retries": 0,
+    "failures": 0,
+    "timeouts": 0,
+    "total_seconds": 0.0,
+    "by_model": {},
+}
+
+
+async def get_http_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        async with _client_lock:
+            if _client is None or _client.is_closed:
+                _client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(180.0, connect=15.0),
+                    limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
+                    headers={"Accept": "application/json", "Content-Type": "application/json"},
+                )
+    return _client
+
+
+async def close_http_client() -> None:
+    global _client
+    if _client is not None and not _client.is_closed:
+        await _client.aclose()
+    _client = None
+
+
+def pool_stats() -> dict[str, Any]:
+    n = _telemetry["requests"] or 1
+    return {
+        "requests": _telemetry["requests"],
+        "retries": _telemetry["retries"],
+        "failures": _telemetry["failures"],
+        "timeouts": _telemetry["timeouts"],
+        "avg_seconds": round(_telemetry["total_seconds"] / n, 2),
+        "by_model": _telemetry["by_model"],
+        "pool_open": _client is not None and not _client.is_closed,
+    }
+
+
+def reset_telemetry() -> None:
+    _telemetry.update(
+        {"requests": 0, "retries": 0, "failures": 0, "timeouts": 0, "total_seconds": 0.0, "by_model": {}}
+    )
 
 
 @dataclass
@@ -159,19 +230,20 @@ class NvidiaClient:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
+        model_name = str(payload["model"])
+        _telemetry["requests"] += 1
+        _telemetry["by_model"][model_name] = _telemetry["by_model"].get(model_name, 0) + 1
+        started = time.perf_counter()
+
         last_error: Exception | None = None
         for attempt in range(max_retries):
             try:
-                async with httpx.AsyncClient(timeout=180.0) as client:
-                    resp = await client.post(
-                        f"{self.base_url}/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {self.api_key}",
-                            "Content-Type": "application/json",
-                            "Accept": "application/json",
-                        },
-                        json=payload,
-                    )
+                client = await get_http_client()
+                resp = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json=payload,
+                )
                 if resp.status_code == 401:
                     raise LLMError("NVIDIA API 金鑰被拒（401）。請確認 .env 裡的 NVIDIA_API_KEY 正確且未過期。")
                 if resp.status_code == 404:
@@ -183,15 +255,22 @@ class NvidiaClient:
                     raise httpx.HTTPStatusError("retryable", request=resp.request, response=resp)
                 if resp.status_code >= 400:
                     raise LLMError(f"NVIDIA API 回應 {resp.status_code}：{resp.text[:500]}")
+                _telemetry["total_seconds"] += time.perf_counter() - started
                 return self._parse(resp.json(), valid_names={t["function"]["name"] for t in (tools or [])})
             except LLMError:
+                _telemetry["failures"] += 1
                 raise
             except (httpx.HTTPStatusError, httpx.TransportError, httpx.TimeoutException) as exc:
                 last_error = exc
+                if isinstance(exc, httpx.TimeoutException):
+                    _telemetry["timeouts"] += 1
                 if attempt == max_retries - 1:
                     break
+                _telemetry["retries"] += 1
                 await asyncio.sleep(2**attempt)
 
+        _telemetry["failures"] += 1
+        _telemetry["total_seconds"] += time.perf_counter() - started
         raise LLMError(
             "連續呼叫 NVIDIA API 失敗（可能是免費額度用完、達到每分鐘 40 次上限，或網路問題）。"
             f"最後一次錯誤：{last_error}"

@@ -9,12 +9,26 @@
 </head>
 <body>
 
+<!-- 部署模式：需要存取碼 -->
+<div id="gate" class="gate" hidden>
+  <form class="gate-card" id="gate-form">
+    <span class="mark" aria-hidden="true"></span>
+    <h1>淡江大學領袖禪學社</h1>
+    <p>這是社團幹部專用的 AI 代理，請輸入存取碼。</p>
+    <input type="password" id="gate-token" placeholder="存取碼" autocomplete="current-password" required>
+    <button type="submit">進入</button>
+    <p class="gate-error" id="gate-error" hidden></p>
+  </form>
+</div>
+
+<div id="app" hidden>
+
 <header class="topbar">
   <div class="brand">
     <span class="mark" aria-hidden="true"></span>
     <div class="brand-text">
       <strong>淡江大學領袖禪學社</strong>
-      <span>專屬 AI 代理</span>
+      <span id="term-label">專屬 AI 代理</span>
     </div>
   </div>
 
@@ -31,6 +45,7 @@
       <span>模型</span>
       <select id="model"></select>
     </label>
+    <button id="term-btn" class="ghost" type="button" title="設定本學期的社長、社課時間等資料">本學期設定</button>
     <button id="reset" class="ghost" type="button" title="清空對話重新開始">新對話</button>
   </div>
 </header>
@@ -41,18 +56,18 @@
   <section class="welcome" id="welcome">
     <h1>今天要做什麼？</h1>
     <p class="lede">
-      我讀得到社團知識庫，也能直接把成品做出來 —— 試算表、企劃書、簡報、Google 表單。
-      說一句就好，不用給格式。
+      我讀得到社團知識庫、八份任務劇本，還有 108–115 學年度的歷年檔案。
+      說一句就好，我會直接把檔案做出來。
     </p>
     <div class="chips" id="chips">
-      <button type="button" data-prompt="幫我做一份 115 學年度上學期的社課排程表，18 週，每週一個主題，欄位要有週次、日期、主題、帶課者、需要準備的器材、備註。日期先留空給我自己填。">社課排程表</button>
-      <button type="button" data-prompt="幫我想這學期的招生策略，然後做成一份招生企劃書。要包含目標人數、招生管道、時程、分工、預算項目，還有實際可以用的文案範例。">招生企劃書</button>
+      <button type="button" data-prompt="幫我做一份 115 學年度上學期的社課排程表，18 週，欄位要有週次、日期、主題、帶課者、需要準備的器材、備註。">社課排程表</button>
+      <button type="button" data-prompt="幫我做這學期的招生企劃，要包含目標人數、招生管道、時程、分工、預算，還有可以直接用的文案範例。">招生企劃書</button>
       <button type="button" data-prompt="做一份新生報名表的 Google 表單，要收基本資料、系級、怎麼知道我們社團的、有沒有靜坐經驗、想從社團得到什麼。">新生報名表</button>
-      <button type="button" data-prompt="幫我做一份期初茶會的流程表跟工作分配表，兩個工作表放同一個檔案。">期初茶會流程</button>
-      <button type="button" data-prompt="做一份社團經費預算表，涵蓋整個學年度，收入跟支出分開，支出要分社課、營隊、文宣、器材、雜支，最後要有小計跟結餘的公式。">經費預算表</button>
-      <button type="button" data-prompt="幫我寫三則招生用的 IG 貼文，語氣要生活化、貼近大學生，每則都要有 hashtag，做成一份文件。">IG 招生貼文</button>
-      <button type="button" data-prompt="做一份幹部交接手冊，說明每個職位在做什麼、一年的工作節奏、交接要交什麼東西。">幹部交接手冊</button>
-      <button type="button" data-prompt="做一份社課回饋問卷的 Google 表單，要能問出社員覺得哪裡有收穫、哪裡想調整。">社課回饋問卷</button>
+      <button type="button" data-prompt="幫我做期初茶會的企劃書跟活動細流。">期初茶會</button>
+      <button type="button" data-prompt="做一份社團經費預算表，收入跟支出分開，支出分社課、營隊、文宣、器材、雜支，小計跟結餘要用公式。">經費預算表</button>
+      <button type="button" data-prompt="幫我寫三則招生用的 IG 貼文，語氣要生活化、貼近大學生，每則都要有 hashtag。">IG 招生貼文</button>
+      <button type="button" data-prompt="幫我做幹部交接手冊，說明每個職位在做什麼、一年的工作節奏、交接要交什麼東西。">幹部交接手冊</button>
+      <button type="button" data-prompt="幫我做這學年度的社團評鑑年度績效報告。">社團評鑑報告</button>
     </div>
   </section>
 </main>
@@ -66,6 +81,29 @@
   </div>
   <p class="hint" id="hint"></p>
 </footer>
+
+</div>
+
+<!-- 本學期設定 -->
+<div id="term-modal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="term-title">
+    <header class="modal-head">
+      <h2 id="term-title">本學期設定</h2>
+      <button class="icon-btn" id="term-close" type="button" aria-label="關閉">×</button>
+    </header>
+    <p class="modal-lede">
+      這裡是<strong>今年事實的唯一來源</strong>。留空代表「還沒確認」——
+      代理會直接說不知道，並在產出的檔案裡填「待填」，不會拿歷年資料頂替。
+      寧可留空，不要填錯。
+    </p>
+    <form id="term-form" class="term-form"></form>
+    <footer class="modal-foot">
+      <span id="term-status" class="term-status"></span>
+      <button class="ghost" id="term-cancel" type="button">取消</button>
+      <button class="primary" id="term-save" type="button">儲存</button>
+    </footer>
+  </div>
+</div>
 
 <script src="/static/app.js"></script>
 </body>

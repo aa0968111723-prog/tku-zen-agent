@@ -1,0 +1,255 @@
+"""Skill 定義與路由。
+
+目的：未來可以有 50+ 個工具，但每次請求只把相關的少數幾個交給模型。
+開源模型的工具選擇正確率會隨工具數量明顯下降，而且每個 schema 都要
+佔輸入 token —— 全部塞給它既慢又不準。
+
+路由刻意用規則而不是再叫一次模型：
+  · 確定性，同樣輸入永遠同樣結果，測得起來
+  · 不花額度、不增加延遲
+  · 分類錯的成本很低（每個 skill 的工具集都是超集合）
+
+關鍵字分三層，因為它們在句子裡扮演的角色不同：
+
+  deliverables —— **要產出什麼**（預算、報名表、文宣、細流、績效報告）
+                  這一層決定路由。「挑戰營的預算」要的是預算表，不是營隊企劃。
+  keywords     —— **關於什麼**（茶會、社課、挑戰營、期初）
+  weak         —— 泛用名詞（活動、企劃、流程），幾乎每種任務都會出現，
+                  當主要訊號會一直誤判
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+# 每個 skill 都會有的基本工具
+BASE_TOOLS = ("search_knowledge", "get_current_term")
+
+W_DELIVERABLE = 2.5     # 平權重，不吃長度加成 —— 「預算」跟「績效報告」一樣關鍵
+W_TOPIC_BASE = 1.0
+W_TOPIC_LEN = 0.35      # 長的主題詞更有鑑別力（「挑戰營」比「活動」精確）
+W_WEAK = 0.4
+
+
+@dataclass(frozen=True)
+class Skill:
+    name: str
+    label: str
+    deliverables: tuple[str, ...]
+    keywords: tuple[str, ...]
+    tools: tuple[str, ...]
+    task_type: str
+    weak: tuple[str, ...] = ()
+    artifacts_expected: tuple[str, ...] = ()
+    required_facts: tuple[str, ...] = ()
+    playbook_hints: tuple[str, ...] = ()
+    extra_guidance: str = ""
+
+    def tool_names(self) -> tuple[str, ...]:
+        seen: list[str] = []
+        for t in BASE_TOOLS + self.tools:
+            if t not in seen:
+                seen.append(t)
+        return tuple(seen)
+
+    def all_terms(self) -> tuple[str, ...]:
+        return self.deliverables + self.keywords + self.weak
+
+
+SKILLS: tuple[Skill, ...] = (
+    Skill(
+        name="event_planning",
+        label="活動籌備",
+        deliverables=("細流", "流程表", "教案", "主持稿", "行前通知", "分工表"),
+        keywords=(
+            "茶會", "演講", "社課", "挑戰營", "禪訓營", "營隊", "社大", "社遊",
+            "期初", "期中", "期末", "破冰", "場佈", "籌備", "行前", "凝聚",
+        ),
+        weak=("活動", "企劃", "企畫", "流程"),
+        tools=("search_previous_examples", "create_document", "create_spreadsheet", "create_slides"),
+        task_type="event_planning",
+        artifacts_expected=("document",),
+        required_facts=("academic_year", "semester"),
+        playbook_hints=("社課排程與籌備", "營隊籌備"),
+        extra_guidance="活動類產出通常要「企劃書（文件）＋細流（試算表）」成對，不要只給一半。",
+    ),
+    Skill(
+        name="recruitment",
+        label="招生",
+        deliverables=("招生", "路宣", "個接", "接引", "文宣", "貼文", "限動", "招新", "班宣", "海報"),
+        keywords=("新生", "入社", "ig", "instagram", "臉書", "社群", "宣傳", "擺攤"),
+        weak=("fb",),
+        tools=(
+            "search_previous_examples", "create_document", "create_spreadsheet", "create_google_form",
+        ),
+        task_type="recruitment",
+        artifacts_expected=("document",),
+        required_facts=("academic_year", "semester", "recruitment_period"),
+        playbook_hints=("招生企劃", "文宣與社群貼文"),
+        extra_guidance=(
+            "對外文案一定要先查〈文宣與社群貼文〉劇本的語氣規範。"
+            "不可以寫療效宣稱，不可以寫成宗教招募。"
+        ),
+    ),
+    Skill(
+        name="evaluation",
+        label="社團評鑑",
+        deliverables=("評鑑", "社評", "績效", "成果報告", "成果", "年度報告", "自我評估"),
+        keywords=("課外組", "章程", "會議紀錄", "社員大會", "行事曆"),
+        tools=("search_previous_examples", "create_document", "create_spreadsheet"),
+        task_type="evaluation",
+        artifacts_expected=("document", "spreadsheet"),
+        required_facts=("academic_year",),
+        playbook_hints=("社團評鑑",),
+        extra_guidance="這是交給學校的正式文件，人數、日期、姓名一律不可編造，沒有就填「待填」。",
+    ),
+    Skill(
+        name="finance",
+        label="經費",
+        deliverables=("預算", "經費", "核銷", "收支", "財務", "記帳", "報帳", "結餘"),
+        keywords=("社費", "發票", "採買", "領據"),
+        tools=("search_previous_examples", "create_spreadsheet", "create_document"),
+        task_type="finance",
+        artifacts_expected=("spreadsheet",),
+        required_facts=("academic_year", "semester"),
+        playbook_hints=("經費預算",),
+        extra_guidance="金額欄位要用公式（=SUM 之類），不要手算後填死數字。",
+    ),
+    Skill(
+        name="handover",
+        label="幹部交接",
+        deliverables=("交接", "傳承", "幹部手冊", "職掌", "新任"),
+        keywords=("幹部訓練", "組輔", "家族長", "新幹部", "幹部"),
+        tools=("search_previous_examples", "create_document", "create_spreadsheet"),
+        task_type="handover",
+        artifacts_expected=("document",),
+        playbook_hints=("幹部交接",),
+        extra_guidance="這是對內文件，可以完整使用社團語彙，不用像對外文宣那樣淡化禪法脈絡。",
+    ),
+    Skill(
+        name="google_workspace",
+        label="表單與問卷",
+        deliverables=("google 表單", "google表單", "表單", "問卷", "回饋單", "報名表", "意願調查", "意見調查", "調查表"),
+        keywords=("回饋", "統計表"),
+        tools=("search_previous_examples", "create_google_form", "create_spreadsheet"),
+        task_type="documents",
+        artifacts_expected=("form",),
+        playbook_hints=("表單設計",),
+        extra_guidance="問卷一定要有開放題，而且要問「怎麼知道我們的」——那題直接決定招生管道成效。",
+    ),
+    Skill(
+        name="documents",
+        label="一般文件",
+        deliverables=(),
+        keywords=("簡報", "投影片", "ppt", "邀請函", "公文"),
+        weak=("文件", "報告", "word", "excel", "表格", "清單", "排程"),
+        tools=("search_previous_examples", "create_document", "create_spreadsheet", "create_slides"),
+        task_type="documents",
+        artifacts_expected=("document",),
+    ),
+    Skill(
+        name="knowledge",
+        label="查詢",
+        deliverables=(),
+        keywords=("十二項特質", "印心", "禪法", "宗旨", "精神", "社長", "社費", "沿革", "創社"),
+        weak=("介紹", "說明", "解釋"),
+        tools=("search_previous_examples",),
+        task_type="knowledge",
+        artifacts_expected=(),
+    ),
+)
+
+SKILL_BY_NAME = {s.name: s for s in SKILLS}
+DEFAULT_SKILL = SKILL_BY_NAME["documents"]
+KNOWLEDGE_SKILL = SKILL_BY_NAME["knowledge"]
+
+# 明確要求「做出檔案」
+_MAKE_VERBS = re.compile(
+    r"(幫我(做|寫|生|建|列|排|規劃|整理|產)|做一?[份個張]|產出|產生|生成|建立|寫一?[份篇]|"
+    r"排一?[份張]|列一?[份張]|給我一?[份張個]|做成|輸出|匯出|來一?[份張]|更新一?[份張])"
+)
+
+# 問「今年的某個具體事實」—— 這種只要一句話回答，不該產檔
+_FACT_LOOKUP = re.compile(
+    r"(社長是誰|誰是社長|社費(多少|是多少|幾錢)?|多少錢|禮拜幾|星期幾|幾點|"
+    r"在哪(裡|間|邊)?|哪間教室|報名連結|報名網址|怎麼報名|地點在)"
+)
+
+# 問「我們是什麼樣的社團」—— 認識性問題，答案在知識庫，不用產檔
+_IDENTITY_QUESTION = re.compile(
+    r"(是什麼|什麼樣的|是不是|為什麼|介紹一下|通常怎麼|有哪些活動|在做什麼|做些什麼|怎麼回)"
+)
+
+
+def _score(message: str, skill: Skill) -> float:
+    low = message.lower()
+    total = 0.0
+    for kw in skill.deliverables:
+        if kw.lower() in low:
+            total += W_DELIVERABLE
+    for kw in skill.keywords:
+        if kw.lower() in low:
+            total += W_TOPIC_BASE + W_TOPIC_LEN * max(0, len(kw) - 2)
+    for kw in skill.weak:
+        if kw.lower() in low:
+            total += W_WEAK
+    return total
+
+
+def wants_artifact(message: str) -> bool:
+    return bool(_MAKE_VERBS.search(message))
+
+
+def is_lookup(message: str) -> bool:
+    """只是要一句話答案，不是要檔案。"""
+    if wants_artifact(message):
+        return False
+    return bool(_FACT_LOOKUP.search(message) or _IDENTITY_QUESTION.search(message))
+
+
+@dataclass
+class Routing:
+    skill: Skill
+    score: float
+    runner_up: str = ""
+    produce_artifact: bool = True
+    scores: dict[str, float] = field(default_factory=dict)
+
+
+def route(message: str) -> Routing:
+    """把使用者輸入分到一個 skill，決定這一輪要暴露哪些工具。"""
+    scores = {s.name: _score(message, s) for s in SKILLS}
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+
+    # 純查詢：路由到 knowledge，連產檔工具都不暴露。
+    # 這比「路由到領域 skill 但標記不產檔」更保險 —— 模型看不到 create_*
+    # 就不可能手滑生出一個沒人要的檔案。
+    if is_lookup(message):
+        return Routing(skill=KNOWLEDGE_SKILL, score=scores["knowledge"], produce_artifact=False, scores=scores)
+
+    best_name, best_score = ranked[0]
+    produce = wants_artifact(message)
+
+    if best_score <= 0:
+        skill = DEFAULT_SKILL if produce else KNOWLEDGE_SKILL
+        return Routing(skill=skill, score=0.0, produce_artifact=produce, scores=scores)
+
+    skill = SKILL_BY_NAME[best_name]
+
+    # 命中查詢技能，但語句明顯要產出東西 → 換成能產檔的技能
+    if skill.name == "knowledge" and produce:
+        for name, sc in ranked[1:]:
+            if sc > 0 and SKILL_BY_NAME[name].artifacts_expected:
+                skill = SKILL_BY_NAME[name]
+                break
+        else:
+            skill = DEFAULT_SKILL
+
+    return Routing(
+        skill=skill,
+        score=best_score,
+        runner_up=ranked[1][0] if len(ranked) > 1 else "",
+        produce_artifact=produce or bool(skill.artifacts_expected),
+        scores=scores,
+    )

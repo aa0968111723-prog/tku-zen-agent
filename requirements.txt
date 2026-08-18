@@ -2,9 +2,15 @@ fastapi>=0.115
 uvicorn[standard]>=0.32
 httpx>=0.27
 python-dotenv>=1.0
+PyYAML>=6.0
 openpyxl>=3.1
 python-docx>=1.1
 python-pptx>=1.0
+pypdf>=5.0
+
+# 本機語意檢索（LSA）。沒裝也能跑，檢索會自動降級成純 BM25。
+numpy>=1.26
+scipy>=1.11
 
 # 選用：上傳到 Google Drive 才需要（見 README「雲端落點」）
 google-api-python-client>=2.150

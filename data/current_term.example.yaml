@@ -1,0 +1,24 @@
+# 淡江大學領袖禪學社 —— 本學期真實資料
+#
+# 這個檔案是「今年的事實」唯一來源。代理只會從這裡拿當期資訊，
+# 查不到就回答 unknown、在產出裡填「待填」，不會去歷年檔案裡湊一個看起來合理的答案。
+#
+# 留空或維持 unknown 都代表「還沒確認」。寧可留空，不要填錯。
+# 也可以在網頁介面的「本學期設定」直接編輯，不用手改這個檔案。
+
+academic_year: '115'
+semester: 上學期
+club_name: 淡江大學領袖禪學社
+
+# ── 以下都還沒確認，請填上再用 ────────────────────────────────
+# 沒填的欄位代理會回答「還沒設定」，並在產出檔案裡填「待填」。
+president: ''
+officers: []
+regular_meeting_time: ''
+regular_meeting_location: ''
+club_fee: ''
+recruitment_period: ''
+signup_url: ''
+primary_drive_folder: 1H-GuCfVw51D5_ipAoivjboabhb7iaKt6
+
+source_note: 尚未由本學期幹部確認。
