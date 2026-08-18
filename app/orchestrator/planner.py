@@ -74,7 +74,7 @@ def build_retrieval_queries(message: str, routing: Routing) -> list[str]:
     queries.extend(routing.skill.playbook_hints)
 
     # 3. 命中的關鍵字組合（拉出活動名稱這類專有詞）
-    hits = [kw for kw in routing.skill.keywords if kw.lower() in message.lower()]
+    hits = [kw for kw in routing.skill.all_terms() if kw.lower() in message.lower()]
     if hits:
         queries.append(" ".join(hits[:4]))
 
