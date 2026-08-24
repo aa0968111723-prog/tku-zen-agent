@@ -746,10 +746,10 @@ async def _run(
 
 # ── 輔助 ─────────────────────────────────────────────────────
 
-def _client(model: str | None, *, has_images: bool = False):
-    from ..llm import route_model, route_vision_model
+def _client(model: str | None):
+    from ..llm import route_model
 
-    return NvidiaClient(model=model or (route_vision_model() if has_images else route_model("execute")))
+    return NvidiaClient(model=model or route_model("execute"))
 
 
 def _tool_detail(name: str, result: dict[str, Any]) -> str:
