@@ -225,7 +225,10 @@ async def test_state_is_saved_for_resume(tmp_output_dir, monkeypatch, ctx, tmp_d
 
     state = memory.load_state(tmp_db, pid)
     assert state is not None
-    assert state.completion_status == "completed"
+    # 模型只回了「好」、沒真的產檔 → 誠實標 blocked（不得假完成），
+    # 狀態仍完整保存、可用「繼續」續跑（稽核不可靠 #11）。
+    assert state.completion_status == "blocked"
+    assert any(s.status == "failed" and s.kind == "artifact" for s in state.plan_steps)
     assert state.selected_skill == "event_planning"
 
 

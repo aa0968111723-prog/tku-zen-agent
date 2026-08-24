@@ -61,6 +61,32 @@ _CSP = (
 _STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
 
 
+def client_ip(request: Request) -> str:
+    """取真實客戶端 IP。
+
+    反向代理（Zeabur）之後 request.client.host 是代理位址，全站共用一個
+    限流桶（稽核不可靠 #7）。只有在直連端是私有／loopback 位址時才信
+    X-Forwarded-For 的第一個 hop——公網直連的 XFF 可以偽造，不能信。
+    """
+    direct = request.client.host if request.client else "unknown"
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff and _is_private_ip(direct):
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    return direct
+
+
+def _is_private_ip(ip: str) -> bool:
+    try:
+        import ipaddress
+
+        parsed = ipaddress.ip_address(ip)
+        return parsed.is_private or parsed.is_loopback
+    except ValueError:
+        return False
+
+
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     # CSRF 縱深防禦：瀏覽器跨站請求一定帶 Origin，比對不上就擋。
@@ -77,7 +103,7 @@ async def security_middleware(request: Request, call_next):
 
     # 一般 API 限流（每 IP）。/api/chat 另有更嚴的每人限流。
     if request.url.path.startswith("/api/"):
-        ip = request.client.host if request.client else "unknown"
+        ip = client_ip(request)
         ok, retry_after = ratelimit.allow(
             f"api:{ip}", config.API_RATE_LIMIT, config.API_RATE_WINDOW
         )
@@ -244,6 +270,14 @@ def current_user(request: Request, response: Response) -> str:
 
 @app.post("/api/auth")
 async def login(req: LoginRequest, request: Request, response: Response) -> dict[str, bool]:
+    # 授權碼嘗試有專屬節流：全站共用 240/60s 等於允許每分鐘 240 次
+    # 暴力猜測（稽核不可靠 #6）。這裡限到每 IP 10 次/分鐘。
+    ok, retry_after = ratelimit.allow(f"auth:{client_ip(request)}", 10, 60.0)
+    if not ok:
+        raise HTTPException(
+            status_code=429, detail="嘗試次數過多，請稍後再試",
+            headers={"Retry-After": str(retry_after)},
+        )
     try:
         auth.login(request, response, req.token)
     except HTTPException as exc:
@@ -652,7 +686,9 @@ async def task_status(project_id: str, user_id: str = Depends(current_user)) -> 
     return _task_payload(project_id, state)
 
 
-async def _control_task(project_id: str, action: str, user_id: str) -> dict[str, Any]:
+async def _control_task(
+    project_id: str, action: str, user_id: str, step_id: str | None = None,
+) -> dict[str, Any]:
     store, state = _task_state(user_id, project_id)
     if action == "pause":
         if state.workflow_status in {WorkflowStatus.COMPLETED, WorkflowStatus.CANCELLED}:
@@ -666,10 +702,16 @@ async def _control_task(project_id: str, action: str, user_id: str) -> dict[str,
         state.completion_status = "in_progress"
         state.next_action = state.next_step().description if state.next_step() else ""
     elif action == "retry":
-        count = state.reset_failed_steps()
-        if not count:
-            raise HTTPException(status_code=409, detail="目前沒有可重試的失敗步驟")
-        state.next_action = "只重試失敗步驟"
+        if step_id:
+            # 單步重試（規格九）：只恢復指定的失敗步驟
+            if not state.reset_step(step_id):
+                raise HTTPException(status_code=409, detail="這個步驟不是失敗狀態，無法單獨重試")
+            state.next_action = "只重試這個步驟"
+        else:
+            count = state.reset_failed_steps()
+            if not count:
+                raise HTTPException(status_code=409, detail="目前沒有可重試的失敗步驟")
+            state.next_action = "只重試失敗步驟"
     elif action == "cancel":
         if state.workflow_status == WorkflowStatus.COMPLETED:
             raise HTTPException(status_code=409, detail="已完成的任務不能取消")
@@ -693,9 +735,15 @@ async def resume_task(project_id: str, user_id: str = Depends(current_user)) -> 
     return await _control_task(project_id, "resume", user_id)
 
 
+class RetryTaskRequest(BaseModel):
+    step_id: str | None = None
+
+
 @general_router.post("/tasks/{project_id}/retry")
-async def retry_task(project_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
-    return await _control_task(project_id, "retry", user_id)
+async def retry_task(
+    project_id: str, req: RetryTaskRequest | None = None, user_id: str = Depends(current_user),
+) -> dict[str, Any]:
+    return await _control_task(project_id, "retry", user_id, step_id=(req.step_id if req else None))
 
 
 @general_router.post("/tasks/{project_id}/cancel")
@@ -757,6 +805,10 @@ class _TurnRegistry:
 
 
 TURNS = _TurnRegistry()
+
+
+# 等模型超過這個秒數就送一行 SSE 註解當心跳，避免中間代理判定閒置斷線
+SSE_HEARTBEAT_SECONDS = 15.0
 
 
 def _sse(payload: dict[str, Any]) -> str:
@@ -824,29 +876,48 @@ async def chat(req: ChatRequest, user_id: str = Depends(current_user)) -> Stream
         # 讓每一輪結尾都多出一個假的「系統忙碌中」錯誤事件。
         # 同一時間只有一個 __anext__ 在跑，共用 Context 是安全的。
         stream_ctx = contextvars.copy_context()
+        next_event: asyncio.Task | None = None
+
+        async def _teardown() -> None:
+            """把還在跑的 orchestrator 收乾淨，最後才釋放 session 鎖。
+
+            這個順序就是修復稽核不可靠 #1 的關鍵：鎖必須等舊輪真的停了
+            才能釋放，否則舊輪會在背景繼續呼叫模型並與新輪交錯寫入。
+            aclose 也要在 stream_ctx 裡跑，收尾的 contextvar reset 才對得上。
+            """
+            if next_event is not None and not next_event.done():
+                next_event.cancel()
+                with contextlib.suppress(BaseException):
+                    await next_event
+            with contextlib.suppress(BaseException):
+                await asyncio.create_task(agen.aclose(), context=stream_ctx)
+            TURNS.finish(session_id)
+
         try:
             while True:
                 next_event = asyncio.create_task(agen.__anext__(), context=stream_ctx)
-                done, _pending = await asyncio.wait(
-                    {next_event, cancel_wait}, return_when=asyncio.FIRST_COMPLETED
-                )
+                while True:
+                    done, _pending = await asyncio.wait(
+                        {next_event, cancel_wait},
+                        return_when=asyncio.FIRST_COMPLETED,
+                        timeout=SSE_HEARTBEAT_SECONDS,
+                    )
+                    if done:
+                        break
+                    # 長時間等模型時送 SSE 註解行當心跳，避免中間代理斷線
+                    yield ": ping\n\n"
                 if cancel_wait in done and next_event not in done:
                     # 使用者按了停止：中斷正在等的模型呼叫、關閉產生器
-                    next_event.cancel()
-                    with contextlib.suppress(BaseException):
-                        await next_event
-                    with contextlib.suppress(BaseException):
-                        await agen.aclose()
                     yield _sse({"type": "cancelled", "text": "已停止生成"})
                     break
                 try:
                     event = next_event.result()
                 except StopAsyncIteration:
+                    next_event = None
                     break
+                next_event = None
                 yield _sse(event)
                 if cancel_event.is_set():
-                    with contextlib.suppress(BaseException):
-                        await agen.aclose()
                     yield _sse({"type": "cancelled", "text": "已停止生成"})
                     break
         except Exception:
@@ -854,9 +925,11 @@ async def chat(req: ChatRequest, user_id: str = Depends(current_user)) -> Stream
             yield _sse({"type": "error", "text": "系統忙碌中，請稍後再試"})
         finally:
             cancel_wait.cancel()
+            # 客戶端斷線時本 task 已被取消：用 shield 讓收尾在背景完成，
+            # orchestrator 一定會被關閉、鎖一定會被釋放（且不會提前釋放）。
+            cleanup = asyncio.ensure_future(_teardown())
             with contextlib.suppress(BaseException):
-                await agen.aclose()
-            TURNS.finish(session_id)
+                await asyncio.shield(cleanup)
         yield 'data: {"type": "done"}\n\n'
 
     return StreamingResponse(

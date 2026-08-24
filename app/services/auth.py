@@ -77,11 +77,20 @@ def check_admin_token(token: str | None) -> bool:
     return hmac.compare_digest(token.strip(), expected)
 
 
-def _request_dimensions(request: Request, cookie_name: str) -> tuple[tuple[str, str], tuple[str, str]]:
+def _request_dimensions(request: Request, cookie_name: str) -> tuple[tuple[str, str], ...]:
+    """鎖定計數的維度。
+
+    沒帶 cookie 的請求**不能**共用一個 "anonymous" 桶——那會讓任何人
+    連錯 5 次就把全部新使用者鎖 15 分鐘（稽核不可靠 #30 的 DoS）。
+    無 cookie 時只用 IP 維度。
+    """
     ip = request.client.host if request.client else "unknown"
     raw_cookie = request.cookies.get(cookie_name, "")
-    cookie_key = hashlib.sha256(raw_cookie.encode("utf-8")).hexdigest() if raw_cookie else "anonymous"
-    return ("ip", f"{cookie_name}:{ip}"), ("cookie", f"{cookie_name}:{cookie_key}")
+    dims: list[tuple[str, str]] = [("ip", f"{cookie_name}:{ip}")]
+    if raw_cookie:
+        cookie_key = hashlib.sha256(raw_cookie.encode("utf-8")).hexdigest()
+        dims.append(("cookie", f"{cookie_name}:{cookie_key}"))
+    return tuple(dims)
 
 
 def _check_locked(request: Request, cookie_name: str) -> None:

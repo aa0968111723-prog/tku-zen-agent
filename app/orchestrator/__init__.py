@@ -116,10 +116,18 @@ def _step_index_for_tool(state: OrchestrationState, name: str) -> int | None:
         wanted = ("artifact", "建立", "產出")
     else:
         return None
+    # kind 精確比對優先——「建立文件」(artifact) 與「建立或更新活動資料」
+    # (activity) 的描述都含「建立」，關鍵字先比會讓文件工具誤配到活動步驟，
+    # 文件步驟就永遠停在 failed（稽核不可靠 #14）。
     for i, step in enumerate(state.plan_steps):
         if step.status in {"completed", "skipped"}:
             continue
-        if step.kind in wanted or any(word in step.description for word in wanted[1:]):
+        if step.kind in wanted:
+            return i
+    for i, step in enumerate(state.plan_steps):
+        if step.status in {"completed", "skipped"}:
+            continue
+        if any(word in step.description for word in wanted[1:]):
             return i
     return None
 
@@ -253,6 +261,7 @@ async def _run(
     previous = memory_service.load_state(store, existing_project_id) if existing_project_id else None
     command = _control_command(user_message)
     restart = bool(previous and re.search(r"取消.*重新執行|重新執行(?:這個|上一個)?任務", user_message))
+    resumed_by_command = False
     if command and existing_project_id and previous and not (
         command == "resume" and previous.workflow_status == WorkflowStatus.COMPLETED
     ):
@@ -263,19 +272,25 @@ async def _run(
             yield {"type": "task_paused", "summary": previous.public_summary()}
             return
         if command == "resume":
+            # 「繼續」＝立刻接著跑，不是只把狀態翻成 in_progress 然後
+            # 要使用者再說一次「接續剛才」（稽核不可靠 #9：系統教的
+            # 續跑句會被自己吞掉，任務永遠不會真的繼續）。
             previous.workflow_status = WorkflowStatus.IN_PROGRESS
             previous.completion_status = "in_progress"
             previous.next_action = previous.next_step().description if previous.next_step() else ""
             memory_service.save_state(store, existing_project_id, previous)
             yield {"type": "task_resumed", "summary": previous.public_summary()}
-            return
-        if command == "retry":
+            resumed_by_command = True
+            # 不 return——往下走 continue_previous 真的把任務跑下去
+        elif command == "retry":
             count = previous.reset_failed_steps()
-            if count:
-                previous.next_action = "只重試失敗步驟；請說「接續剛才」開始"
             memory_service.save_state(store, existing_project_id, previous)
             yield {"type": "task_retry_ready", "reset_steps": count, "summary": previous.public_summary()}
-            return
+            if not count:
+                yield {"type": "message", "text": "目前沒有失敗的步驟需要重試。"}
+                return
+            resumed_by_command = True
+            # 不 return——直接重跑失敗步驟
         if command == "cancel":
             previous.workflow_status = WorkflowStatus.CANCELLED
             previous.completion_status = "failed"
@@ -290,7 +305,7 @@ async def _run(
         previous.next_action = "重新執行既有任務"
         memory_service.save_state(store, existing_project_id, previous)
         state, routing = planner.continue_previous(user_message, previous)
-    elif previous and planner.is_continuation_only(user_message):
+    elif previous and (resumed_by_command or planner.is_continuation_only(user_message)):
         state, routing = planner.continue_previous(user_message, previous)
     else:
         state, routing = planner.understand(user_message, previous=previous, requested=requested)
@@ -935,6 +950,15 @@ async def _run(
             state.fail_step(verify_index, "來源驗證未通過", code="answer_verification_failed")
         state.workflow_status = WorkflowStatus.BLOCKED
         state.next_action = "提供研究對象的官方來源，或改用淡江內部分析"
+    elif state.artifacts_expected and not state.artifacts_produced:
+        # 說好要產檔卻一個都沒產出：completed 不能亮起來（稽核不可靠 #11
+        # ——模型直接回文字也全綠）。產檔步驟標失敗，任務停在 blocked。
+        for i, step in enumerate(state.plan_steps):
+            if step.kind == "artifact" and step.status != "completed":
+                state.fail_step(i, "預期的檔案尚未產出", code="artifact_missing")
+        state.workflow_status = WorkflowStatus.BLOCKED
+        state.completion_status = "blocked"
+        state.next_action = "說「繼續」讓我把檔案做出來，或改為只要文字說明"
     else:
         for i in range(1, len(state.plan_steps)):
             state.mark_step(i)

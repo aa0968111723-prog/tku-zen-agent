@@ -22,6 +22,9 @@ from . import config
 
 logger = logging.getLogger(__name__)
 
+# 單次 chat 呼叫（含全部重試與退避）的總時限，秒。
+TOTAL_DEADLINE_SECONDS = 240.0
+
 
 class LLMError(RuntimeError):
     pass
@@ -265,6 +268,9 @@ class NvidiaClient:
         started = time.perf_counter()
 
         last_error: Exception | None = None
+        # 重試不能沒有總時限：180s 逾時 × 4 次 × 退避最壞可掛 12 分鐘，
+        # 前端 watchdog 早就放棄了，伺服器卻還在燒（稽核不可靠 #5）。
+        deadline = started + TOTAL_DEADLINE_SECONDS
         for attempt in range(max_retries):
             try:
                 client = await get_http_client()
@@ -273,12 +279,13 @@ class NvidiaClient:
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     json=payload,
                 )
-                if resp.status_code in {401, 404}:
-                    logger.error("upstream LLM endpoint rejected request: status=%s", resp.status_code)
-                    raise LLMError("模型服務目前無法使用，請稍後再試")
+                # 注意順序：具體診斷（401/404）必須在任何泛化錯誤之前，
+                # 不然金鑰貼錯永遠只看得到「模型服務無法使用」（稽核不可靠 #2）。
                 if resp.status_code == 401:
+                    logger.error("NVIDIA API key rejected (401)")
                     raise LLMError("NVIDIA API 金鑰被拒（401）。請確認 .env 裡的 NVIDIA_API_KEY 正確且未過期。")
                 if resp.status_code == 404:
+                    logger.error("model not found (404): %s", payload["model"])
                     raise LLMError(
                         f"找不到模型 {payload['model']}（404）。"
                         "請到 https://build.nvidia.com/models 確認模型代號，或改用 .env 裡建議的其他模型。"
@@ -292,21 +299,21 @@ class NvidiaClient:
                 return self._parse(resp.json(), valid_names={t["function"]["name"] for t in (tools or [])})
             except LLMError:
                 _telemetry["failures"] += 1
+                _telemetry["total_seconds"] += time.perf_counter() - started
                 raise
             except (httpx.HTTPStatusError, httpx.TransportError, httpx.TimeoutException) as exc:
                 last_error = exc
                 if isinstance(exc, httpx.TimeoutException):
                     _telemetry["timeouts"] += 1
-                if attempt == max_retries - 1:
+                if attempt == max_retries - 1 or time.perf_counter() >= deadline:
                     break
                 _telemetry["retries"] += 1
-                await asyncio.sleep(2**attempt)
+                await asyncio.sleep(min(2**attempt, max(0.0, deadline - time.perf_counter())))
 
         _telemetry["failures"] += 1
         _telemetry["total_seconds"] += time.perf_counter() - started
         raise LLMError(
             "連續呼叫 NVIDIA API 失敗（可能是免費額度用完、達到每分鐘 40 次上限，或網路問題）。"
-            ""
         )
 
     @staticmethod
