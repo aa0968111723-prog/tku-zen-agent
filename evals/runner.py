@@ -138,10 +138,16 @@ async def run_case(case: Case, store: SessionStore, *, live: bool = False) -> Ca
             f"產出意圖判斷錯誤：預期{'要' if want_artifact else '不'}產檔，實際 {state.artifacts_expected}"
         )
 
-    # 2. 檢索相關度
+    # 2. 檢索相關度（帶著和 orchestrator 相同的研究範圍）
     from app import retrieval
+    from app.research.entities import ResearchScope
 
-    bundle = retrieval.build_context(state.retrieval_queries)
+    eval_scope = ResearchScope.from_dict(state.research_scope) if state.research_scope else None
+    if eval_scope is not None and eval_scope.mode.value == "internal" and not eval_scope.internal_only_requested:
+        eval_scope = None
+    bundle = retrieval.build_context(
+        state.retrieval_queries, task_type=state.task_type.value, scope=eval_scope
+    )
     blob = " ".join(h.chunk.source + " " + h.chunk.text[:300] for h in bundle.hits)
     if case.expect_context:
         hit = sum(1 for kw in case.expect_context if kw in blob)

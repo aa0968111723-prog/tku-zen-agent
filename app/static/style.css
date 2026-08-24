@@ -1238,6 +1238,117 @@ select {
   }
 }
 
+/* ── 研究驗證：反問卡／來源卡／污染警示／狀態晶片 ───────── */
+
+.clarify-card, .contamination, .sources-wrap {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 12px 14px;
+  margin-top: 10px;
+}
+.clarify-card { border-left: 3px solid var(--accent); }
+.clarify-card h3, .contamination h3 { font-size: 15px; margin-bottom: 6px; }
+.clarify-q { font-size: 14px; color: var(--ink-2); margin-bottom: 8px; }
+.clarify-q.sub { margin-top: 10px; font-size: 13px; }
+.clarify-options { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.clarify-options button {
+  min-height: var(--tap);
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font-size: 14px;
+  cursor: pointer;
+}
+.clarify-options button:hover { border-color: var(--accent); color: var(--accent); }
+
+.topic-chips, .src-filter { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 4px; }
+.chip {
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 13px;
+  cursor: pointer;
+}
+.chip.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+
+.sources-wrap > summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink-2);
+  font-weight: 600;
+}
+.sources-wrap > summary::-webkit-details-marker { display: none; }
+.source-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  background: var(--surface-2);
+}
+.src-head { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.src-badge {
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  flex-shrink: 0;
+}
+.st-verified { background: var(--ok); }
+.st-partial { background: var(--warn); }
+.st-inferred { background: var(--accent); }
+.st-stale { background: var(--ink-3); }
+.st-conflict { background: var(--err); }
+.research-chip.st-verified, .research-chip.st-partial, .research-chip.st-inferred,
+.research-chip.st-stale, .research-chip.st-conflict {
+  background: transparent;
+}
+.src-title { font-size: 13px; color: var(--ink-2); margin-top: 4px; word-break: break-all; }
+.src-meta { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
+.src-excerpt { margin-top: 6px; }
+.src-excerpt > summary { font-size: 12px; color: var(--accent); cursor: pointer; }
+.src-excerpt .body {
+  font-size: 13px;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  border-left: 2px solid var(--line);
+  padding: 6px 0 6px 10px;
+  margin-top: 4px;
+}
+
+.contamination { border-left: 3px solid var(--err); }
+.contamination h3 { color: var(--err); }
+.contamination p { font-size: 14px; color: var(--ink-2); }
+.cont-item {
+  font-size: 13px;
+  color: var(--err);
+  background: var(--surface-2);
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin-top: 6px;
+}
+
+.research-chip {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1.5px solid var(--ink-3);
+  color: var(--ink-3);
+  font-size: 13px;
+  font-weight: 600;
+}
+.research-chip.st-verified { border-color: var(--ok); color: var(--ok); }
+.research-chip.st-partial { border-color: var(--warn); color: var(--warn); }
+.research-chip.st-inferred { border-color: var(--accent); color: var(--accent); }
+.research-chip.st-conflict { border-color: var(--err); color: var(--err); }
+
 /* [hidden] 必須永遠贏過任何 display 規則——否則 .gate{display:grid}、#settings{display:flex}
    會讓登入後的閘門與未開啟的抽屜繼續蓋在畫面上（整合驗證抓到的真 bug）。 */
 [hidden] { display: none !important; }

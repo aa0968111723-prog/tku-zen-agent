@@ -24,6 +24,10 @@ from typing import Any, AsyncIterator
 
 from .. import config, retrieval, tools, verification
 from ..llm import LLMError, NvidiaClient, Reply, estimate_cost, select_model
+from ..research import entities as research_entities
+from ..research import verifier as research_verifier
+from ..research.claims import SourceRecord
+from ..research.entities import ResearchMode, ResearchScope
 from ..services import activities as activity_service
 from ..services import context as ctx_mod
 from ..services import current_term as term_service
@@ -54,6 +58,11 @@ READ_ONLY_CACHEABLE_TOOLS = {
     "search_knowledge", "search_previous_examples", "get_current_term",
     "search_social_references", "compare_social_strategies", "analyze_social_positioning",
     "get_activity_status", "list_activities", "read_artifact",
+}
+
+# 外校研究工具 —— 回傳的 references 會登記成本輪的來源紀錄
+RESEARCH_TOOLS = {
+    "search_social_references", "compare_social_strategies", "analyze_social_positioning",
 }
 
 
@@ -266,15 +275,41 @@ async def _run(
     state.metrics["model_reason"] = decision["reason"]
     memory_service.save_state(store, project_id, state)
 
+    scope = ResearchScope.from_dict(state.research_scope) if state.research_scope else ResearchScope()
+    resolution = research_entities.resolve(user_message)
+
     yield {
         "type": "task_understood",
         "task_type": state.task_type.value,
         "skill": routing.label,
         "produces": [planner.ARTIFACT_LABEL.get(a, a) for a in state.artifacts_expected],
+        "research_mode": state.research_mode,
+        "target_schools": state.target_schools,
         "task_sequence": list(routing.task_sequence),
         "workflow_status": state.workflow_status.value,
         "model_tier": decision["tier"],
     }
+
+    # ── 對象不明，不要猜：先反問，不做任何檢索與生成 ──────
+    if state.clarification_pending:
+        clarification = resolution.clarification()
+        if clarification is not None:
+            state.completion_status = "needs_clarification"
+            state.research_status = research_verifier.RESEARCH_NEEDS_USER
+            state.workflow_status = WorkflowStatus.BLOCKED
+            state.next_action = "回覆研究對象（正式名稱、IG、FB 或網址）後繼續"
+            yield clarification.to_event()
+            yield {
+                "type": "research_status",
+                "status": research_verifier.RESEARCH_NEEDS_USER,
+                "label": research_verifier.RESEARCH_STATUS_LABELS[research_verifier.RESEARCH_NEEDS_USER],
+            }
+            text = clarification.question
+            yield {"type": "message", "text": text}
+            memory_service.persist_user_message(store, session_id, user_message)
+            memory_service.persist(store, session_id, {"role": "assistant", "content": text})
+            memory_service.save_state(store, project_id, state)
+            return
 
     # 圖片只交由 fal.ai 視覺服務整理，文字代理不再直接收到圖片 Base64。
     # 摘要只停留在這次的模型訊息中，不能寫進任務歷史或資料庫。
@@ -317,12 +352,18 @@ async def _run(
     memory_service.save_state(store, project_id, state)
     yield {"type": "retrieval_started", "queries": state.retrieval_queries}
 
+    research_active = scope.mode in {ResearchMode.EXTERNAL, ResearchMode.COMPARATIVE}
+    scope_for_retrieval = scope if (research_active or scope.internal_only_requested) else None
     retrieval_task_type = "social_research" if routing.task_sequence else state.task_type.value
     index = await asyncio.to_thread(retrieval.get_index)
     context_fingerprint = f"{index.fingerprint}:{term_service.fingerprint()}"
-    cached = memory_service.get_cached_context(
-        store, project_id, state.retrieval_queries, state.task_type.value, context_fingerprint
-    )
+    # 研究模式不吃快取：證據池要照當下的研究範圍重新過濾，不能拿別的範圍的舊 context。
+    cached = None
+    if scope_for_retrieval is None:
+        cached = memory_service.get_cached_context(
+            store, project_id, state.retrieval_queries, state.task_type.value, context_fingerprint
+        )
+    bundle = None
     if cached:
         context_block = cached["context_text"]
         cached_meta = cached.get("meta") or {}
@@ -342,22 +383,24 @@ async def _run(
             retrieval.build_context,
             state.retrieval_queries,
             task_type=retrieval_task_type,
+            scope=scope_for_retrieval,
         )
         context_block = bundle.render()
         state.retrieved_sources = bundle.source_labels()
-        memory_service.save_cached_context(
-            store, project_id, state.retrieval_queries, state.task_type.value, context_fingerprint,
-            context_block,
-            {
-                "count": len(bundle.hits),
-                "source_labels": bundle.source_labels(),
-                "display_sources": bundle.display_sources(),
-                "curated": bundle.curated_count,
-                "archive": bundle.archive_count,
-                "external_reference": getattr(bundle, "external_count", 0),
-                "conflicts": getattr(bundle, "conflicts", []),
-            },
-        )
+        if scope_for_retrieval is None:
+            memory_service.save_cached_context(
+                store, project_id, state.retrieval_queries, state.task_type.value, context_fingerprint,
+                context_block,
+                {
+                    "count": len(bundle.hits),
+                    "source_labels": bundle.source_labels(),
+                    "display_sources": bundle.display_sources(),
+                    "curated": bundle.curated_count,
+                    "archive": bundle.archive_count,
+                    "external_reference": getattr(bundle, "external_count", 0),
+                    "conflicts": getattr(bundle, "conflicts", []),
+                },
+            )
         retrieval_event = {
             "type": "retrieval_result",
             "count": len(bundle.hits),
@@ -365,6 +408,7 @@ async def _run(
             "curated": bundle.curated_count,
             "archive": bundle.archive_count,
             "external_reference": getattr(bundle, "external_count", 0),
+            "external_evidence": len(bundle.external_evidence_for_targets()) if research_active else 0,
             "conflicts": getattr(bundle, "conflicts", []),
             "cached": False,
         }
@@ -372,7 +416,20 @@ async def _run(
         state.mark_step(0, f"{retrieval_event['count']} 段")
     memory_service.save_state(store, project_id, state)
 
+    current_year = term_service.load().get("academic_year")
+    turn_sources: list[SourceRecord] = (
+        list(bundle.source_records(current_year)) if bundle is not None else []
+    )
+
     yield retrieval_event
+
+    # ── 沒有證據，不要下結論：外部研究但證據池是空的 ──────
+    if research_active and (bundle is None or not bundle.external_evidence_for_targets()):
+        async for event in _no_source_reply(
+            state, scope, resolution, store, session_id, project_id, user_message,
+        ):
+            yield event
+        return
 
     # ── Execute ──────────────────────────────────────────
     state.stage = Stage.EXECUTE
@@ -573,6 +630,13 @@ async def _run(
             else:
                 successful_tools.add(tc.name)
 
+            # 外校研究工具的回傳帶有來源明細，收進本輪來源清單給閘門與來源卡用
+            if tc.name in RESEARCH_TOOLS and result.get("ok") and result.get("references"):
+                for ref in result["references"]:
+                    record = _source_from_reference(ref)
+                    if record is not None:
+                        turn_sources.append(record)
+
             tool_msg = {
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -743,26 +807,202 @@ async def _run(
         }
         return
 
-    # ── Deliver ──────────────────────────────────────────
-    state.stage = Stage.DELIVER
-    for i in range(1, len(state.plan_steps)):
-        state.mark_step(i)
-    state.completion_status = "completed"
-    state.workflow_status = WorkflowStatus.COMPLETED
-    state.next_action = "可以修改上一份產出，或沿用這個任務繼續工作"
-
+    # ── Answer Gate（送出前的 claim verification）─────────
     if not final_text:
         final_text = _fallback_summary(produced, state)
+
+    review = await asyncio.to_thread(
+        research_verifier.review_answer,
+        final_text,
+        scope=scope,
+        resolution=resolution,
+        sources=turn_sources,
+    )
+    state.research_status = review.research_status
+    state.claim_records = [c.to_dict() for c in review.claims]
+
+    # 一般內部任務不需要研究儀表；只有研究模式（或閘門真的抓到問題）才顯示
+    research_relevant = research_active or scope.internal_only_requested or bool(review.findings)
+
+    cards = _dedupe_cards([r.to_card() for r in turn_sources])
+    # 持久化時去掉摘錄本文，控制 working_memory 的體積
+    state.source_cards = [{k: v for k, v in c.items() if k != "excerpt"} for c in cards]
+    if research_relevant:
+        yield {"type": "source_cards", "cards": cards}
+    if review.claims or review.findings:
+        yield review.to_event()
+
+    if review.verdict == "block":
+        if review.contamination is not None:
+            yield {
+                "type": "contamination_warning",
+                "message": review.contamination["message"],
+                "items": review.contamination["items"],
+                "actions": _contamination_actions(scope),
+            }
+        state.completion_status = "blocked_by_verification"
+        final_text = _blocked_text(review)
+    else:
+        # degrade：附上「部分內容尚未驗證」等註記；allow：內部模式補資料歸屬說明
+        notices = [n for n in review.notices if n not in final_text]
+        if notices:
+            final_text = final_text.rstrip() + "\n\n" + "\n".join(f"※ {n}" for n in notices)
+        state.completion_status = "completed"
+
+    # ── Deliver ──────────────────────────────────────────
+    state.stage = Stage.DELIVER
+    if review.verdict == "block":
+        verify_index = _verification_index(state)
+        for i in range(1, len(state.plan_steps)):
+            if i != verify_index:
+                state.mark_step(i)
+        if verify_index is not None:
+            state.fail_step(verify_index, "來源驗證未通過", code="answer_verification_failed")
+        state.workflow_status = WorkflowStatus.BLOCKED
+        state.next_action = "提供研究對象的官方來源，或改用淡江內部分析"
+    else:
+        for i in range(1, len(state.plan_steps)):
+            state.mark_step(i)
+        state.workflow_status = WorkflowStatus.COMPLETED
+        state.next_action = "可以修改上一份產出，或沿用這個任務繼續工作"
+
     yield {"type": "message", "text": final_text}
 
     memory_service.persist(store, session_id, {"role": "assistant", "content": final_text})
     memory_service.save_state(store, project_id, state)
     memory_service.maybe_compress(store, session_id, project_id)
 
+    done_event: dict[str, Any] = {
+        "type": "task_completed",
+        "summary": state.public_summary(),
+        "verdict": review.verdict,
+        "artifacts": [{k: v for k, v in a.items() if k != "local_path"} for a in produced],
+    }
+    if research_relevant:
+        yield {
+            "type": "research_status",
+            "status": review.research_status,
+            "label": research_verifier.RESEARCH_STATUS_LABELS.get(review.research_status, review.research_status),
+        }
+        done_event["research_status"] = review.research_status
+        done_event["research_status_label"] = research_verifier.RESEARCH_STATUS_LABELS.get(
+            review.research_status, review.research_status
+        )
+    yield done_event
+
+
+# ── 研究驗證輔助 ─────────────────────────────────────────────
+
+def _source_from_reference(ref: dict[str, Any]) -> SourceRecord | None:
+    """把 social 研究工具回傳的 reference 轉成來源紀錄。"""
+    if not isinstance(ref, dict) or not ref.get("excerpt"):
+        return None
+    return SourceRecord(
+        title=str(ref.get("source") or ref.get("source_file") or ""),
+        url=str(ref.get("source_url") or ""),
+        publisher=str(ref.get("organization") or ref.get("school") or ""),
+        captured_at=str(ref.get("captured_at") or ""),
+        excerpt=str(ref.get("excerpt") or ""),
+        source_type=str(ref.get("source_type") or "official_instagram"),
+        entity_id=str(ref.get("entity_id") or ""),
+        school=str(ref.get("school") or ""),
+        organization=str(ref.get("organization") or ""),
+        source_scope="external",
+        authority_level=str(ref.get("authority_level") or "official"),
+        is_external=True,
+    ).finalize()
+
+
+def _dedupe_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for card in cards:
+        key = card.get("source_id") or card.get("title", "")
+        if key and key not in seen:
+            seen.add(key)
+            out.append(card)
+    return out[:12]
+
+
+def _contamination_actions(scope: ResearchScope) -> list[dict[str, str]]:
+    """污染警示卡的動作按鈕。send_text 由前端當成新訊息送出。"""
+    school = scope.target_schools[0] if scope.target_schools else "該校"
+    return [
+        {"label": "只重新查外校官方來源",
+         "send_text": f"請只使用{school}的官方公開來源重新研究，完全不要使用淡江內部資料。"},
+        {"label": "改為淡江內部分析",
+         "send_text": "改為只用淡江內部資料分析這個主題就好。"},
+        {"label": "取消研究", "send_text": "取消這次研究。"},
+    ]
+
+
+def _blocked_text(review) -> str:
+    lines = [research_verifier.BLOCK_NOTICE, ""]
+    reasons = [f.message for f in review.errors][:4]
+    if reasons:
+        lines.append("原因：")
+        lines += [f"- {r}" for r in reasons]
+        lines.append("")
+    lines.append(
+        "你可以：提供研究對象的官方 Instagram、Facebook 或網址讓我重新查證；"
+        "或改用「只用淡江內部資料」的方式分析。"
+    )
+    return "\n".join(lines)
+
+
+async def _no_source_reply(
+    state: OrchestrationState,
+    scope: ResearchScope,
+    resolution,
+    store,
+    session_id: str,
+    project_id: str,
+    user_message: str,
+):
+    """外部研究但一個可驗證來源都沒有：誠實說明並收束，不呼叫模型生成。
+
+    這是「沒有來源仍顯示研究完成」的直接修正——沒有證據池就沒有結論，
+    也沒有「研究完成」。
+    """
+    state.research_status = research_verifier.RESEARCH_NO_SOURCE
+    state.completion_status = "no_reliable_source"
+    state.workflow_status = WorkflowStatus.BLOCKED
+    state.next_action = "提供研究對象的官方 Instagram、Facebook 或網址，或改用淡江內部分析"
+
+    schools = "、".join(scope.target_schools) or "指定的研究對象"
+    lines = [research_verifier.NO_SOURCE_NOTICE, ""]
+    lines.append(f"【研究對象】{schools}")
+    lines.append("【已驗證資料】（無——目前公開資料庫裡沒有此對象的已驗證來源）")
+    no_source_names = [e.name for e in resolution.no_source_entities]
+    if no_source_names:
+        lines.append(f"【尚待確認】{'、'.join(no_source_names)}：已知有這個社團，"
+                     "但目前沒有已收錄的官方公開來源可引用。")
+    else:
+        lines.append(f"【尚待確認】{schools}是否有正式社團與官方帳號。")
+    lines.append("")
+    lines.append("要繼續研究，請提供：官方 Instagram 帳號、Facebook 專頁或官方網址，"
+                 "我會只依這些可驗證來源整理。也可以改用「只用淡江內部資料」分析。")
+    text = "\n".join(lines)
+
+    yield {"type": "source_cards", "cards": []}
+    yield {
+        "type": "research_status",
+        "status": research_verifier.RESEARCH_NO_SOURCE,
+        "label": research_verifier.RESEARCH_STATUS_LABELS[research_verifier.RESEARCH_NO_SOURCE],
+    }
+    yield {"type": "message", "text": text}
+
+    memory_service.persist_user_message(store, session_id, user_message)
+    memory_service.persist(store, session_id, {"role": "assistant", "content": text})
+    memory_service.save_state(store, project_id, state)
+
     yield {
         "type": "task_completed",
         "summary": state.public_summary(),
-        "artifacts": [{k: v for k, v in a.items() if k != "local_path"} for a in produced],
+        "research_status": research_verifier.RESEARCH_NO_SOURCE,
+        "research_status_label": research_verifier.RESEARCH_STATUS_LABELS[research_verifier.RESEARCH_NO_SOURCE],
+        "verdict": "no_source",
+        "artifacts": [],
     }
 
 

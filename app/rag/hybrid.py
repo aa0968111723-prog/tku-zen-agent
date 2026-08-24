@@ -92,8 +92,13 @@ def hybrid_search(
     min_curated: int = 2,
     min_archive: int = 1,
     include_external: bool = False,
+    chunk_filter=None,
 ) -> list[Scored]:
-    """跑完整條 hybrid pipeline，回傳重排後的結果。"""
+    """跑完整條 hybrid pipeline，回傳重排後的結果。
+
+    chunk_filter 是資料範圍的硬邊界（例如「只准外校段落、且 entity 要是研究
+    對象」）。過濾在候選階段做，不是排序後補刀——不合範圍的段落連分數都不給。
+    """
     from ..retrieval import TIER_CURATED, tokenize
 
     q = parsed or parse(query)
@@ -104,9 +109,13 @@ def hybrid_search(
         k=BM25_POOL,
         min_curated=0,
         include_external=include_external,
+        chunk_filter=chunk_filter,
     )
     if not bm25_hits:
-        bm25_hits = index.search(query, k=BM25_POOL, min_curated=0, include_external=include_external)
+        bm25_hits = index.search(
+            query, k=BM25_POOL, min_curated=0,
+            include_external=include_external, chunk_filter=chunk_filter,
+        )
 
     fused: dict[int, Scored] = {}
     for rank, (_score, chunk) in enumerate(bm25_hits):
@@ -127,6 +136,8 @@ def hybrid_search(
                     continue
                 chunk = index.chunks[int(idx)]
                 if not include_external and getattr(chunk.meta, "source_type", "") == "external_reference":
+                    continue
+                if chunk_filter is not None and not chunk_filter(chunk):
                     continue
                 key = id(chunk)
                 if key in fused:

@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..research import entities as research_entities
+
 # 114 學年度 / 1141（學年度+學期）
 _YEAR = re.compile(r"(?<!\d)(1[0-2]\d)(?!\d)")
 _YEAR_SEM = re.compile(r"(?<!\d)(1[0-2]\d)[-_ ]?([12])(?!\d)")
@@ -65,7 +67,7 @@ TEAM_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 @dataclass
 class ChunkMeta:
-    source_type: str = "archive"        # curated | playbook | archive | conversation
+    source_type: str = "archive"        # curated | playbook | archive | conversation | external_reference
     academic_year: str | None = None
     semester: str | None = None
     activity: str | None = None
@@ -93,6 +95,18 @@ class ChunkMeta:
             "external_reference": 30,
         }.get(self.source_type, 10)
 
+    # ── 資料歸屬（政大事故後新增：每一段都要知道自己屬於誰）──
+    # source_url 與上方欄位共用：外校段落以 registry 的官方網址為準。
+    entity_id: str = ""                 # research.entities 的 entity_id；外校段落對不到實體時為空
+    school: str = ""                    # 正式學校名稱
+    organization: str = ""              # 正式社團／組織名稱
+    source_scope: str = "internal"      # internal | external —— 檢索過濾的硬邊界
+    is_external: bool = False
+    authority_level: str = "archive"    # official | curated | archive | user | unknown
+    published_at: str = ""
+    captured_at: str = ""               # 外校資料的檢索日期（判斷過舊用）
+    external_source_type: str = ""      # official_instagram | official_website | ...
+
     def label(self) -> str:
         """給 context builder 顯示的來源標籤。"""
         bits: list[str] = []
@@ -115,6 +129,14 @@ class ChunkMeta:
             "team": self.team,
             "contains_sensitive_structure": self.contains_sensitive_structure,
             "updated_at": self.updated_at,
+            "entity_id": self.entity_id,
+            "school": self.school,
+            "organization": self.organization,
+            "source_scope": self.source_scope,
+            "is_external": self.is_external,
+            "authority_level": self.authority_level,
+            "published_at": self.published_at,
+            "captured_at": self.captured_at,
             "source_title": self.source_title,
             "source_url": self.source_url,
             "source_date": self.source_date,
@@ -136,6 +158,63 @@ def _match_first(text: str, rules: tuple[tuple[str, tuple[str, ...]], ...]) -> s
                     best = (score, name)
                 break
     return best[1] if best else None
+
+
+# 外校參考檔開頭的「最後檢索日期：2026-08-24」。以檔案為單位快取。
+_CAPTURED_AT = re.compile(r"最後檢索日期[:：]\s*(20\d{2}[-/]\d{1,2}[-/]\d{1,2})")
+_captured_cache: dict[str, str] = {}
+
+
+def _file_captured_at(path: Path) -> str:
+    key = str(path)
+    if key not in _captured_cache:
+        try:
+            head = path.read_text(encoding="utf-8", errors="replace")[:2000]
+        except OSError:
+            head = ""
+        m = _CAPTURED_AT.search(head)
+        _captured_cache[key] = m.group(1).replace("/", "-") if m else ""
+    return _captured_cache[key]
+
+
+_IG_URL = re.compile(r"https?://www\.instagram\.com/[^\s)\]，。]+")
+_ANY_URL = re.compile(r"https?://[^\s)\]，。]+")
+
+
+def _attribute(meta: ChunkMeta, path: Path, label: str, text: str) -> None:
+    """資料歸屬。外校段落只認 registry 別名，絕不用「內容相似」歸屬學校。"""
+    if meta.source_type == "external_reference":
+        meta.source_scope = "external"
+        meta.is_external = True
+        meta.authority_level = "official"
+        meta.captured_at = _file_captured_at(path)
+        # 先看段落標題（label 內含 heading 路徑），再看內文；標題最可靠
+        entity = research_entities.match_entity(label) or research_entities.match_entity(text[:400])
+        if entity is not None and entity.entity_id != research_entities.HOME_ENTITY_ID:
+            meta.entity_id = entity.entity_id
+            meta.school = entity.school
+            meta.organization = entity.name
+            meta.source_url = entity.instagram_url or entity.website
+            meta.external_source_type = (
+                "official_website" if (entity.website and not entity.instagram_url) else "official_instagram"
+            )
+        else:
+            # 跨帳號歸納、使用規則這類段落：屬於外部參考，但不屬於任何單一實體，
+            # 不能當成任何一所學校的證據。
+            meta.entity_id = ""
+            meta.school = ""
+            meta.organization = ""
+            ig = _IG_URL.search(text)
+            if ig:
+                meta.source_url = ig.group(0)
+                meta.external_source_type = "official_instagram"
+    else:
+        meta.source_scope = "internal"
+        meta.is_external = False
+        meta.entity_id = research_entities.HOME_ENTITY_ID
+        meta.school = research_entities.HOME_SCHOOL
+        meta.organization = "淡江大學領袖禪學社"
+        meta.authority_level = "curated" if meta.source_type in {"curated", "playbook"} else "archive"
 
 
 def infer(path: Path, label: str, text: str, source_type: str) -> ChunkMeta:
@@ -202,7 +281,14 @@ def infer(path: Path, label: str, text: str, source_type: str) -> ChunkMeta:
         meta.credibility, meta.verification = 0.75, "internal"
     elif source_type == "conversation":
         meta.credibility, meta.verification = 0.5, "needs_verification"
-    elif source_type == "external_reference":
+
+    # 實體歸屬（政大事故後新增）。外校段落的 source_url 以 registry 的
+    # 官方網址覆寫內文嗅探結果；captured_at 從檔頭「最後檢索日期」帶入。
+    _attribute(meta, path, label, text)
+
+    if source_type == "external_reference":
+        if not meta.source_date and meta.captured_at:
+            meta.source_date = meta.captured_at
         meta.credibility = 0.8 if meta.source_url and meta.source_date else (0.55 if meta.source_url else 0.3)
         meta.verification = "verified" if meta.source_url and meta.source_date else "needs_verification"
 

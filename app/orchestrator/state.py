@@ -105,6 +105,16 @@ class OrchestrationState:
     next_action: str = ""
     metrics: dict[str, Any] = field(default_factory=dict)
 
+    # ── 研究驗證（政大事故後新增）────────────────────────
+    research_mode: str = "internal"          # internal | external | comparative
+    research_scope: dict[str, Any] = field(default_factory=dict)   # ResearchScope.to_dict()
+    research_status: str = "internal"        # research.verifier 的完成狀態
+    target_entities: list[str] = field(default_factory=list)
+    target_schools: list[str] = field(default_factory=list)
+    clarification_pending: bool = False
+    source_cards: list[dict[str, Any]] = field(default_factory=list)
+    claim_records: list[dict[str, Any]] = field(default_factory=list)
+
     # ── 進度 ─────────────────────────────────────────────
 
     def mark_step(self, index: int, note: str = "") -> None:
