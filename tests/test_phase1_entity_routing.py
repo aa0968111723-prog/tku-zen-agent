@@ -81,6 +81,110 @@ def test_artifact_for_counterpart_becomes_comparative():
     assert state.artifacts_expected, "比較模式的產檔請求不得被改走純研究"
 
 
+def _completed_tmu_research() -> OrchestrationState:
+    state, _ = planner.understand("幫我研究北醫禪學社的IG經營")
+    state.completion_status = "completed"
+    return state
+
+
+def test_internal_questions_after_completed_research_not_hijacked():
+    """對抗審查 P0：外校研究完成後，內部問題不得被外部 scope 劫持。"""
+    prev = _completed_tmu_research()
+    for msg in ("今年社費多少呢", "接下來我該做什麼呢？", "幫我列出幹部他們的分工"):
+        state, _ = planner.understand(msg, previous=prev)
+        assert state.research_mode == "internal", msg
+        assert not state.metrics.get("scope_inherited"), msg
+
+
+def test_awaiting_internal_fact_question_gets_internal_answer():
+    """awaiting 期間問「今年社費多少呢」→ 內部回答，不吞進政大反問。"""
+    prev = _previous_awaiting_zhengda()
+    state, _ = planner.understand("今年社費多少呢", previous=prev)
+    assert state.research_mode == "internal"
+    assert not state.clarification_pending
+
+
+def test_strong_pronoun_after_completed_research_still_inherits():
+    """「他們的招生貼文呢」在研究完成後仍是合法 follow-up。"""
+    prev = _completed_tmu_research()
+    state, _ = planner.understand("那他們的招生貼文呢", previous=prev)
+    assert state.target_entities == ["tmu-zen"]
+
+
+def test_compare_them_with_us_becomes_comparative():
+    """對抗審查發現 6：「比較他們跟本社的差異」→ 比較分析，不是純內部。"""
+    prev = _completed_tmu_research()
+    state, _ = planner.understand("幫我比較他們跟本社的差異", previous=prev)
+    assert state.research_mode == "comparative"
+    assert state.target_entities == ["tmu-zen"]
+
+
+def test_jinxing_zhengda_is_still_zhengda():
+    """對抗審查發現 1：「進行政大…研究」的政大不能被「行」黑名單吞掉。"""
+    state, _ = planner.understand("我想進行政大禪學社社課的研究")
+    assert state.target_schools == ["國立政治大學"]
+    assert state.clarification_pending
+    # 行政大樓仍不誤觸
+    assert not has_external_intent("在行政大樓前集合")
+
+
+def test_taipei_hospital_is_not_tmu():
+    """對抗審查發現 4：「台北醫院」是醫院，不是北醫禪學社。"""
+    state, routing = planner.understand("幫我寫一份社員住進台北醫院的慰問公告")
+    assert state.research_mode == "internal"
+    assert routing.skill.name != "social_research"
+
+
+def test_generic_external_phrases_get_external_scope():
+    """對抗審查發現 7：「研究其他大學的禪學社」要走 external scope，
+    不能 skill 是研究、scope 卻停在 internal（工具會被自家閘門擋死）。"""
+    for msg in ("幫我研究其他大學的禪學社怎麼經營 IG", "研究跨校社團的招生做法", "幫我分析大專院校的社團經營"):
+        state, routing = planner.understand(msg)
+        if routing.skill.name == "social_research":
+            assert state.research_mode in {"external", "comparative"}, msg
+
+
+def test_restart_with_new_target_rebuilds_task():
+    """對抗審查發現 2：續接換研究對象時整個任務圖重建，
+    不得沿用淡江產檔管線做「北醫茶會」文件。"""
+    prev, _ = planner.understand("幫我寫期初茶會的活動企劃書")
+    state, routing = planner.continue_previous("取消，重新執行這個任務，改成研究北醫禪學社的茶會", prev)
+    assert state.research_mode in {"external", "comparative"}
+    if state.research_mode == "external":
+        assert routing.skill.name == "social_research"
+        assert not state.artifacts_expected
+
+
+def test_awaiting_unrelated_uncertain_is_not_clarified():
+    """對抗審查發現 5：awaiting 期間講「我還不確定活動日期」不算澄清回覆。"""
+    res = E.resolve("我還不確定活動日期，但先幫我查政大的社團", awaiting_clarification=True)
+    assert not res.clarified
+    assert res.needs_clarification
+
+
+def test_requested_external_with_pronoun_inherits():
+    """對抗審查發現 8：表單選外校研究＋代名詞句 → 繼承，不得退回內部。"""
+    prev = _previous_awaiting_zhengda()
+    state, _ = planner.understand("那他們的茶會呢", previous=prev, requested={"mode": "external"})
+    assert state.research_mode == "external"
+    assert state.target_schools == ["國立政治大學"]
+    assert state.clarification_pending
+
+
+def test_requested_external_without_any_target_asks():
+    """表單選外校研究但沒有任何對象 → 反問，不得靜默退回內部。"""
+    state, _ = planner.understand("幫我看看茶會怎麼辦比較好", requested={"mode": "external"})
+    assert state.clarification_pending
+
+
+def test_requested_internal_with_external_mention_asks_conflict():
+    """對抗審查發現 11：內部模式＋訊息點名政大 → 衝突確認卡，不靜默清空。"""
+    state, _ = planner.understand("政大的茶會都怎麼辦？", requested={"mode": "internal"})
+    assert state.research_mode == "internal"
+    assert state.clarification_pending
+    assert state.metrics.get("mode_conflict_school") == "國立政治大學"
+
+
 def test_followup_after_resolved_external_targets_entity():
     """北醫研究成功後接「他們的招生貼文呢」→ 繼承 tmu-zen，不再反問。"""
     prev_state, _ = planner.understand("研究北醫禪學社的 IG")
@@ -250,7 +354,9 @@ def test_continue_previous_updates_research_target():
 # ── 結構化研究欄位 ───────────────────────────────────────────
 
 def test_requested_mode_internal_overrides_message():
-    state, _ = planner.understand("研究政大的茶會", requested={"mode": "internal"})
+    """內部模式覆寫：訊息沒點名外校時直接生效、不反問。
+    （點名外校的衝突情境見 test_requested_internal_with_external_mention_asks_conflict）"""
+    state, _ = planner.understand("研究禪學社的茶會怎麼辦", requested={"mode": "internal"})
     assert state.research_mode == "internal"
     assert not state.clarification_pending
 

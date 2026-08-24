@@ -195,15 +195,23 @@ def _attribute(meta: ChunkMeta, path: Path, label: str, text: str) -> None:
         meta.captured_at = _file_captured_at(path)
         # 先看段落標題（label 內含 heading 路徑），再看內文；標題最可靠。
         # 內文改用全段掃描（原本只看前 400 字，實體出現在後半的段落會
-        # 靜默流失歸屬）；且同段點名多個外校時視為「多校彙整」，
-        # 不得整段歸給其中一校（稽核漏洞 21、27）。
-        entity = research_entities.match_entity(label)
-        if entity is None:
-            in_text = [
-                e for e in research_entities.match_entities(text[:6000])
-                if e.entity_id != research_entities.HOME_ENTITY_ID
-            ]
-            entity = in_text[0] if len(in_text) == 1 else None
+        # 靜默流失歸屬）；且不論標題或內文，同段點名多個外校、或外校與
+        # 淡江同段（比較段落）時，一律視為「多校彙整」——不得整段歸給
+        # 其中一校（稽核漏洞 21、27；對抗審查抓到標題點名兩校仍取最長
+        # 別名歸給單一校的漏洞）。
+        def _sole_external(section_text: str) -> tuple["research_entities.Entity | None", bool]:
+            """回傳 (唯一外校實體或 None, 這一層有沒有命中任何實體)。"""
+            matched = research_entities.match_entities(section_text)
+            externals = [e for e in matched if e.entity_id != research_entities.HOME_ENTITY_ID]
+            if not matched:
+                return None, False
+            if len(externals) == 1 and len(matched) == 1:
+                return externals[0], True
+            return None, True    # 多校或含淡江的比較段 → 彙整
+
+        entity, decided = _sole_external(label)
+        if not decided:
+            entity, _decided = _sole_external(text[:6000])
         if entity is not None and entity.entity_id != research_entities.HOME_ENTITY_ID:
             meta.entity_id = entity.entity_id
             meta.school = entity.school

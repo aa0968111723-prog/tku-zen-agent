@@ -251,19 +251,17 @@ _QUERY_INTENT = re.compile(r"(^查|幫我查|查詢|查一下|查查看|查個|�
 # 外校研究的硬性閘門：沒有明確提到「別的學校」就絕不啟動外部研究。
 # 光是「研究」「比較」「介紹」出現，或訊息裡有我們自己的名字
 # （淡江、禪學社、領袖社），都不算外校意圖。
-# 學校名稱的比對交給 research.entities 的 registry（含全名「政治大學」與
-# 詞界防護「完成大合照 ≠ 成大」）——清單只維護一份，不在這裡另抄一份簡稱。
-_EXTERNAL_GENERIC = re.compile(
-    r"(其他學校|其他大學|外校|他校|別的學校|別校|跨校|各校|大專院校|"
-    r"公開\s*IG|公開\s*ig|公開帳號)"
-)
-
-
+# 學校名稱與泛稱詞彙的比對都交給 research.entities（registry 含全名
+# 「政治大學」與詞界防護「完成大合照 ≠ 成大」；泛稱詞彙與 decide_scope
+# 共用同一份 _EXTERNAL_HINTS）——清單只維護一份，兩邊不會漂移。
 def has_external_intent(message: str) -> bool:
     """使用者是否明確想研究「別的學校」。這是外校研究的必要條件。"""
     from ..research import entities as research_entities
 
-    return bool(_EXTERNAL_GENERIC.search(message)) or research_entities.mentions_external_school(message)
+    return (
+        research_entities.has_generic_external_hint(message)
+        or research_entities.mentions_external_school(message)
+    )
 
 _ACTIVITY_OPERATION_QUERY = re.compile(
     r"(活動.*(?:缺什麼|進度|待辦|分工|負責|逾期|還剩|未完成)|"

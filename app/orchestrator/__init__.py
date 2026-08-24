@@ -341,10 +341,18 @@ async def _run(
     # ── 對象不明，不要猜：先反問，不做任何檢索與生成 ──────
     if state.clarification_pending:
         clarification = resolution.clarification()
+        if clarification is None and state.metrics.get("mode_conflict_school"):
+            # 內部模式 vs 訊息點名外校：用衝突確認卡，不是研究對象卡
+            clarification = research_entities.mode_conflict_clarification(
+                str(state.metrics["mode_conflict_school"])
+            )
         if clarification is None and state.target_schools:
             # 代名詞 follow-up（「那他們的茶會呢」）：這句話本身解析不出對象，
             # 反問卡要從繼承的研究範圍生出來，不能因為解析不到就靜默放行。
             clarification = research_entities.clarification_for_school(state.target_schools[0])
+        if clarification is None:
+            # 外校研究模式但完全沒有對象可對（前端只選了模式）→ 通用反問卡
+            clarification = research_entities.generic_clarification()
         if clarification is not None:
             state.completion_status = "needs_clarification"
             state.research_status = research_verifier.RESEARCH_NEEDS_USER
@@ -495,7 +503,10 @@ async def _run(
     if scope.mode == ResearchMode.EXTERNAL:
         # 純外校研究：連 schema 都不給內部檢索工具——模型看不到就不會拿
         # 淡江資料當外校證據（比較模式要查淡江內部資料，所以保留）。
-        exposed_tools = [n for n in exposed_tools if n not in INTERNAL_RETRIEVAL_TOOLS]
+        # 產檔與活動工具也一律拿掉：外校研究絕不能用淡江範本「做出」
+        # 北醫的企劃書（對抗審查發現 2 的防禦層）。
+        banned = INTERNAL_RETRIEVAL_TOOLS | ARTIFACT_TOOLS | ACTIVITY_TOOLS
+        exposed_tools = [n for n in exposed_tools if n not in banned]
     tool_schemas = tools.schemas_for(exposed_tools)
     activity_context = activity_service.project_activity_context(store, ctx.user_id, project_id)
 

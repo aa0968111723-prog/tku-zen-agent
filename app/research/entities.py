@@ -145,11 +145,22 @@ _FALSE_PREV: dict[str, str] = {
 }
 
 # 也會被「後一個字」接走：「成大事」≠ 成大、「台北醫院」≠ 北醫、
-# 「台北藝術節」≠ 北藝（grok 審查抓到的反例——致詞裡的「成大事」很常見）。
+# 「台北藝術節」≠ 北藝、「跨世新聞」≠ 世新、「台北科技大樓」≠ 北科
+# （grok 與對抗審查抓到的反例——致詞裡的「成大事」很常見）。
+# 正式全名（台北科技大學、世新大學）自有較長別名可命中，封短別名不會漏抓。
 _FALSE_NEXT: dict[str, str] = {
     "成大": "事器業功",
     "北醫": "院",
     "北藝": "術",
+    "世新": "聞",
+    "北科": "技",
+}
+
+# 前字黑名單的「救援」：黑名單字其實屬於再前面的動詞時，別名仍是獨立稱呼。
+# 「進行＋政大研究」的「行」屬於「進行」，不是「行政大樓」的「行」
+# （對抗審查抓到的反例：「我想進行政大禪學社社課的研究」曾靜默變內部模式）。
+_PREV_RESCUE: dict[str, str] = {
+    "行": "進執舉履施例推自另先須需再",
 }
 
 
@@ -172,16 +183,31 @@ def alias_mentioned(text: str, alias: str) -> bool:
         after = text[i + len(alias)] if i + len(alias) < len(text) else ""
         # 句首／句尾（prev/after 為空）一定算獨立稱呼；
         # 注意 "" in "…" 恆為 True，不能直接用 in
-        swallowed = (prev and prev in bad_prev) or (after and after in bad_next)
+        prev_bad = bool(prev and prev in bad_prev)
+        if prev_bad and i >= 2:
+            rescuers = _PREV_RESCUE.get(prev, "")
+            if rescuers and text[i - 2] in rescuers:
+                prev_bad = False    # 「進行政大…」：行 屬於 進行
+        swallowed = prev_bad or (after and after in bad_next)
         if not swallowed:
             return True
         start = i + 1
 
 
-# 反問後使用者的選項回覆（前端反問卡送出的句型，也接受手打）。
-# 注意：這些字樣**只有在上一輪真的發過反問**時才算「澄清回覆」——
-# 否則「我不確定政大的社課時間」這種首句就會誤觸而跳過反問（稽核漏洞 D）。
-_CLARIFIED_MARKERS = ("正式社團", "學生自辦", "自辦活動", "不確定", "請協助辨識", "幫我辨識")
+# 反問後使用者的回覆句型（前端反問卡的 send_text 模板，也接受相同語意的手打）。
+# 兩層限制（對抗審查抓到「不確定」子字串誤觸）：
+#   1. 只有上一輪真的發過反問才比對（狀態式）。
+#   2. 比對的是「在回覆社團辨識問題」的句型，不是子字串——
+#      awaiting 期間講「我還不確定活動日期」不算澄清回覆。
+_CLARIFIED_PATTERNS = (
+    re.compile(r"我?指的是.{0,14}(正式社團|學生自辦|自辦活動|Instagram|IG|帳號)"),
+    re.compile(r"不確定.{0,8}(是)?(哪個|哪一個|哪些)?(社團|帳號|學校)"),
+    re.compile(r"(請協助辨識|幫我辨識)"),
+)
+
+
+def _is_clarified_reply(text: str) -> bool:
+    return any(p.search(text) for p in _CLARIFIED_PATTERNS)
 
 
 class ResearchMode(str, Enum):
@@ -289,6 +315,46 @@ def clarification_for_school(school: str) -> ClarificationRequest:
     clarification = res.clarification()
     assert clarification is not None
     return clarification
+
+
+def generic_clarification() -> ClarificationRequest:
+    """完全不知道研究對象時的反問卡（外部研究模式但沒點名學校）。"""
+    return ClarificationRequest(
+        school="",
+        question="你想研究哪個對象？請告訴我學校名稱、正式社團名稱、Instagram 帳號或網址。",
+        options=[
+            {"label": "已收錄的外校社團",
+             "send_text": "請列出目前已收錄公開資料的外校社團，我再從裡面選。"},
+            {"label": "我提供 IG 帳號",
+             "send_text": "我要研究的帳號是：@"},
+            {"label": "我不確定，請協助辨識",
+             "send_text": "我不確定要研究哪個社團，請協助辨識，先告訴我有哪些查得到的公開帳號。"},
+        ],
+        topic_question="你想查哪一類？",
+        topic_options=["茶會內容", "招生文案", "活動流程", "Instagram 經營", "社團定位", "其他"],
+    )
+
+
+def mode_conflict_clarification(school: str) -> ClarificationRequest:
+    """模式選了「淡江內部」但訊息點名外校時的確認卡。
+
+    不能靜默清掉外校對象（那會拿淡江資料回答政大問題——事故重演），
+    也不能無視使用者選的模式，所以先問清楚。
+    """
+    short = _short_school(school)
+    return ClarificationRequest(
+        school=school,
+        question=(
+            f"你目前選擇「只用淡江內部資料」，但這句話提到了{short}。"
+            "內部資料庫沒有其他學校的資料，要怎麼處理？"
+        ),
+        options=[
+            {"label": f"改成研究{short}",
+             "send_text": f"改用外校研究模式，研究{short}，請只使用可驗證的官方公開來源。"},
+            {"label": "維持內部模式",
+             "send_text": "維持只用淡江內部資料回答，內容不要提到其他學校。"},
+        ],
+    )
 
 
 def apply_requested(
@@ -401,7 +467,7 @@ def resolve(message: str, *, awaiting_clarification: bool = False) -> EntityReso
     if not text:
         return res
 
-    res.clarified = awaiting_clarification and any(m in text for m in _CLARIFIED_MARKERS)
+    res.clarified = awaiting_clarification and _is_clarified_reply(text)
 
     matched_schools: set[str] = set()
 
@@ -472,7 +538,18 @@ def resolve(message: str, *, awaiting_clarification: bool = False) -> EntityReso
 
 _INTERNAL_ONLY = re.compile(r"(只用|僅用|只使用|僅使用|只看|只查).{0,6}(淡江|淡大|本社|內部)|內部資料(就好|即可)")
 _COMPARE_HINTS = re.compile(r"(比較|對比|差異|參考|借鏡|學習|淡江可以|我們可以|怎麼改良)")
-_EXTERNAL_HINTS = re.compile(r"(其他學校|外校|別的學校|他校|各校|公開資料|官方IG|官方 IG|官方帳號)")
+# 泛稱外校研究的詞彙——skill 路由閘門與 decide_scope 共用同一份，
+# 兩邊清單漂移會讓「研究其他大學」路由到研究工具、scope 卻停在內部，
+# dispatch 閘門再把工具全擋掉（對抗審查抓到的回歸）。
+_EXTERNAL_HINTS = re.compile(
+    r"(其他學校|其他大學|外校|他校|別的學校|別校|跨校|各校|大專院校|"
+    r"公開\s*IG|公開\s*ig|公開帳號|官方IG|官方 IG|官方帳號)"
+)
+
+
+def has_generic_external_hint(text: str) -> bool:
+    """是否出現「研究別的學校」的泛稱訊號（沒點名哪一所）。"""
+    return bool(_EXTERNAL_HINTS.search(text or ""))
 
 
 @dataclass
