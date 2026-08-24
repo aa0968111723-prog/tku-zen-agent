@@ -2482,6 +2482,12 @@ function focusables(root) {
 function trapFocus(root, onClose) {
   const outer = trapStack[trapStack.length - 1];
   if (outer) document.removeEventListener("keydown", outer.onKey);
+  // 同一層 modal 被連開兩次（例如非同步載入時連點兩下）要**取代**而不是再疊一層：
+  // 疊上去的那筆關閉後會留在堆疊裡，它的 focusables 是空陣列、Tab 不再攔截，
+  // 焦點就能跑出仍開著的外層抽屜（grok 審查發現 2）。
+  if (outer && outer.root === root) {
+    trapStack.pop();
+  }
   const nodes = focusables(root);
   (nodes[0] || root).focus();
   const onKey = (e) => {
@@ -2621,7 +2627,12 @@ $("admin-logout-btn").addEventListener("click", async () => {
 
 /* ── 本學期設定 ────────────────────────────────────── */
 
+let termLoading = false;
+
 async function openTerm() {
+  // 請求還在飛或視窗已開著就不重複開——重複呼叫會多疊一層焦點陷阱
+  if (termLoading || !$("term-modal").hidden) return;
+  termLoading = true;
   try {
     const resp = await api("/api/term");
     if (!resp.ok) {
@@ -2650,6 +2661,8 @@ async function openTerm() {
     trapFocus($("term-modal").querySelector(".modal-card"), closeTerm);
   } catch (err) {
     if (err.message !== "needs-auth") announce(BUSY_TEXT);
+  } finally {
+    termLoading = false;
   }
 }
 

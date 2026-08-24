@@ -170,3 +170,37 @@ def test_narrow_viewport_quick_grid_rules_survive():
     assert "@media (max-width: 360px)" in CSS
     assert re.search(r"\.quick-grid button { padding-inline: 5px; }", CSS)
     assert "grid-template-columns: 1fr 1fr" in CSS
+
+
+# ── grok 第五階段審查的兩個反例 ──────────────────────────────
+
+def test_preflight_selected_state_css_matches_js_attribute():
+    """grok 1：JS 改用 aria-checked 後，CSS 若還綁 aria-pressed，
+    點了選項畫面完全沒有選取態——而只掃 JS 的契約測試會誤判為通過。"""
+    app_js = JS
+    css = CSS
+    # JS 用哪個屬性標記選取
+    assert 'setAttribute("aria-checked"' in app_js
+    # 選取態樣式必須綁同一個屬性
+    preflight_rules = [line for line in css.splitlines() if ".preflight-options" in line and "aria-" in line]
+    assert preflight_rules, "找不到反問卡選項的選取態樣式"
+    for rule in preflight_rules:
+        assert "aria-checked" in rule, f"選取態樣式仍綁舊屬性：{rule.strip()}"
+        assert "aria-pressed" not in rule, f"選取態樣式仍綁 aria-pressed：{rule.strip()}"
+
+
+def test_focus_trap_replaces_same_root_instead_of_stacking():
+    """grok 2：同一層 modal 連開兩次不得再疊一層（會留下 zombie 陷阱，
+    關閉後 Tab 可跑出仍開著的外層抽屜）。"""
+    app_js = JS
+    trap = app_js.split("function trapFocus(", 1)[1].split("\nfunction ", 1)[0]
+    assert "outer.root === root" in trap, "trapFocus 必須偵測同一層重複開啟"
+    assert "trapStack.pop()" in trap, "同一層重複開啟要取代而不是疊加"
+
+
+def test_open_term_guards_against_double_open():
+    app_js = JS
+    assert "termLoading" in app_js
+    open_term = app_js.split("async function openTerm()", 1)[1].split("\nfunction closeTerm", 1)[0]
+    assert "if (termLoading" in open_term, "請求進行中要擋掉重複開啟"
+    assert "finally" in open_term, "旗標一定要還原，否則之後永遠打不開"
