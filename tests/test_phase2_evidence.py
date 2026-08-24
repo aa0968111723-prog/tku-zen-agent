@@ -223,3 +223,98 @@ def test_partial_claim_keeps_dates():
     partial = [c for c in review.claims if c.status == C.STATUS_PARTIAL]
     if partial:
         assert partial[0].captured_at == "2026-08-20"
+
+
+# ── grok 第二階段審查的五個反例 ──────────────────────────────
+
+def test_disclaimer_clause_does_not_shield_following_claim():
+    """grok 1：「沒有北科的資料提到茶會，北科的茶會安排香氛蠟燭…」
+    前半免責不能掩護後半的編造。"""
+    scope, res = _ntut_scope()
+    internal = _home_source("茶會當天安排香氛蠟燭手作體驗，由生活組準備材料包，參加者完成後可帶回宿舍。")
+    answer = (
+        "目前沒有北科的資料提到茶會，北科禪心領袖社的茶會安排香氛蠟燭手作體驗，"
+        "由生活組準備材料包，參加者完成後可帶回宿舍。"
+    )
+    review = V.review_answer(answer, scope=scope, resolution=res, sources=[_ntut_source(), internal])
+    assert review.verdict == "block"
+
+
+def test_internal_mode_disclaimer_then_fabrication_blocked():
+    """grok 1（內部模式）：「知識庫沒有政大的資料，不過政大禪學社的茶會通常會…」"""
+    res = E.resolve("政大的茶會")
+    scope = E.ResearchScope(mode=E.ResearchMode.INTERNAL)
+    review = V.review_answer(
+        "知識庫沒有政大的資料，不過政大禪學社的茶會通常會安排體驗禪。",
+        scope=scope, resolution=res, sources=[],
+    )
+    assert review.verdict == "block"
+
+
+def test_mixed_partial_sentence_still_caught_as_contamination():
+    """grok 2：外校支持度 0.3 的混合句不能靠 partial 分支矇混。"""
+    scope, res = _ntut_scope()
+    internal = _home_source("茶會當天安排香氛蠟燭手作體驗，由生活組準備材料包，參加者完成後可帶回宿舍。")
+    answer = (
+        "北科禪心領袖社主打貼近生活的禪與特質鍛鍊與領袖實踐，茶會安排香氛蠟燭手作體驗，"
+        "由生活組準備材料包，參加者完成後可帶回宿舍。"
+    )
+    review = V.review_answer(answer, scope=scope, resolution=res, sources=[_ntut_source(), internal])
+    assert any(f.rule == "data_contamination" for f in review.findings)
+    assert review.verdict == "block"
+
+
+def test_generic_club_words_not_flagged_as_contamination():
+    """grok 3：「北科每週舉辦社課，並透過茶會讓新生認識社團」是通用敘述，不是抄淡江。"""
+    scope, res = _ntut_scope()
+    internal = _home_source("本社每週舉辦社課，並在學期初舉辦茶會，讓新生認識社團與社員。")
+    review = V.review_answer(
+        "北科禪心領袖社每週舉辦社課，並透過茶會讓新生認識社團。",
+        scope=scope, resolution=res, sources=[_ntut_source(), internal],
+    )
+    assert not any(f.rule == "data_contamination" for f in review.findings)
+    assert review.verdict != "block"
+
+
+def test_internal_conflict_degrade_shows_partial_status():
+    """grok 4：內部衝突 degrade → research_status 改 partially_verified（黃燈），
+    不能停在 internal 讓前端誤判成紅色驗證失敗。"""
+    res = E.resolve("社長是誰")
+    scope = E.ResearchScope(mode=E.ResearchMode.INTERNAL)
+    conflicts = [{
+        "kind": "same_year_conflict", "field": "president", "year": "114",
+        "entity_id": E.HOME_ENTITY_ID,
+        "values": [{"value": "林小華"}, {"value": "陳大明"}],
+    }]
+    review = V.review_answer(
+        "本學期社長是林小華。", scope=scope, resolution=res, sources=[], conflicts=conflicts,
+    )
+    assert review.verdict == "degrade"
+    assert review.research_status == V.RESEARCH_PARTIAL
+
+
+def test_home_conflict_does_not_mark_external_claim():
+    """grok 5：淡江社長的衝突值不能把北科 claim 標成 conflicted。"""
+    scope, res = _ntut_scope()
+    conflicts = [{
+        "kind": "same_year_conflict", "field": "president", "year": "114",
+        "entity_id": E.HOME_ENTITY_ID,
+        "values": [{"value": "林小華"}, {"value": "陳大明"}],
+    }]
+    src = _ntut_source(excerpt="公開定位：特質鍛鍊與領袖實踐，社長不是林小華。")
+    review = V.review_answer(
+        "北科禪心領袖社主打特質鍛鍊與領袖實踐，社長不是林小華。",
+        scope=scope, resolution=res, sources=[src], conflicts=conflicts,
+    )
+    assert not any(c.status == C.STATUS_CONFLICTED for c in review.claims)
+
+
+def test_swallowed_alias_not_blocked_in_internal_mode():
+    """內部模式的詞界防護：「完成大合照」不得觸發外校結論封鎖。"""
+    res = E.resolve("挑戰營流程")
+    scope = E.ResearchScope(mode=E.ResearchMode.INTERNAL)
+    review = V.review_answer(
+        "挑戰營最後在山頂完成大合照，為活動畫下句點。",
+        scope=scope, resolution=res, sources=[],
+    )
+    assert review.verdict == "allow"

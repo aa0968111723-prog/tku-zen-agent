@@ -1,0 +1,722 @@
+[
+  {
+    "name": "320×800: 頁面不得橫向滾動",
+    "ok": true,
+    "detail": "scrollWidth=320 innerWidth=320"
+  },
+  {
+    "name": "320×800: 快速按鈕數量為 6",
+    "ok": true,
+    "detail": "找到 6 顆"
+  },
+  {
+    "name": "320×800: 按鈕「填入：做網宣」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "320×800: 按鈕「填入：規劃活動」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "320×800: 按鈕「填入：查社團資料」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "320×800: 按鈕「填入：研究其他學校」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "320×800: 按鈕「填入：產生文件」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "320×800: 按鈕「繼續上一個任務」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "320×800: #input 觸控高度 ≥ 40",
+    "ok": true,
+    "detail": "h=40"
+  },
+  {
+    "name": "320×800: #send 觸控高度 ≥ 40",
+    "ok": true,
+    "detail": "h=44"
+  },
+  {
+    "name": "320×800: composer 不遮住訊息區",
+    "ok": true,
+    "detail": "chatBottom=0 composerTop=721"
+  },
+  {
+    "name": "320×800: 設定抽屜寬度不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800: 設定抽屜內容可捲動或無需捲動",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800: Escape 關閉設定抽屜",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800: 關閉後焦點回到設定鈕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800: Tab 可移動焦點",
+    "ok": true,
+    "detail": "clear-input"
+  },
+  {
+    "name": "320×800: 具備 :focus-visible 樣式",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800: 續接視窗不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800: Escape 關閉續接視窗",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800: 可見按鈕皆有名稱（文字或 aria-label）",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800: 進度狀態列具 aria-live",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800: 卡片不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800（含卡片）: 頁面不得橫向滾動",
+    "ok": true,
+    "detail": "scrollWidth=320 innerWidth=320"
+  },
+  {
+    "name": "320×800: 頁面無 JS 錯誤",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "360×800: 頁面不得橫向滾動",
+    "ok": true,
+    "detail": "scrollWidth=360 innerWidth=360"
+  },
+  {
+    "name": "360×800: 快速按鈕數量為 6",
+    "ok": true,
+    "detail": "找到 6 顆"
+  },
+  {
+    "name": "360×800: 按鈕「填入：做網宣」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "360×800: 按鈕「填入：規劃活動」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "360×800: 按鈕「填入：查社團資料」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "360×800: 按鈕「填入：研究其他學校」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "360×800: 按鈕「填入：產生文件」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "360×800: 按鈕「繼續上一個任務」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "360×800: #input 觸控高度 ≥ 40",
+    "ok": true,
+    "detail": "h=40"
+  },
+  {
+    "name": "360×800: #send 觸控高度 ≥ 40",
+    "ok": true,
+    "detail": "h=44"
+  },
+  {
+    "name": "360×800: composer 不遮住訊息區",
+    "ok": true,
+    "detail": "chatBottom=0 composerTop=721"
+  },
+  {
+    "name": "360×800: 設定抽屜寬度不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "360×800: 設定抽屜內容可捲動或無需捲動",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "360×800: Escape 關閉設定抽屜",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "360×800: 關閉後焦點回到設定鈕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "360×800: Tab 可移動焦點",
+    "ok": true,
+    "detail": "clear-input"
+  },
+  {
+    "name": "360×800: 具備 :focus-visible 樣式",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "360×800: 續接視窗不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "360×800: Escape 關閉續接視窗",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "360×800: 可見按鈕皆有名稱（文字或 aria-label）",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "360×800: 進度狀態列具 aria-live",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "360×800: 卡片不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "360×800（含卡片）: 頁面不得橫向滾動",
+    "ok": true,
+    "detail": "scrollWidth=360 innerWidth=360"
+  },
+  {
+    "name": "360×800: 頁面無 JS 錯誤",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "390×844: 頁面不得橫向滾動",
+    "ok": true,
+    "detail": "scrollWidth=390 innerWidth=390"
+  },
+  {
+    "name": "390×844: 快速按鈕數量為 6",
+    "ok": true,
+    "detail": "找到 6 顆"
+  },
+  {
+    "name": "390×844: 按鈕「填入：做網宣」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "390×844: 按鈕「填入：規劃活動」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "390×844: 按鈕「填入：查社團資料」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "390×844: 按鈕「填入：研究其他學校」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "390×844: 按鈕「填入：產生文件」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "390×844: 按鈕「繼續上一個任務」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "390×844: #input 觸控高度 ≥ 40",
+    "ok": true,
+    "detail": "h=40"
+  },
+  {
+    "name": "390×844: #send 觸控高度 ≥ 40",
+    "ok": true,
+    "detail": "h=44"
+  },
+  {
+    "name": "390×844: composer 不遮住訊息區",
+    "ok": true,
+    "detail": "chatBottom=0 composerTop=765"
+  },
+  {
+    "name": "390×844: 設定抽屜寬度不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "390×844: 設定抽屜內容可捲動或無需捲動",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "390×844: Escape 關閉設定抽屜",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "390×844: 關閉後焦點回到設定鈕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "390×844: Tab 可移動焦點",
+    "ok": true,
+    "detail": "clear-input"
+  },
+  {
+    "name": "390×844: 具備 :focus-visible 樣式",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "390×844: 續接視窗不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "390×844: Escape 關閉續接視窗",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "390×844: 可見按鈕皆有名稱（文字或 aria-label）",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "390×844: 進度狀態列具 aria-live",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "390×844: 卡片不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "390×844（含卡片）: 頁面不得橫向滾動",
+    "ok": true,
+    "detail": "scrollWidth=390 innerWidth=390"
+  },
+  {
+    "name": "390×844: 頁面無 JS 錯誤",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932: 頁面不得橫向滾動",
+    "ok": true,
+    "detail": "scrollWidth=430 innerWidth=430"
+  },
+  {
+    "name": "430×932: 快速按鈕數量為 6",
+    "ok": true,
+    "detail": "找到 6 顆"
+  },
+  {
+    "name": "430×932: 按鈕「填入：做網宣」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "430×932: 按鈕「填入：規劃活動」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "430×932: 按鈕「填入：查社團資料」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "430×932: 按鈕「填入：研究其他學校」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "430×932: 按鈕「填入：產生文件」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "430×932: 按鈕「繼續上一個任務」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "430×932: #input 觸控高度 ≥ 40",
+    "ok": true,
+    "detail": "h=40"
+  },
+  {
+    "name": "430×932: #send 觸控高度 ≥ 40",
+    "ok": true,
+    "detail": "h=44"
+  },
+  {
+    "name": "430×932: composer 不遮住訊息區",
+    "ok": true,
+    "detail": "chatBottom=0 composerTop=853"
+  },
+  {
+    "name": "430×932: 設定抽屜寬度不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932: 設定抽屜內容可捲動或無需捲動",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932: Escape 關閉設定抽屜",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932: 關閉後焦點回到設定鈕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932: Tab 可移動焦點",
+    "ok": true,
+    "detail": "clear-input"
+  },
+  {
+    "name": "430×932: 具備 :focus-visible 樣式",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932: 續接視窗不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932: Escape 關閉續接視窗",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932: 可見按鈕皆有名稱（文字或 aria-label）",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932: 進度狀態列具 aria-live",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932: 卡片不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932（含卡片）: 頁面不得橫向滾動",
+    "ok": true,
+    "detail": "scrollWidth=430 innerWidth=430"
+  },
+  {
+    "name": "430×932: 頁面無 JS 錯誤",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800（深色）: 頁面不得橫向滾動",
+    "ok": true,
+    "detail": "scrollWidth=320 innerWidth=320"
+  },
+  {
+    "name": "320×800（深色）: 快速按鈕數量為 6",
+    "ok": true,
+    "detail": "找到 6 顆"
+  },
+  {
+    "name": "320×800（深色）: 按鈕「填入：做網宣」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "320×800（深色）: 按鈕「填入：規劃活動」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "320×800（深色）: 按鈕「填入：查社團資料」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "320×800（深色）: 按鈕「填入：研究其他學校」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "320×800（深色）: 按鈕「填入：產生文件」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "320×800（深色）: 按鈕「繼續上一個任務」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "320×800（深色）: #input 觸控高度 ≥ 40",
+    "ok": true,
+    "detail": "h=40"
+  },
+  {
+    "name": "320×800（深色）: #send 觸控高度 ≥ 40",
+    "ok": true,
+    "detail": "h=44"
+  },
+  {
+    "name": "320×800（深色）: composer 不遮住訊息區",
+    "ok": true,
+    "detail": "chatBottom=0 composerTop=721"
+  },
+  {
+    "name": "320×800（深色）: 設定抽屜寬度不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800（深色）: 設定抽屜內容可捲動或無需捲動",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800（深色）: Escape 關閉設定抽屜",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800（深色）: 關閉後焦點回到設定鈕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800（深色）: Tab 可移動焦點",
+    "ok": true,
+    "detail": "clear-input"
+  },
+  {
+    "name": "320×800（深色）: 具備 :focus-visible 樣式",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800（深色）: 續接視窗不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800（深色）: Escape 關閉續接視窗",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800（深色）: 可見按鈕皆有名稱（文字或 aria-label）",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800（深色）: 進度狀態列具 aria-live",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800（深色）: 卡片不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "320×800（深色）（含卡片）: 頁面不得橫向滾動",
+    "ok": true,
+    "detail": "scrollWidth=320 innerWidth=320"
+  },
+  {
+    "name": "320×800（深色）: 頁面無 JS 錯誤",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932（深色）: 頁面不得橫向滾動",
+    "ok": true,
+    "detail": "scrollWidth=430 innerWidth=430"
+  },
+  {
+    "name": "430×932（深色）: 快速按鈕數量為 6",
+    "ok": true,
+    "detail": "找到 6 顆"
+  },
+  {
+    "name": "430×932（深色）: 按鈕「填入：做網宣」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "430×932（深色）: 按鈕「填入：規劃活動」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "430×932（深色）: 按鈕「填入：查社團資料」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "430×932（深色）: 按鈕「填入：研究其他學校」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "430×932（深色）: 按鈕「填入：產生文件」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "430×932（深色）: 按鈕「繼續上一個任務」可見且未被裁切",
+    "ok": true,
+    "detail": "h=44 clipped=false"
+  },
+  {
+    "name": "430×932（深色）: #input 觸控高度 ≥ 40",
+    "ok": true,
+    "detail": "h=40"
+  },
+  {
+    "name": "430×932（深色）: #send 觸控高度 ≥ 40",
+    "ok": true,
+    "detail": "h=44"
+  },
+  {
+    "name": "430×932（深色）: composer 不遮住訊息區",
+    "ok": true,
+    "detail": "chatBottom=0 composerTop=853"
+  },
+  {
+    "name": "430×932（深色）: 設定抽屜寬度不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932（深色）: 設定抽屜內容可捲動或無需捲動",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932（深色）: Escape 關閉設定抽屜",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932（深色）: 關閉後焦點回到設定鈕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932（深色）: Tab 可移動焦點",
+    "ok": true,
+    "detail": "clear-input"
+  },
+  {
+    "name": "430×932（深色）: 具備 :focus-visible 樣式",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932（深色）: 續接視窗不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932（深色）: Escape 關閉續接視窗",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932（深色）: 可見按鈕皆有名稱（文字或 aria-label）",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932（深色）: 進度狀態列具 aria-live",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932（深色）: 卡片不超出螢幕",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "name": "430×932（深色）（含卡片）: 頁面不得橫向滾動",
+    "ok": true,
+    "detail": "scrollWidth=430 innerWidth=430"
+  },
+  {
+    "name": "430×932（深色）: 頁面無 JS 錯誤",
+    "ok": true,
+    "detail": ""
+  }
+]
