@@ -47,13 +47,28 @@
   <div id="workspace">
     <section id="home" class="home">
       <h1>今天要做什麼？</h1>
-      <p class="lede">說一句就好。網宣會先做成草稿，不會自動發出去。</p>
+      <p class="lede">用一句話開始；送出前會先幫你確認真正影響成果的資訊。</p>
+      <nav class="mode-switch" aria-label="選擇任務方式">
+        <button type="button" class="mode-chip is-active" data-mode="ask" aria-pressed="true">問 AI</button>
+        <button type="button" class="mode-chip" data-mode="generate" aria-pressed="false">直接生成</button>
+        <button type="button" class="mode-chip" data-mode="template" aria-pressed="false">製作範本</button>
+        <button type="button" class="mode-chip" data-mode="plan" aria-pressed="false">執行計畫</button>
+      </nav>
+      <section class="input-guide" aria-labelledby="input-guide-title">
+        <h2 id="input-guide-title">從這裡開始</h2>
+        <p id="mode-hint" class="muted">描述你想完成的事，AI 會先整理成可確認的任務摘要。</p>
+        <div class="suggestion-row" id="suggestions" aria-label="提示詞範例">
+          <button type="button" data-prompt="幫我規劃一場新生茶會，時間地點待填">規劃新生茶會</button>
+          <button type="button" data-prompt="幫我寫一則招生 IG 貼文，語氣自然親切">寫招生貼文</button>
+          <button type="button" data-prompt="查詢本學期社課時間與報名方式">查社團資料</button>
+        </div>
+      </section>
       <div class="quick-grid" id="quick-actions">
-        <button type="button" data-action="ig">做網宣</button>
-        <button type="button" data-action="event">規劃活動</button>
-        <button type="button" data-action="lookup">查社團資料</button>
-        <button type="button" data-action="research">研究其他學校</button>
-        <button type="button" data-action="docs">產生文件</button>
+        <button type="button" data-action="ig">填入：做網宣</button>
+        <button type="button" data-action="event">填入：規劃活動</button>
+        <button type="button" data-action="lookup">填入：查社團資料</button>
+        <button type="button" data-action="research">填入：研究其他學校</button>
+        <button type="button" data-action="docs">填入：產生文件</button>
         <button type="button" data-action="continue">繼續上一個任務</button>
       </div>
 
@@ -115,18 +130,63 @@
       </form>
     </section>
 
-    <main id="chat" class="chat" hidden></main>
+    <main id="chat" class="chat" aria-label="任務內容" hidden></main>
+    <aside id="task-dock" class="task-dock" aria-label="目前任務" hidden>
+      <div class="task-dock-head">
+        <h2>目前任務</h2>
+        <button id="task-dock-summary" class="ghost" type="button">查看摘要</button>
+      </div>
+      <div id="task-dock-content" class="task-dock-content">
+        <p class="empty">開始任務後，進度與下一步會顯示在這裡。</p>
+      </div>
+    </aside>
   </div>
 
   <footer class="composer" id="composer">
     <div class="composer-inner">
-      <textarea id="input" rows="1" placeholder="例如：幫我寫三則招生貼文草稿…"></textarea>
-      <button id="send" type="button" aria-label="送出">
+      <div class="composer-tools" aria-label="加入內容工具">
+        <label class="composer-tool" for="attachment" title="加入文字文件內容">
+          <span>附件</span><span class="sr-only">加入附件或文件</span>
+        </label>
+        <input id="attachment" type="file" accept=".txt,.md,.csv,text/plain,text/markdown,text/csv" aria-label="加入文字文件">
+        <button id="voice-input" class="composer-tool" type="button" aria-label="使用語音輸入">語音</button>
+      </div>
+      <textarea id="input" rows="1" aria-label="任務需求" placeholder="例如：幫我寫三則招生貼文草稿…"></textarea>
+      <button id="clear-input" class="composer-tool" type="button" aria-label="清除輸入內容">清除</button>
+      <button id="send" type="button" aria-label="整理任務並送出">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4Z"/></svg>
       </button>
     </div>
   </footer>
 
+</div>
+
+<div id="preflight-sheet" class="modal" hidden>
+  <section class="modal-card preflight-card" role="dialog" aria-modal="true" aria-labelledby="preflight-title">
+    <header class="modal-head">
+      <div>
+        <p class="eyebrow">開始前確認</p>
+        <h2 id="preflight-title">正在整理你的任務</h2>
+      </div>
+      <button class="icon-btn" id="preflight-close" type="button" aria-label="返回修改需求">×</button>
+    </header>
+    <div id="preflight-body" class="preflight-body"></div>
+    <footer class="modal-foot preflight-foot">
+      <button class="ghost" id="preflight-back" type="button">返回修改</button>
+      <button class="ghost" id="preflight-skip" type="button">先跳過</button>
+      <button class="primary" id="preflight-confirm" type="button">確認開始</button>
+    </footer>
+  </section>
+</div>
+
+<div id="task-summary-sheet" class="modal" hidden>
+  <section class="modal-card task-summary-card" role="dialog" aria-modal="true" aria-labelledby="task-summary-title">
+    <header class="modal-head">
+      <h2 id="task-summary-title">目前任務摘要</h2>
+      <button class="icon-btn" id="task-summary-close" type="button" aria-label="關閉任務摘要">×</button>
+    </header>
+    <div id="task-summary-body" class="task-summary-body"></div>
+  </section>
 </div>
 
 <div id="settings-backdrop" class="backdrop" hidden></div>
