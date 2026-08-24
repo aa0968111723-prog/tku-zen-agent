@@ -81,6 +81,7 @@ def _bigrams(chars: list[str]) -> list[str]:
 # 標題會把劇本壓下去（實測：問「社課當天流程時間表」會拿到歷年的「出隊時間表」）。
 TIER_CURATED = 1.35
 TIER_ARCHIVE = 1.0
+TIER_EXTERNAL = 0.85
 
 
 @dataclass
@@ -233,6 +234,10 @@ class Index:
             for p in sorted(config.CORPUS_DIR.glob("*.md")):
                 files.append((p, f"歷史對話／{p.stem}", TIER_ARCHIVE, "conversation"))
 
+        if config.EXTERNAL_REFERENCE_DIR.exists():
+            for p in sorted(config.EXTERNAL_REFERENCE_DIR.rglob("*.md")):
+                files.append((p, f"外校公開參考：{p.stem}", TIER_EXTERNAL, "external_reference"))
+
         for path, label, tier, source_type in files:
             try:
                 self.chunks.extend(_split_markdown(path, label, tier, source_type))
@@ -256,11 +261,21 @@ class Index:
 
     MIN_CURATED_HITS = 2
 
-    def search(self, query: str, k: int = 6, min_curated: int | None = None) -> list[tuple[float, Chunk]]:
-        return self.search_scored(query, k, min_curated)[0]
+    def search(
+        self,
+        query: str,
+        k: int = 6,
+        min_curated: int | None = None,
+        include_external: bool = False,
+    ) -> list[tuple[float, Chunk]]:
+        return self.search_scored(query, k, min_curated, include_external)[0]
 
     def search_scored(
-        self, query: str, k: int = 6, min_curated: int | None = None
+        self,
+        query: str,
+        k: int = 6,
+        min_curated: int | None = None,
+        include_external: bool = False,
     ) -> tuple[list[tuple[float, Chunk]], float]:
         """回傳 (結果, 信心值)。
 
@@ -275,6 +290,8 @@ class Index:
         n = len(self.chunks)
         scored: list[tuple[float, Chunk]] = []
         for c in self.chunks:
+            if not include_external and getattr(c.meta, "source_type", "") == "external_reference":
+                continue
             length = c.length
             score = 0.0
             for term, qf in q_terms.items():

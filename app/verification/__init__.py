@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .. import config
 from ..services import current_term as term_service
 
 
@@ -199,8 +200,22 @@ def _check_stale_year(text: str, report: Report) -> None:
         return
 
     found = {y for y in ACADEMIC_YEAR.findall(text) if y != str(current_year)}
+    known_text = str(term.known())
+    found_gregorian = {
+        y for y in GREGORIAN_YEAR.findall(text)
+        if y not in known_text and y not in {str(current_year)}
+    }
     # 只在「這些年份被當成本期」的情況下算錯：文件裡同時出現本學期字樣
     claims_current = any(w in text for w in ("本學期", "今年", "本年度", "這學期"))
+    if found_gregorian and claims_current:
+        report.issues.append(
+            Issue(
+                rule="no_stale_year_as_current",
+                severity="error",
+                message=f"文案宣稱目前資訊，但出現未在本學期資料確認的西元年份：{'、'.join(sorted(found_gregorian))}",
+                fix_hint="改成待確認，或先把日期補進 current_term。",
+            )
+        )
     if found and claims_current:
         report.issues.append(
             Issue(
@@ -254,6 +269,90 @@ def _check_required_sections(text: str, report: Report, task_type: str) -> None:
                 severity="error" if len(missing) == len(needed) else "warning",
                 message=f"缺少必要內容：{'、'.join(missing)}。",
                 fix_hint="補上這些段落。可以先用 search_knowledge 查對應的任務劇本確認完整章節。",
+            )
+        )
+
+
+def _external_reference_material() -> tuple[list[str], set[str]]:
+    texts: list[str] = []
+    names: set[str] = set()
+    directory = config.EXTERNAL_REFERENCE_DIR
+    if not directory.exists():
+        return texts, names
+    for path in directory.rglob("*.md"):
+        try:
+            value = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        texts.append(value)
+        names.update(re.findall(r"(?:北科|北藝|台大|政大|清大|交大|禪心社|領袖社|禪學社)", value))
+        names.update(re.findall(r"https?://[^\s)]+", value))
+        for line in value.splitlines():
+            stripped = line.lstrip("#>- ").strip()
+            if "學校：" in stripped:
+                names.add(stripped.split("學校：", 1)[1].strip())
+            elif line.lstrip().startswith("## ") and stripped:
+                names.add(stripped)
+    return texts, names
+
+
+def verify_social_copy(
+    text: str,
+    *,
+    external_references: list[str] | None = None,
+    external_names: set[str] | None = None,
+    report: Report,
+) -> None:
+    """Reject copied long phrases, unconfirmed dates, and external proper names."""
+    report.checked.append("verify_social_copy")
+    texts, names = _external_reference_material()
+    texts.extend(external_references or [])
+    names = set(names) | set(external_names or set())
+
+    normalized = re.sub(r"\s+", "", text)
+    for source in texts:
+        source_normalized = re.sub(r"\s+", "", source)
+        if len(source_normalized) < 12:
+            continue
+        copied = next(
+            (source_normalized[i : i + 12] for i in range(len(source_normalized) - 11)
+             if source_normalized[i : i + 12] in normalized),
+            None,
+        )
+        if copied:
+            report.issues.append(
+                Issue(
+                    rule="verify_social_copy",
+                    severity="error",
+                    message="文案與外校公開參考有長句重疊，疑似抄襲。",
+                    fix_hint="保留想解決的問題，重新用淡江自己的語氣與情境改寫。",
+                )
+            )
+            break
+
+    for name in sorted(names, key=len, reverse=True):
+        if name and name in text:
+            report.issues.append(
+                Issue(
+                    rule="verify_social_copy",
+                    severity="error",
+                    message=f"對外文案含外校專名或連結：{name}",
+                    fix_hint="移除外校社名、講師、連結與可識別的外校資訊。",
+                )
+            )
+            break
+
+    term_text = str(term_service.load().known())
+    dates = set(re.findall(r"20\d{2}[年/-]\d{1,2}(?:[月/-]\d{1,2}[日號]?)?", text))
+    dates.update(re.findall(r"(?<!\d)\d{1,2}/\d{1,2}(?!\d)", text))
+    unconfirmed = sorted(d for d in dates if d not in term_text)
+    if unconfirmed:
+        report.issues.append(
+            Issue(
+                rule="verify_social_copy",
+                severity="error",
+                message=f"文案含未經本學期資料確認的日期：{'、'.join(unconfirmed)}，請標示待確認。",
+                fix_hint="改為「日期待確認」，或先更新 current_term。",
             )
         )
 
@@ -328,6 +427,8 @@ def verify(
     task_type: str = "",
     rules: list[str] | None = None,
     external: bool = False,
+    external_references: list[str] | None = None,
+    external_names: set[str] | None = None,
 ) -> Report:
     """檢查一份產出。回傳 Report，呼叫端決定要不要修。"""
     path = Path(path)
@@ -353,6 +454,13 @@ def verify(
 
     if not active or "no_health_claims" in active:
         _check_health_claims(text, report)
+    if "verify_social_copy" in active:
+        verify_social_copy(
+            text,
+            external_references=external_references,
+            external_names=external_names,
+            report=report,
+        )
     # external_tone 與 not_religious_recruitment 是同一件事的兩個說法，
     # 任一個出現就要做這個檢查
     if not active or {"not_religious_recruitment", "external_tone"} & active:

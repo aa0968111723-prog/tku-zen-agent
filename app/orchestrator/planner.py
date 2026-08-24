@@ -104,6 +104,8 @@ def plan_for(routing: Routing, needs_artifact: bool) -> list[PlanStep]:
 
 def verification_rules_for(routing: Routing) -> list[str]:
     rules = ["no_fabricated_current_facts", "no_stale_year_as_current", "placeholder_for_unknown"]
+    if routing.skill.name == "social_publicity":
+        rules += ["verify_social_copy", "no_health_claims", "not_religious_recruitment", "external_tone"]
     if routing.skill.name == "recruitment":
         rules += ["no_health_claims", "not_religious_recruitment", "external_tone"]
     if routing.skill.name == "evaluation":

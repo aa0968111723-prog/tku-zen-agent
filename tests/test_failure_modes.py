@@ -220,7 +220,7 @@ async def test_quota_exhausted_gives_actionable_message(monkeypatch, ctx):
     monkeypatch.setattr(orch, "NvidiaClient", lambda **_: Broke())
     events = [ev async for ev in orch.run_turn(ctx, "你好", destination="local")]
     err = next(e for e in events if e["type"] == "error")
-    assert "額度" in err["text"]
+    assert err["text"] == "系統忙碌中，請稍後再試"
 
 
 @pytest.mark.asyncio
@@ -237,7 +237,7 @@ async def test_unexpected_exception_does_not_leak_traceback(monkeypatch, ctx):
     events = [ev async for ev in orch.run_turn(ctx, "你好", destination="local")]
     err = next(e for e in events if e["type"] == "error")
     assert "Traceback" not in err["text"]
-    assert "ZeroDivisionError" in err["text"]
+    assert err["text"] == "系統忙碌中，請稍後再試"
 
 
 def test_missing_api_key_is_explained():

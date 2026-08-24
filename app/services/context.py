@@ -21,6 +21,7 @@ class RequestContext:
     user_id: str
     session_id: str | None = None
     project_id: str | None = None
+    auth_level: str = "general"
 
 
 _ctx: ContextVar[RequestContext | None] = ContextVar("tku_request_context", default=None)

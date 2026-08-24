@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -33,9 +34,15 @@ from .state import OrchestrationState, Stage
 
 MAX_TOOL_ROUNDS = 8
 MAX_REPAIRS = 2
+logger = logging.getLogger(__name__)
 
 # 產檔類工具 —— 產出後要進 verify
-ARTIFACT_TOOLS = {"create_spreadsheet", "create_document", "create_slides", "create_google_form"}
+ARTIFACT_TOOLS = {
+    "create_spreadsheet", "create_document", "create_slides", "create_google_form",
+    "create_social_post", "create_social_carousel", "create_social_story", "create_reels_script",
+    "create_social_content_calendar", "create_social_ab_test", "create_social_image_prompt",
+    "create_social_video_prompt",
+}
 
 
 def _preview(args: dict[str, Any]) -> str:
@@ -110,6 +117,7 @@ async def _run(
         "sources": bundle.display_sources(),
         "curated": bundle.curated_count,
         "archive": bundle.archive_count,
+        "external_reference": getattr(bundle, "external_count", 0),
     }
 
     # ── Execute ──────────────────────────────────────────
@@ -143,12 +151,14 @@ async def _run(
         except LLMError as exc:
             state.stage = Stage.FAILED
             state.completion_status = "failed"
-            yield {"type": "error", "text": str(exc)}
+            logger.exception("LLM call failed")
+            yield {"type": "error", "text": "系統忙碌中，請稍後再試"}
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             state.stage = Stage.FAILED
             state.completion_status = "failed"
-            yield {"type": "error", "text": f"呼叫模型時發生非預期錯誤：{type(exc).__name__}: {exc}"}
+            logger.exception("model call failed")
+            yield {"type": "error", "text": "系統忙碌中，請稍後再試"}
             return
 
         assistant_msg: dict[str, Any] = {"role": "assistant", "content": reply.content or ""}
@@ -217,7 +227,7 @@ async def _run(
                     path,
                     task_type=state.task_type.value,
                     rules=state.verification_rules,
-                    external=routing.skill.name == "recruitment",
+                    external=routing.skill.name in {"recruitment", "social_publicity"},
                 )
                 state.verification_results.append(report.to_dict())
 
@@ -336,10 +346,17 @@ def _fallback_summary(produced: list[dict[str, Any]], state: OrchestrationState)
     return "\n".join(lines)
 
 
-def health() -> dict[str, Any]:
+def health(*, slim: bool = False) -> dict[str, Any]:
     from ..llm import MODEL_ROUTES, pool_stats
 
     idx = retrieval.get_index()
+    if slim:
+        return {
+            "model": config.NVIDIA_MODEL,
+            "models": config.KNOWN_TOOL_MODELS,
+            "destination": config.DEFAULT_DESTINATION,
+            "auth_mode": config.auth_mode(),
+        }
     term = term_service.load()
     return {
         "model": config.NVIDIA_MODEL,

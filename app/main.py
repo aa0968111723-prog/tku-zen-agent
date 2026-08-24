@@ -1,18 +1,14 @@
-"""FastAPI 伺服器。本機跑 `python -m app` 或部署到 Zeabur 都是同一份程式。
-
-安全要點：
-  · 每個請求都要先識別 user（本機模式自動、部署模式要存取碼）
-  · session / project / artifact 一律驗歸屬，猜到別人的 id 也讀不到
-  · 前端只拿得到 artifact_id，拿不到伺服器上的絕對路徑
-"""
+"""FastAPI application with router-level general/admin authorization."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -22,13 +18,12 @@ from .services import auth, context as ctx_mod
 from .services import current_term as term_service
 from .services.session_store import get_store
 
+logger = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
 
-app = FastAPI(title="淡江大學領袖禪學社 · AI 代理", docs_url=None, redoc_url=None)
+app = FastAPI(title="淡江大學領袖禪學社 AI 工作台", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
-
-# ── 請求模型 ──────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
     session_id: str | None = None
@@ -42,23 +37,26 @@ class SessionRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    token: str = Field(min_length=1, max_length=200)
+    # Empty/malformed values must reach the auth layer and receive the same 401.
+    token: str | None = Field(default=None, max_length=200)
 
 
 class TermRequest(BaseModel):
     fields: dict[str, Any]
 
 
-# ── 身分 ─────────────────────────────────────────────────────
+general_router = APIRouter(prefix="/api", dependencies=[Depends(auth.require_user)])
+admin_router = APIRouter(prefix="/api", dependencies=[Depends(auth.require_admin)])
+
 
 def current_user(request: Request, response: Response) -> str:
-    return auth.identify(request, response)
+    return auth.require_user(request, response)
 
 
 @app.post("/api/auth")
-async def login(req: LoginRequest, response: Response) -> dict[str, Any]:
-    user_id = auth.login(response, req.token)
-    return {"ok": True, "user_id": user_id}
+async def login(req: LoginRequest, request: Request, response: Response) -> dict[str, bool]:
+    auth.login(request, response, req.token)
+    return {"ok": True}
 
 
 @app.get("/api/auth")
@@ -66,50 +64,59 @@ async def auth_status(request: Request) -> dict[str, Any]:
     return {
         "mode": config.auth_mode(),
         "authenticated": auth.optional_identity(request) is not None,
+        "is_admin": auth.admin_identity(request),
     }
 
 
-# ── 頁面 ─────────────────────────────────────────────────────
+@app.post("/api/admin/auth")
+async def admin_login(req: LoginRequest, request: Request, response: Response) -> dict[str, bool]:
+    auth.admin_login(request, response, req.token)
+    return {"ok": True}
+
+
+@app.post("/api/auth/logout")
+async def logout(response: Response) -> dict[str, bool]:
+    auth.logout(response)
+    return {"ok": True}
+
+
+@app.post("/api/admin/logout")
+async def admin_logout(request: Request, response: Response) -> dict[str, bool]:
+    auth.admin_logout(request, response)
+    return {"ok": True}
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
     return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
 
 
-@app.get("/api/health")
+@general_router.get("/health")
 async def health(_user_id: str = Depends(current_user)) -> dict[str, Any]:
-    """要先識別身分。這裡會吐出模型設定、知識庫規模、本學期缺哪些欄位，
-    部署模式下不該讓沒有存取碼的人看到。"""
+    return orchestrator.health(slim=True)
+
+
+@admin_router.get("/admin/health")
+async def admin_health() -> dict[str, Any]:
     return orchestrator.health()
 
 
-# ── session ──────────────────────────────────────────────────
-
 def _resolve_session(user_id: str, session_id: str | None) -> str:
-    """取得（或建立）這個使用者的 session。
-
-    別人的 session_id 在這裡會被當成不存在，直接開一個新的 ——
-    不回報「這個 id 存在但不是你的」，避免變成存在性探測。
-    """
     store = get_store()
     if session_id and store.get_session(session_id, user_id):
         return session_id
     return store.create_session(user_id)
 
 
-@app.post("/api/session")
+@general_router.post("/session")
 async def ensure_session(req: SessionRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
     sid = _resolve_session(user_id, req.session_id)
     store = get_store()
     sess = store.get_session(sid, user_id) or {}
-    return {
-        "session_id": sid,
-        "project_id": sess.get("project_id"),
-        "message_count": store.message_count(sid),
-    }
+    return {"session_id": sid, "project_id": sess.get("project_id"), "message_count": store.message_count(sid)}
 
 
-@app.get("/api/sessions")
+@general_router.get("/sessions")
 async def list_sessions(user_id: str = Depends(current_user)) -> dict[str, Any]:
     store = get_store()
     return {
@@ -125,41 +132,35 @@ async def list_sessions(user_id: str = Depends(current_user)) -> dict[str, Any]:
     }
 
 
-@app.post("/api/reset")
-async def reset(req: SessionRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
-    """只清得掉自己的 session。"""
+@general_router.post("/reset")
+async def reset(req: SessionRequest, user_id: str = Depends(current_user)) -> dict[str, bool]:
     if not req.session_id:
         return {"ok": True, "cleared": False}
     store = get_store()
     if not store.get_session(req.session_id, user_id):
-        raise HTTPException(status_code=404, detail="找不到這個對話。")
+        raise HTTPException(status_code=404, detail="找不到這個工作階段")
     store.clear_messages(req.session_id)
     return {"ok": True, "cleared": True}
 
 
-# ── 知識庫 ────────────────────────────────────────────────────
+@admin_router.post("/reindex")
+async def reindex() -> dict[str, Any]:
+    index = await asyncio.to_thread(retrieval.get_index, rebuild=True)
+    return index.stats()
 
-@app.post("/api/reindex")
-async def reindex(_user_id: str = Depends(current_user)) -> dict[str, Any]:
-    return retrieval.get_index(rebuild=True).stats()
 
-
-# ── 本學期設定 ────────────────────────────────────────────────
-
-@app.get("/api/term")
-async def get_term(_user_id: str = Depends(current_user)) -> dict[str, Any]:
+@general_router.get("/term")
+async def get_term() -> dict[str, Any]:
     return term_service.as_form()
 
 
-@app.post("/api/term")
-async def save_term(req: TermRequest, _user_id: str = Depends(current_user)) -> dict[str, Any]:
+@admin_router.post("/term")
+async def save_term(req: TermRequest) -> dict[str, Any]:
     term_service.update(req.fields)
     return term_service.as_form()
 
 
-# ── 產出 ─────────────────────────────────────────────────────
-
-@app.get("/api/artifacts")
+@general_router.get("/artifacts")
 async def list_artifacts(
     project_id: str | None = None, limit: int = 30, user_id: str = Depends(current_user)
 ) -> dict[str, Any]:
@@ -167,32 +168,23 @@ async def list_artifacts(
     return {"artifacts": [a.public() for a in items]}
 
 
-@app.get("/api/download")
+@general_router.get("/download")
 async def download(artifact_id: str, user_id: str = Depends(current_user)) -> FileResponse:
-    """只能下載自己的產出。
-
-    以前這個端點吃的是 ?path=，靠「必須在 outputs 底下」來擋 ——
-    部署成多人使用之後那完全不夠，任何人都能下載別人的檔案。
-    """
     record = get_store().get_artifact(artifact_id, user_id)
     if record is None:
-        raise HTTPException(status_code=404, detail="找不到這份產出。")
-
+        raise HTTPException(status_code=404, detail="找不到這份產出")
     target = Path(record.local_path).resolve()
     root = config.OUTPUT_DIR.resolve()
     if not target.is_relative_to(root) or not target.is_file():
-        raise HTTPException(status_code=404, detail="這份產出的檔案已經不在伺服器上了。")
+        raise HTTPException(status_code=404, detail="這份產出的檔案已不存在")
     return FileResponse(target, filename=record.filename)
 
 
-# ── 對話 ─────────────────────────────────────────────────────
-
-@app.post("/api/chat")
+@general_router.post("/chat")
 async def chat(req: ChatRequest, user_id: str = Depends(current_user)) -> StreamingResponse:
     session_id = _resolve_session(user_id, req.session_id)
 
     async def stream():
-        # 先把 session_id 告訴前端 —— 第一次對話時它還不知道
         yield f'data: {json.dumps({"type": "session", "session_id": session_id}, ensure_ascii=False)}\n\n'
         try:
             async for event in orchestrator.run_turn(
@@ -202,8 +194,9 @@ async def chat(req: ChatRequest, user_id: str = Depends(current_user)) -> Stream
                 model=req.model,
             ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-        except Exception as exc:  # noqa: BLE001
-            payload = {"type": "error", "text": f"伺服器錯誤：{type(exc).__name__}: {exc}"}
+        except Exception:  # noqa: BLE001
+            logger.exception("chat stream failed")
+            payload = {"type": "error", "text": "系統忙碌中，請稍後再試"}
             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         yield 'data: {"type": "done"}\n\n'
 
@@ -212,3 +205,34 @@ async def chat(req: ChatRequest, user_id: str = Depends(current_user)) -> Stream
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@general_router.get("/instagram/status")
+async def instagram_status() -> dict[str, Any]:
+    connected = bool(config.INSTAGRAM_ACCESS_TOKEN and config.INSTAGRAM_BUSINESS_ACCOUNT_ID)
+    return {"connected": connected, "mode": "connected" if connected else "draft"}
+
+
+async def _instagram_write() -> None:
+    if not (config.INSTAGRAM_ACCESS_TOKEN and config.INSTAGRAM_BUSINESS_ACCOUNT_ID):
+        raise HTTPException(status_code=501, detail="尚未連接 Instagram 官方 API，目前為草稿模式")
+    raise HTTPException(status_code=501, detail="Instagram 發布功能尚未啟用")
+
+
+@admin_router.post("/instagram/publish")
+async def instagram_publish() -> None:
+    await _instagram_write()
+
+
+@admin_router.post("/instagram/comments/reply")
+async def instagram_reply() -> None:
+    await _instagram_write()
+
+
+@admin_router.post("/instagram/messages/send")
+async def instagram_send() -> None:
+    await _instagram_write()
+
+
+app.include_router(general_router)
+app.include_router(admin_router)

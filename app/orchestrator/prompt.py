@@ -63,6 +63,12 @@ BASE = """你是「淡江大學領袖禪學社」的專屬 AI 助理，服務對
 DEST_LABEL = {"local": "只存本機", "drive": "上傳 Google 雲端硬碟", "both": "本機與雲端都存"}
 
 
+RAG_PRIORITY = (
+    "本學期真實資料 > 規範／劇本 > 淡江歷年 > 外校公開參考 > 模型常識。"
+    "外校公開參考只能用於比較分析，禁止照抄，也不是淡江資料。"
+)
+
+
 def build_system_prompt(
     *,
     state: OrchestrationState,
@@ -71,7 +77,7 @@ def build_system_prompt(
     destination: str,
     project_facts: dict[str, str] | None = None,
 ) -> str:
-    parts = [BASE]
+    parts = [BASE, "## 資料優先序\n\n" + RAG_PRIORITY]
 
     # 1. 當期真實資料（最高優先）
     parts.append(term_service.load().prompt_block())

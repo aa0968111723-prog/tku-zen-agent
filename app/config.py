@@ -66,9 +66,21 @@ DB_PATH = _path("DB_PATH", "data/agent.sqlite3")
 # token  = 部署模式，要先用 APP_ACCESS_TOKEN 換到身分才能用
 AUTH_MODE = (os.getenv("AUTH_MODE") or "").strip().lower()
 APP_ACCESS_TOKEN = (os.getenv("APP_ACCESS_TOKEN") or "").strip()
+ADMIN_ACCESS_TOKEN = (os.getenv("ADMIN_ACCESS_TOKEN") or "").strip()
+ACCESS_CODE_COOKIE_NAME = (os.getenv("ACCESS_CODE_COOKIE_NAME") or "tku_zen_access").strip() or "tku_zen_access"
+ACCESS_CODE_COOKIE_MAX_AGE = int(os.getenv("ACCESS_CODE_COOKIE_MAX_AGE") or 2592000)
+ADMIN_COOKIE_MAX_AGE = int(os.getenv("ADMIN_COOKIE_MAX_AGE") or 43200)
+ADMIN_COOKIE_NAME = "tku_zen_admin"
+
+# Instagram is deliberately configuration-only in this phase.  No credential is
+# ever returned to the browser or exposed to the model/tool registry.
+INSTAGRAM_ACCESS_TOKEN = (os.getenv("INSTAGRAM_ACCESS_TOKEN") or "").strip()
+INSTAGRAM_BUSINESS_ACCOUNT_ID = (os.getenv("INSTAGRAM_BUSINESS_ACCOUNT_ID") or "").strip()
+INSTAGRAM_APP_ID = (os.getenv("INSTAGRAM_APP_ID") or "").strip()
 
 # ── 當期狀態（本學期的真實資料）────────────────────────────────
 CURRENT_TERM_FILE = _path("CURRENT_TERM_FILE", "data/current_term.yaml")
+EXTERNAL_REFERENCE_DIR = KNOWLEDGE_DIR / "社群"
 
 
 def auth_mode() -> str:
@@ -114,10 +126,6 @@ def missing_config() -> list[str]:
         problems.append("NVIDIA_API_KEY 格式看起來不對，正常應該以 nvapi- 開頭。")
     if DEFAULT_DESTINATION not in {"local", "drive", "both"}:
         problems.append(f"DEFAULT_DESTINATION 只能是 local / drive / both，目前是 {DEFAULT_DESTINATION!r}。")
-    if auth_mode() == "local" and HOST not in {"127.0.0.1", "localhost", ""}:
-        problems.append(
-            f"伺服器綁在 {HOST} 對外開放，但沒有設定 APP_ACCESS_TOKEN。"
-            "任何拿到網址的人都能使用並消耗你的 NVIDIA 額度，也看得到彼此的產出。"
-            "部署時請務必設定 APP_ACCESS_TOKEN。"
-        )
+    if auth_mode() == "token" and not APP_ACCESS_TOKEN:
+        problems.append("AUTH_MODE=token 但未設定 APP_ACCESS_TOKEN。部署前請補上授權碼。")
     return problems
