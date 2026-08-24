@@ -21,6 +21,14 @@ class Case:
     note: str = ""
     term_fields: dict[str, str] = field(default_factory=dict)  # 這個案例要先設定的當期資料
     tags: tuple[str, ...] = ()
+    # SSE 事件流斷言（runner 驗證，硬門檻）。元素形如 "clarification_needed"
+    # （只比事件 type）或 "research_status=no_reliable_source"
+    # （type＋識別欄位值，識別欄位見 runner._EVENT_VALUE_FIELD）。
+    expected_events: tuple[str, ...] = ()   # 事件流必須出現
+    forbidden_events: tuple[str, ...] = ()  # 事件流不得出現
+    # 這個案例預期的外校研究對象（學校簡稱或全名）。預設由 message 點名的
+    # 學校推得；回答提到範圍外的外校 → 學校歸屬幻覺（hallucination=0）。
+    expected_schools: tuple[str, ...] = ()
 
 
 CASES: list[Case] = [
@@ -137,12 +145,27 @@ CASES: list[Case] = [
          tags=("必測",)),
 
     # ── 研究驗證（政大事故回歸案例）────────────────────────
+    # 這批案例除了維度評分外，還宣告事件流斷言（expected_events／forbidden_events）：
+    # 反問閘門、研究狀態這些防護若被移除，事件流會缺少對應事件，案例直接判失敗。
     Case("res-01", "幫我比較北科禪心領袖社跟淡江的招生文案", "social_research", (), ("北科",),
-         note="點名外校＋比較 → 外校證據池必須含北科段落", tags=("研究驗證",)),
+         note="點名外校＋比較 → 外校證據池必須含北科段落", tags=("研究驗證",),
+         expected_events=("retrieval_started", "source_cards", "research_status"),
+         forbidden_events=("clarification_needed", "artifact_ready")),
     Case("res-02", "政大呢", "social_research", (), (),
-         note="研究對象不明——必須反問，不得生成外校事實", tags=("研究驗證",)),
+         note="研究對象不明——必須反問，不得生成外校事實", tags=("研究驗證",),
+         # 反問閘門：必須發出反問卡與 needs_clarification 狀態；
+         # 閘門明言「不做任何檢索與生成」→ 檢索與產檔事件都不得出現。
+         expected_events=("clarification_needed", "research_status=needs_clarification"),
+         forbidden_events=("artifact_ready", "retrieval_started")),
     Case("res-03", "幫我做期初茶會企劃書，只用淡江內部資料就好", "event_planning", ("document",), ("茶會",),
-         note="明確要求內部模式", tags=("研究驗證",)),
+         note="明確要求內部模式", tags=("研究驗證",),
+         expected_events=("artifact_ready", "research_status=internal"),
+         forbidden_events=("clarification_needed",)),
+    Case("res-04", "幫我研究台大領袖社的招生方式", "social_research", (), (),
+         note="registry 有此社團但無已驗證來源——必須誠實回報查無來源，不得生成外校事實",
+         tags=("研究驗證",),
+         expected_events=("research_status=no_reliable_source",),
+         forbidden_events=("artifact_ready", "clarification_needed")),
 ]
 
 BY_ID = {c.id: c for c in CASES}

@@ -891,6 +891,7 @@ async def _run(
         scope=scope,
         resolution=resolution,
         sources=turn_sources,
+        conflicts=list(retrieval_event.get("conflicts") or []),
     )
     state.research_status = review.research_status
     state.claim_records = [c.to_dict() for c in review.claims]
@@ -971,18 +972,20 @@ def _source_from_reference(ref: dict[str, Any]) -> SourceRecord | None:
     """把 social 研究工具回傳的 reference 轉成來源紀錄。"""
     if not isinstance(ref, dict) or not ref.get("excerpt"):
         return None
+    # 預設值一律保守：工具真的有標 official 才算 official，
+    # 沒標的來源不能靠預設值變成「已驗證」（稽核項：預設值改保守）。
     return SourceRecord(
         title=str(ref.get("source") or ref.get("source_file") or ""),
         url=str(ref.get("source_url") or ""),
         publisher=str(ref.get("organization") or ref.get("school") or ""),
         captured_at=str(ref.get("captured_at") or ""),
         excerpt=str(ref.get("excerpt") or ""),
-        source_type=str(ref.get("source_type") or "official_instagram"),
+        source_type=str(ref.get("source_type") or "external_reference"),
         entity_id=str(ref.get("entity_id") or ""),
         school=str(ref.get("school") or ""),
         organization=str(ref.get("organization") or ""),
         source_scope="external",
-        authority_level=str(ref.get("authority_level") or "official"),
+        authority_level=str(ref.get("authority_level") or "unknown"),
         is_external=True,
     ).finalize()
 

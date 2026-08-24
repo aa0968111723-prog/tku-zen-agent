@@ -79,8 +79,10 @@ class SourceRecord:
     is_external: bool = False
     status: str = STATUS_INSUFFICIENT
 
-    def finalize(self, today: date | None = None) -> "SourceRecord":
-        self.status = classify_source(self, today=today)
+    def finalize(
+        self, today: date | None = None, target_entities: list[str] | None = None,
+    ) -> "SourceRecord":
+        self.status = classify_source(self, today=today, target_entities=target_entities)
         if not self.source_id:
             digest = hashlib.sha1(
                 f"{self.title}|{self.url}|{self.excerpt[:80]}".encode("utf-8")
@@ -111,11 +113,20 @@ class SourceRecord:
         }
 
 
-def classify_source(record: SourceRecord, today: date | None = None) -> str:
-    """對單一來源定可信度。外部來源缺 url/title/excerpt 一律不是 verified。"""
+def classify_source(
+    record: SourceRecord, today: date | None = None, target_entities: list[str] | None = None,
+) -> str:
+    """對單一來源定可信度。外部來源缺 url/title/excerpt 一律不是 verified。
+
+    ``target_entities``：本輪研究對象。外校來源的 entity 不在研究對象裡
+    （或根本對不到實體）時標 wrong_entity——來源卡必須誠實顯示
+    「這份來源不是你要研究的對象」，不能掛著 verified 混進證據池。
+    """
     today = today or datetime.now().date()
 
     if record.source_scope == "external":
+        if target_entities and record.entity_id not in target_entities:
+            return STATUS_WRONG_ENTITY
         if not (record.url and record.title and record.excerpt):
             return STATUS_INSUFFICIENT
         captured = _parse_date(record.captured_at) or _parse_date(record.published_at)
@@ -182,7 +193,10 @@ class ClaimRecord:
         }
 
 
-def source_from_chunk(chunk, current_year: str | None = None, today: date | None = None) -> SourceRecord:
+def source_from_chunk(
+    chunk, current_year: str | None = None, today: date | None = None,
+    target_entities: list[str] | None = None,
+) -> SourceRecord:
     """把一個檢索 chunk 轉成來源卡。metadata 是在 rag.metadata.infer 時附上的。"""
     meta = getattr(chunk, "meta", None)
     scope = getattr(meta, "source_scope", "internal") if meta else "internal"
@@ -225,4 +239,4 @@ def source_from_chunk(chunk, current_year: str | None = None, today: date | None
         is_current=bool(current_year and year and str(year) == str(current_year)),
         is_external=(scope == "external"),
     )
-    return record.finalize(today=today)
+    return record.finalize(today=today, target_entities=target_entities)
