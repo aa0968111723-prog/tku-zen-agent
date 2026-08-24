@@ -250,7 +250,8 @@ a:focus-visible {
   min-height: 44px;
 }
 @media (prefers-color-scheme: dark) {
-  .primary, .gate-card button.primary, #send { color: #0f171c; font-weight: 600; }
+  .primary, .gate-card button.primary, #send,
+#stop { color: #0f171c; font-weight: 600; }
 }
 
 /* ── 草稿細條 / 橫幅 / 狀態列 ─────────────────────────── */
@@ -942,6 +943,8 @@ textarea {
 }
 #send:hover:not(:disabled) { filter: brightness(1.08); }
 #send:disabled { opacity: .4; cursor: not-allowed; }
+#stop { background: var(--err); color: #fff; }
+#stop:hover { filter: brightness(1.08); }
 
 /* ── 授權畫面 ─────────────────────────────────────── */
 
@@ -1352,3 +1355,21 @@ select {
 /* [hidden] 必須永遠贏過任何 display 規則——否則 .gate{display:grid}、#settings{display:flex}
    會讓登入後的閘門與未開啟的抽屜繼續蓋在畫面上（整合驗證抓到的真 bug）。 */
 [hidden] { display: none !important; }
+
+/* ── 續接任務畫面 ─────────────────────────────────── */
+.resume-head { max-width: var(--max); margin: 0 auto 14px; }
+.resume-head h2 { font-size: 17px; color: var(--ink); margin: 0 0 4px; overflow-wrap: anywhere; }
+.resume-meta { font-size: 13px; color: var(--ink-2); margin: 0; }
+.resume-summary {
+  max-width: var(--max);
+  margin: 0 auto 16px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 14px;
+  color: var(--ink);
+}
+.resume-summary .body { margin: 6px 0 10px; color: var(--ink-2); }
+.resume-summary button { min-height: var(--tap); }
+.resume-section { font-size: 13px; color: var(--ink-2); margin: 0 0 6px; }

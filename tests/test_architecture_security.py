@@ -83,7 +83,10 @@ def test_auth_rate_limit(secured_client):
 
 def test_instagram_status_is_draft_until_connected(secured_client):
     secured_client.post("/api/auth", json={"token": "app-code"})
-    assert secured_client.get("/api/instagram/status").json() == {"connected": False, "mode": "draft"}
+    data = secured_client.get("/api/instagram/status").json()
+    assert data["connected"] is False
+    assert data["mode"] == "draft"
+    assert data["publish_enabled"] is False
 
 
 def test_deployment_without_token_fails_fast():

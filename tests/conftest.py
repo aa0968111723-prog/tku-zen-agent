@@ -68,3 +68,23 @@ def clean_term(monkeypatch: pytest.MonkeyPatch):
     yield path
     current_term.invalidate()
     shutil.rmtree(d, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _reset_throttle_state():
+    """限流與登入鎖定都是模組層狀態，不能在測試之間殘留。
+
+    尤其登入鎖定：一個測試連打 5 次錯誤授權碼就會鎖 15 分鐘，
+    沒清掉的話後面所有需要登入的測試都會拿到 429。
+    """
+    from app.services import auth, ratelimit
+
+    def _clear():
+        ratelimit.reset()
+        with auth._failure_lock:
+            auth._failures.clear()
+            auth._admin_sessions.clear()
+
+    _clear()
+    yield
+    _clear()

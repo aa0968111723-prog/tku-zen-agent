@@ -167,9 +167,37 @@ Google 沒有可以直接呼叫的表單建立 API。代理改成產一支 Apps 
 另外：
 
 - 授權碼連錯 5 次鎖 15 分鐘（IP＋cookie 雙維度），錯誤訊息統一為「授權碼不正確」
+- 空字串、只有空白、`null` 的授權碼都視同錯誤，一樣回 401 並計入失敗次數
 - 重新輸入授權碼會沿用同一個身分，歷史任務與產出不會消失
-- 管理功能（`/api/reindex`、修改本學期資料、`/api/admin/*`、`/api/instagram/*` 寫入）需要第二組 `ADMIN_ACCESS_TOKEN`
+- 管理功能（`/api/reindex`、修改本學期資料、`/api/admin/*`）需要第二組 `ADMIN_ACCESS_TOKEN`
 - Instagram 未連接官方 API 前一律「草稿模式」：只產草稿，不會、也不能自動發布
+
+#### 權限分成四種，不是只有「是不是管理者」
+
+| 權限 | 誰有 | 管到什麼 |
+|---|---|---|
+| `can_view` | 登入即有 | 讀知識庫、對話、自己的產出 |
+| `can_manage` | 管理者 | 改本學期資料、重建索引、看稽核紀錄與 API 規格 |
+| `can_approve` | 管理者 **且** `EXTERNAL_PUBLISH_ENABLED=1` | 核准對外發佈 |
+| `can_spend` | 管理者 **且** `EXTERNAL_PUBLISH_ENABLED=1` | 動用會花錢／消耗額度的外部 API |
+
+`can_approve` 與 `can_spend` 預設**沒有任何人擁有**。Instagram 的發佈、
+回覆留言、傳送訊息要同時通過「登入 → 管理 → 核准權 → 花費權 → 明確確認
+（`confirm: true`）→ 功能已啟用」六道關卡，缺任何一道都直接擋下。
+這是刻意的：預設永遠是草稿模式。
+
+#### 其他防護
+
+- **`/openapi.json` 在部署模式要管理者授權**才看得到；`/docs`、`/redoc` 一律關閉
+- 全站回應帶 `Content-Security-Policy`、`X-Content-Type-Options`、`Referrer-Policy`、
+  `X-Frame-Options`、`Permissions-Policy`；部署模式另加 `Strict-Transport-Security`
+- 改變狀態的請求會比對 `Origin`（CSRF 縱深防禦），cookie 全部 `HttpOnly`＋`SameSite`，
+  部署模式再加 `Secure`；管理 cookie 用 `SameSite=strict`
+- `/api/chat` 有獨立的每人限流（預設每分鐘 12 次），其餘 API 每 IP 每分鐘 240 次
+- 登入成敗、管理操作、發佈嘗試都寫進 `audit_logs`，但**絕不記錄授權碼本身**
+  （管理者可在 `/api/admin/audit` 查看）
+- 同一個工作階段同時只跑一輪任務，重複送出回 409；「停止生成」會呼叫
+  `/api/chat/cancel` 釋放執行鎖，避免額度被並行請求吃光
 
 **容器重啟後本機檔案與 SQLite 會消失。** 所以：
 - 產出落點設 `drive`
@@ -224,7 +252,7 @@ python scripts/ingest_line.py --dry-run
 
 ```bash
 python scripts/selftest.py    # 快速檢查，30 秒
-python -m pytest              # 347 個測試（含活動／工作流／SSE／artifact／認證／權限／網宣）
+python -m pytest              # 554 個測試（含認證／權限／SSE 取消／續接／版本／研究來源／手機版）
 python -m evals               # 60 個真實社團情境
 ```
 

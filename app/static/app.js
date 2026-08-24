@@ -1048,7 +1048,11 @@ async function refreshProject() {
 
 async function controlTask(action, turn) {
   const label = { pause: "任務已暫停", retry: "正在準備重試失敗步驟", cancel: "已停止生成" }[action];
-  if (action === "cancel" && state.abortController) state.abortController.abort();
+  if (action === "cancel") {
+    // 先請伺服器停止（釋放 session 執行鎖與模型呼叫），再中斷本地連線
+    requestStreamCancel();
+    if (state.abortController) state.abortController.abort();
+  }
   await refreshProject();
   if (!state.projectId) {
     if (action === "cancel") {
@@ -1649,13 +1653,74 @@ async function ensureSession() {
   return state.sessionId;
 }
 
+function setBusyUI(busy) {
+  // 執行中把送出鈕換成永遠摸得到的「停止生成」——
+  // 不必展開工作進度也能停（進度卡裡的停止鈕仍在）。
+  $("send").hidden = busy;
+  $("send").disabled = busy;
+  $("stop").hidden = !busy;
+}
+
+// 串流閒置逾時：超過這段時間沒收到任何資料就視為連線逾時
+const STREAM_IDLE_TIMEOUT_MS = 120000;
+
+function resetStreamWatchdog() {
+  clearTimeout(state.streamWatchdog);
+  state.streamWatchdog = setTimeout(() => {
+    state.streamTimedOut = true;
+    if (state.abortController) state.abortController.abort();
+  }, STREAM_IDLE_TIMEOUT_MS);
+}
+
+function parseSSERecord(record) {
+  // 支援標準 SSE 格式：event: / data:（可多行）/ 註解行（:）
+  let eventName = "";
+  const dataLines = [];
+  for (const line of record.split(/\r?\n/)) {
+    if (!line || line.startsWith(":")) continue;
+    if (line.startsWith("event:")) {
+      eventName = line.slice(6).trim();
+      continue;
+    }
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).replace(/^\s/, ""));
+    }
+  }
+  if (!dataLines.length) return null;
+  try {
+    const ev = JSON.parse(dataLines.join("\n"));
+    if (eventName && ev && !ev.type) ev.type = eventName;
+    return ev;
+  } catch {
+    console.warn("串流資料無法解析為 JSON，已略過這一段。");
+    return null;
+  }
+}
+
+async function requestStreamCancel() {
+  // 通知伺服器停止生成並釋放這個 session 的執行鎖；
+  // 就算這個請求失敗，本地 abort 仍會中斷連線。
+  state.cancelRequested = true;
+  try {
+    if (state.sessionId) {
+      await fetch("/api/chat/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: state.sessionId }),
+      });
+    }
+  } catch {
+    /* 後端取消失敗時仍會在本地中斷連線 */
+  }
+}
+
 async function runTask(text, attachments = [], draft = null, displayText = "") {
   text = (text || $("input").value).trim();
   if (!text || state.busy) return;
 
   state.busy = true;
   state.lastPrompt = text;
-  $("send").disabled = true;
+  setBusyUI(true);
   showPanel("chat");
   addUser(displayText || (draft && draft.text) || text);
   $("input").value = "";
@@ -1690,10 +1755,27 @@ async function runTask(text, attachments = [], draft = null, displayText = "") {
         attachments,
       }),
     });
+    if (resp.status === 403) {
+      const detail = await readDetail(resp);
+      addError(turn, detail || "沒有權限執行這個操作", retry, "permission");
+      announce("權限不足");
+      return;
+    }
+    if (resp.status === 409) {
+      const detail = await readDetail(resp);
+      addError(turn, detail || "這個工作階段已有正在執行的任務，請先停止或稍候", retry, "busy");
+      announce("任務執行中");
+      return;
+    }
     if (resp.status === 429) {
       const detail = await readDetail(resp);
       addError(turn, detail || "嘗試次數過多，請稍後再試", retry);
       announce(detail || "請稍後再試");
+      return;
+    }
+    if (resp.status >= 500) {
+      addError(turn, "伺服器發生錯誤，請稍後再試", retry, "busy");
+      announce("伺服器錯誤");
       return;
     }
     if (!resp.ok || !resp.body) {
@@ -1705,41 +1787,62 @@ async function runTask(text, attachments = [], draft = null, displayText = "") {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let sawDone = false;
+    let sawCancelled = false;
+    const dispatch = (record) => {
+      const ev = parseSSERecord(record);
+      if (!ev) return;
+      if (ev.type === "done") sawDone = true;
+      if (ev.type === "cancelled") sawCancelled = true;
+      resetStreamWatchdog();
+      handleEvent(turn, ev, retry);
+    };
+    resetStreamWatchdog();
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      resetStreamWatchdog();
       buffer += decoder.decode(value, { stream: true });
       const parts = buffer.split("\n\n");
       buffer = parts.pop() || "";
       for (const part of parts) {
-        const line = part.trim();
-        if (!line.startsWith("data:")) continue;
-        let ev;
-        try {
-          ev = JSON.parse(line.slice(5).trim());
-        } catch {
-          continue;
-        }
-        handleEvent(turn, ev, retry);
+        if (part.trim()) dispatch(part);
       }
+    }
+    // 最後一段可能沒有以空行收尾 —— 收線前一定要 flush
+    buffer += decoder.decode();
+    if (buffer.trim()) dispatch(buffer);
+
+    if (!sawDone && !sawCancelled && !state.cancelRequested) {
+      addError(turn, "連線中斷，任務可能沒有完成。請重試一次。", retry, "network");
+      announce("連線中斷");
     }
   } catch (err) {
     if (err.name === "AbortError") {
-      announce("已停止等待回覆");
-      if (state.activeTurn) setFlowStep(turn, "verify", "failed", "已停止生成", "已保留完成的內容。");
-      setOrb("idle", "已停止");
+      if (state.streamTimedOut) {
+        addError(turn, "連線逾時，已停止等待。請確認網路後重試。", retry, "timeout");
+        announce("連線逾時");
+      } else {
+        announce("已停止等待回覆");
+        if (state.activeTurn) setFlowStep(turn, "verify", "failed", "已停止生成", "已保留完成的內容。");
+        setOrb("idle", "已停止");
+      }
       return;
     }
     if (err.message !== "needs-auth") {
-      addError(turn, BUSY_TEXT, retry, "busy");
-      announce(BUSY_TEXT);
+      addError(turn, "連線中斷，請檢查網路後重試。", retry, "network");
+      announce("連線中斷");
     }
   } finally {
+    clearTimeout(state.streamWatchdog);
+    state.streamWatchdog = null;
+    state.cancelRequested = false;
+    state.streamTimedOut = false;
     turn.querySelectorAll(".step.running").forEach((n) => n.classList.remove("running"));
     state.busy = false;
+    setBusyUI(false);
     state.abortController = null;
     state.activeTurn = null;
-    $("send").disabled = false;
     $("input").focus();
     loadHomeLists();
   }
@@ -1928,9 +2031,21 @@ function handleEvent(turn, ev, retry) {
       announce("完成");
       break;
 
+    case "cancelled":
+      turn.querySelectorAll(".step.running").forEach((n) => n.classList.remove("running"));
+      setFlowStep(turn, "verify", "failed", "已停止生成", "已完成的內容會保留。");
+      setOrb("idle", "已停止");
+      announce("已停止生成");
+      break;
+
     case "error":
       addError(turn, friendlyError(ev.text), retry, ev.error_code);
       announce(friendlyError(ev.text));
+      break;
+
+    default:
+      // 未知事件不能弄壞整個任務：記中文警告後繼續
+      console.warn("收到未知的串流事件類型，已略過：", ev.type);
       break;
   }
 }
@@ -1957,21 +2072,124 @@ function fillList(node, items, emptyText, render) {
   items.forEach((item) => node.appendChild(render(item)));
 }
 
+function renderResumeExpired(message) {
+  showPanel("chat");
+  $("chat").replaceChildren();
+  const box = el("div", "error");
+  box.appendChild(el("strong", null, "工作階段已過期"));
+  box.appendChild(el("div", null, message || "這個工作階段已過期或不存在，請建立新任務。"));
+  const actions = el("div", "error-actions");
+  const btn = el("button", "ghost", "建立新任務");
+  btn.type = "button";
+  btn.addEventListener("click", newChat);
+  actions.appendChild(btn);
+  box.appendChild(actions);
+  $("chat").appendChild(box);
+}
+
+function renderResume(data) {
+  state.sessionId = data.session_id;
+  if (data.project_id) state.projectId = data.project_id;
+  showPanel("chat");
+  const chat = $("chat");
+  chat.replaceChildren();
+
+  // 任務脈絡標頭：標題 + 上次判斷的任務類型
+  const head = el("div", "resume-head");
+  head.appendChild(el("h2", null, "繼續「" + (data.title || "先前的任務") + "」"));
+  const bits = [];
+  if (data.task_label) bits.push("任務類型：" + data.task_label);
+  if (data.updated_at) bits.push("上次更新：" + (formatWhen(data.updated_at) || data.updated_at));
+  if (bits.length) head.appendChild(el("p", "resume-meta", bits.join("　·　")));
+  chat.appendChild(head);
+
+  // 對話太長：先給摘要與「查看完整紀錄」
+  if (data.truncated) {
+    const note = el("div", "resume-summary");
+    note.appendChild(el("b", null, "先前進度摘要"));
+    if (data.summary) {
+      const body = el("div", "body");
+      renderPlain(body, data.summary);
+      note.appendChild(body);
+    } else {
+      note.appendChild(el("p", null, "以下只顯示最近 " + data.messages.length + " 則對話（共 " + data.message_count + " 則）。"));
+    }
+    const more = el("button", "ghost", "查看完整紀錄");
+    more.type = "button";
+    more.addEventListener("click", async () => {
+      more.disabled = true;
+      try {
+        const resp = await api("/api/session/resume?full=1&session_id=" + encodeURIComponent(data.session_id));
+        if (resp.ok) renderResume(await resp.json());
+        else announce(BUSY_TEXT);
+      } catch (err) {
+        if (err.message !== "needs-auth") announce(BUSY_TEXT);
+      } finally {
+        more.disabled = false;
+      }
+    });
+    note.appendChild(more);
+    chat.appendChild(note);
+  }
+
+  // 還原最近幾輪對話（含網宣／研究卡片的渲染）
+  for (const m of data.messages || []) {
+    const t = newTurn();
+    if (m.role === "user") t.appendChild(el("div", "bubble-user", m.text));
+    else renderMessage(t, m.text);
+  }
+
+  // 還原目前產出
+  if ((data.artifacts || []).length) {
+    const t = newTurn();
+    t.appendChild(el("p", "resume-section", "這個任務目前的產出"));
+    for (const a of data.artifacts) addArtifact(t, a);
+  }
+
+  // 還原未完成步驟
+  if ((data.pending_steps || []).length) {
+    const t = newTurn();
+    const tl = getTimeline(t);
+    tl.open = true;
+    const titleNode = tl.querySelector(".timeline-title");
+    if (titleNode) titleNode.textContent = "尚未完成的步驟";
+    const liveNode = tl.querySelector(".timeline-live");
+    if (liveNode) liveNode.textContent = "待續接";
+    data.pending_steps.forEach((step, i) => {
+      pendingStep(t, "pending-" + i, step);
+    });
+  }
+
+  chat.appendChild(el("p", "empty", "直接輸入下一步即可接續這個任務。"));
+  $("input").focus();
+  scrollChat();
+}
+
 async function continueSession(sid, title) {
   closeSessionSheet();
   try {
-    const resp = await api("/api/session", { method: "POST", body: JSON.stringify({ session_id: sid }) });
+    const ensure = await api("/api/session", { method: "POST", body: JSON.stringify({ session_id: sid }) });
+    if (!ensure.ok) {
+      announce(BUSY_TEXT);
+      return;
+    }
+    const ensured = await ensure.json();
+    if (ensured.session_id !== sid) {
+      // 後端找不到原 session、開了新的 —— 原任務已過期
+      state.sessionId = ensured.session_id;
+      renderResumeExpired("「" + (title || "先前的任務") + "」已過期或紀錄已被清除，已為你建立新的工作階段。");
+      return;
+    }
+    const resp = await api("/api/session/resume?session_id=" + encodeURIComponent(sid));
+    if (resp.status === 404) {
+      renderResumeExpired();
+      return;
+    }
     if (!resp.ok) {
       announce(BUSY_TEXT);
       return;
     }
-    const data = await resp.json();
-    state.sessionId = data.session_id;
-    showPanel("chat");
-    $("chat").replaceChildren();
-    const note = el("p", "empty", "繼續「" + (title || "先前的任務") + "」。直接輸入下一步即可。");
-    $("chat").appendChild(note);
-    $("input").focus();
+    renderResume(await resp.json());
   } catch (err) {
     if (err.message !== "needs-auth") announce(BUSY_TEXT);
   }
@@ -2412,6 +2630,7 @@ async function newChat() {
 $("reset").addEventListener("click", newChat);
 
 $("send").addEventListener("click", () => send());
+$("stop").addEventListener("click", () => controlTask("cancel", state.activeTurn || $("chat").lastElementChild));
 function renderAttachmentStatus() {
   const status = $("attachment-status");
   const names = state.attachments.map((item) => item.name);
