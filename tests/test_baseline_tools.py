@@ -63,7 +63,8 @@ def test_document_produces_openable_docx(tmp_output_dir):
     doc = Document(path)
     assert len(doc.tables) == 1
     assert any("項目一" in p.text for p in doc.paragraphs)
-    assert path.with_suffix(".md").exists(), "also_markdown 要另存 .md"
+    twins = list(path.parent.glob(f"{path.stem}-文字版*.md"))
+    assert twins, "also_markdown 要另存 .md（專屬字尾，避免跨工具覆寫）"
 
 
 def test_slides_produces_openable_pptx(tmp_output_dir):
@@ -102,7 +103,9 @@ def test_google_form_script_is_runnable_apps_script(tmp_output_dir):
     assert "addScaleItem" in gs
     assert "setDestination" in gs, "要自動建回覆試算表"
     assert "路宣" in gs, "中文選項要正確寫入"
-    assert Path(r["extra_files"][0]).exists(), "要附題目一覽說明"
+    # extra_files 只給檔名（不洩漏伺服器絕對路徑），實際檔案在 .gs 同資料夾
+    assert r["extra_files"][0].endswith(".md") and "\\" not in r["extra_files"][0]
+    assert (Path(r["local_path"]).parent / r["extra_files"][0]).exists(), "要附題目一覽說明"
 
 
 def test_search_knowledge_returns_grounded_context():
