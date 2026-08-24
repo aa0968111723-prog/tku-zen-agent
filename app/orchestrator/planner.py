@@ -372,8 +372,15 @@ def understand(
 
     needs_artifact = routing.produce_artifact and bool(routing.skill.artifacts_expected)
 
+    # 澄清回覆要把**原任務的主題**帶回來：「政大禪學社的茶會文宣」被反問後
+    # 使用者回「我指的是政大的正式社團」，檢索與計畫仍要以「茶會文宣」為題，
+    # 不能只剩下澄清那句話（稽核半成品 #7 後半）。
+    topic_source = message
+    if awaiting and resolution.clarified and previous is not None and previous.intent:
+        topic_source = f"{previous.intent}；{message}"
+
     state = OrchestrationState()
-    state.intent = message.strip()[:300]
+    state.intent = topic_source.strip()[:300]
     try:
         state.task_type = TaskType("composite" if routing.task_sequence else routing.skill.task_type)
     except ValueError:
@@ -404,8 +411,8 @@ def understand(
     state.clarification_pending = pending
     if inherited:
         state.metrics["scope_inherited"] = True
-    state.required_facts = detect_required_facts(message, routing.skill.required_facts)
-    state.retrieval_queries = build_retrieval_queries(message, routing, scope, resolution)
+    state.required_facts = detect_required_facts(topic_source, routing.skill.required_facts)
+    state.retrieval_queries = build_retrieval_queries(topic_source, routing, scope, resolution)
     expected = [routing.preferred_artifact] if routing.preferred_artifact else list(routing.skill.artifacts_expected)
     state.artifacts_expected = expected if needs_artifact else []
     state.verification_rules = verification_rules_for(routing) if needs_artifact else []

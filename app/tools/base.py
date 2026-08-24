@@ -20,6 +20,10 @@ def safe_filename(name: str, default_ext: str) -> str:
     # 版本由 artifact 資料表管理；使用者可見檔名永遠保持穩定，不把
     # _2_2、final_final 或「修正版2」這類儲存層痕跡帶到下載檔名。
     stem = re.sub(r"(?:_\d+){2,}$", "", stem, flags=re.IGNORECASE)
+    # 單一 _N（1–2 位數）也是版本痕跡：「企劃書_2」若保留會開出一條
+    # 平行血統、版本鏈斷裂（稽核不可靠 #35）。三位數以上（_114）
+    # 可能是學年度，保留。
+    stem = re.sub(r"_\d{1,2}$", "", stem)
     stem = re.sub(r"(?:[_\- ]+(?:final|修正版|草稿版?))+(?:[_\- ]*\d+)*$", "", stem, flags=re.IGNORECASE)
     stem = re.sub(
         r"^(\d{3})[_\- ]*(上|下)[_\- ]*",

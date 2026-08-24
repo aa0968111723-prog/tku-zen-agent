@@ -217,7 +217,9 @@ def create_google_form(
     gs_path = unique_path(folder, f"{base}.gs")
     gs_path.write_text(_build_script(form_title, description, parsed, collect_email), encoding="utf-8")
 
-    md_path = gs_path.with_suffix(".md")
+    # 孿生說明檔走 unique_path＋專屬字尾：直接 with_suffix 會跟同 stem 的
+    # 文件工具 .md 互相覆寫（稽核不可靠 #36）
+    md_path = unique_path(gs_path.parent, f"{base}-表單說明.md")
     md_path.write_text(_build_readme(form_title, description, parsed, collect_email), encoding="utf-8")
 
     art = Artifact(
@@ -229,7 +231,8 @@ def create_google_form(
         ],
     )
     result = deliver(gs_path, destination, art, mime=TEXT_MIME).to_result()
-    result["extra_files"] = [str(md_path)]
+    # 只給檔名，不洩漏伺服器絕對路徑（稽核半成品 #31）
+    result["extra_files"] = [md_path.name]
     return result
 
 

@@ -704,7 +704,19 @@ function renderClarification(turn, ev) {
     b.type = "button";
     b.addEventListener("click", () => {
       let text = o.send_text || o.label;
-      if (topic && !text.endsWith("@")) text += "想了解的主題是：" + topic + "。";
+      if (text.endsWith("@")) {
+        // 「帳號是：@」需要使用者補帳號——填進輸入框讓使用者完成，
+        // 不能直接送出殘句；已選的主題插在帳號句前面（稽核半成品 #36）。
+        if (topic) text = text.replace(/，?帳號是：@$/, "，想了解的主題是：" + topic + "，帳號是：@");
+        const box = $("input");
+        if (box) {
+          box.value = text;
+          box.focus();
+          announce("請補上帳號後送出");
+          return;
+        }
+      }
+      if (topic) text += "想了解的主題是：" + topic + "。";
       sendOption(text);
     });
     opts.appendChild(b);
@@ -1105,7 +1117,9 @@ function updateTaskDock(summary) {
   if (!summary) return;
   const content = $("task-dock-content");
   content.replaceChildren();
-  content.appendChild(el("p", "muted", "狀態：" + ({ completed: "已完成", in_progress: "進行中", paused: "已暫停", failed: "需要處理", cancelled: "已停止" })[summary.workflow_status] || "處理中"));
+  // 括號要包住整個查表——「+ 先於 ||」會讓未知狀態顯示「狀態：undefined」（稽核不可靠 #43）
+  const dockStatus = ({ completed: "已完成", in_progress: "進行中", paused: "已暫停", blocked: "待處理", failed: "需要處理", cancelled: "已停止" })[summary.workflow_status] || "處理中";
+  content.appendChild(el("p", "muted", "狀態：" + dockStatus));
   if (summary.current_step) content.appendChild(el("p", null, "目前：" + summary.current_step));
   if (summary.next_action) content.appendChild(el("p", "muted", "下一步：" + summary.next_action));
   dock.hidden = false;
@@ -1116,6 +1130,13 @@ function openTaskSummary() {
   body.replaceChildren();
   const summary = state.taskSummary;
   if (state.preflight) body.appendChild(renderMiniSummary(state.preflight, true));
+  // 任務摘要卡要能看到可信度（規格十二）：本輪的研究狀態一併呈現
+  if (lastResearchStatus && lastResearchStatus.label) {
+    body.appendChild(el(
+      "p", "research-chip " + (RESEARCH_CHIP[lastResearchStatus.status] || "st-stale"),
+      "研究狀態：" + lastResearchStatus.label
+    ));
+  }
   if (!summary && !state.preflight) body.appendChild(el("p", "empty", "任務摘要還在建立中。"));
   if (summary) {
     body.appendChild(el("p", "modal-lede", "這是可理解的任務狀態，不包含 AI 的內部推理。"));
@@ -1177,8 +1198,9 @@ function artifactTitle(filename) {
 function versionLabel(version) {
   const n = Number(version || 1);
   if (n <= 1) return "草稿版";
-  if (n === 2) return "修正版";
-  return "最終版";
+  // 不能把第 3 版以上一律叫「最終版」——version 是流水號，第 5 版出現時
+  // 前一個「最終版」就成了謊言（稽核不可靠 #50）。
+  return "第 " + n + " 版";
 }
 
 function openTextPreview(title, raw, href) {
