@@ -204,6 +204,64 @@ def test_internal_only_answer_gets_attribution_notice():
     assert V.INTERNAL_ATTRIBUTION in review.notices
 
 
+def test_internal_self_analysis_stays_internal():
+    """Codex review P1：「分析我們社團的定位」不得被誤判成外部研究。"""
+    for msg in ("分析我們社團的定位", "分析期初茶會的成效"):
+        scope = E.decide_scope(msg, E.resolve(msg), task_type="social_research")
+        assert scope.mode == E.ResearchMode.INTERNAL, msg
+
+
+def test_section_claims_inherit_target_entity():
+    """Codex review P1：【已驗證資料】裡省略社團名的句子仍是對研究對象的主張。"""
+    scope, res = _scope("北科禪心領袖社的社課")
+    review = V.review_answer(
+        "【研究對象】國立臺北科技大學 北科禪心領袖社\n"
+        "【已驗證資料】每週五舉辦免費手作課程，現場發放冥想手環。",
+        scope=scope, resolution=res, sources=[_ntut_source()],
+    )
+    assert review.claims, "省略名字的主張不可以繞過閘門"
+    assert review.claims[0].entity_id == "ntut-lead"
+    assert review.claims[0].status != C.STATUS_VERIFIED   # 摘錄裡沒有這些內容
+    assert review.verdict == "degrade"
+
+    # 有來源支持的省略名句要能驗證通過
+    review2 = V.review_answer(
+        "【研究對象】國立臺北科技大學 北科禪心領袖社\n"
+        "【已驗證資料】公開定位是貼近生活的禪、禪心領袖、特質鍛鍊與領袖實踐。",
+        scope=scope, resolution=res, sources=[_ntut_source()],
+    )
+    assert any(c.status == C.STATUS_VERIFIED for c in review2.claims)
+
+
+def test_inherited_sentence_with_tku_signature_is_contamination():
+    scope, res = _scope("北科禪心領袖社的茶會")
+    review = V.review_answer(
+        "【研究對象】北科禪心領袖社\n【已驗證資料】期初茶會以浮游花手作為主軸。",
+        scope=scope, resolution=res, sources=[_ntut_source()],
+    )
+    assert review.verdict == "block"
+    assert review.contamination is not None
+
+
+def test_claim_attributed_to_actual_supporting_source():
+    """Codex review P1：claim 要掛在真正支持它的來源上，不是清單第一個。"""
+    scope, res = _scope("北科禪心領袖社的 IG")
+    unrelated_first = _ntut_source(
+        title="外校公開參考 › 北科禪心領袖社 › 活動回顧",
+        excerpt="上學期舉辦了期末聚會與幹部訓練，感謝大家參與。",
+        url="https://www.instagram.com/ntut_leadershipclub/other/",
+    )
+    supporting_second = _ntut_source()
+    review = V.review_answer(
+        "北科禪心領袖社的公開定位是貼近生活的禪、禪心領袖、特質鍛鍊與領袖實踐。",
+        scope=scope, resolution=res, sources=[unrelated_first, supporting_second],
+    )
+    verified = [c for c in review.claims if c.status == C.STATUS_VERIFIED]
+    assert verified, review.claims
+    assert verified[0].source_title == supporting_second.title
+    assert verified[0].excerpt == supporting_second.excerpt
+
+
 def test_all_stale_sources_add_warning():
     scope, res = _scope("北科禪心領袖社的 IG")
     review = V.review_answer(

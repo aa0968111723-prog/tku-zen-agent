@@ -396,7 +396,10 @@ def decide_scope(message: str, resolution: EntityResolution, task_type: str = ""
 
     targets = resolution.external_targets()
     mentions_external = bool(targets or resolution.unresolved or resolution.user_provided_accounts)
-    generic = bool(_EXTERNAL_HINTS.search(message)) or task_type == "social_research"
+    # 泛用外部研究必須有明確的外部訊號（「其他學校」「外校」…）。
+    # 只靠 task_type 判斷會把「分析我們社團的定位」這類內部自我分析
+    # 誤判成外部研究，反而把淡江自己的資料整批排除（Codex review 抓到的 bug）。
+    generic = bool(_EXTERNAL_HINTS.search(message))
 
     if not mentions_external and not generic:
         return scope   # internal

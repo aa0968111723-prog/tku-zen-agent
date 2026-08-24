@@ -179,6 +179,36 @@ def _source_section_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
+# 這些區段的內容講的是研究對象——句子省略了社團名也一樣是對外校的主張。
+_CLAIM_SECTION_HEAD = re.compile(r"【(已驗證資料|外校已驗證資料|兩者差異)】")
+
+
+def _claim_section_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for m in _CLAIM_SECTION_HEAD.finditer(text):
+        start = m.end()
+        nxt = text.find("【", start)
+        spans.append((start, len(text) if nxt == -1 else nxt))
+    return spans
+
+
+def _best_support(
+    sent: str, entity_sources: list[SourceRecord], terms: list[str],
+) -> tuple[SourceRecord | None, float]:
+    """逐一比對每個來源的支持度，回傳（最能支持這句話的來源, 分數）。
+
+    不能把所有摘錄混成一池再一律掛第一個來源——那會讓「其實是第二個來源
+    支持的」結論頂著第一個來源的標題與網址（Codex review 抓到的 bug）。
+    """
+    best: SourceRecord | None = None
+    best_score = 0.0
+    for src in entity_sources:
+        score = _support(sent, [src.excerpt], terms)
+        if score > best_score or best is None:
+            best, best_score = src, score
+    return best, best_score
+
+
 def _in_spans(pos: int, spans: list[tuple[int, int]]) -> bool:
     return any(a <= pos < b for a, b in spans)
 
@@ -255,70 +285,118 @@ def review_answer(
     unlabeled_inferred = 0
     pos = 0
     source_spans = _source_section_spans(body)
+    claim_spans = _claim_section_spans(body)
+    # 區段實體繼承：【已驗證資料】裡的句子常常省略社團名（「每週五舉辦手作課程。」），
+    # 沒有名字不代表不是對外校的主張——省略時繼承最近點名的研究對象；
+    # 只有一個對象時直接視為該對象（Codex review 抓到的繞過閘門漏洞）。
+    current_target: tuple[str, str, list[str]] | None = targets[0] if len(targets) == 1 else None
+
+    def _verify_claim(sent: str, eid: str, name: str, terms: list[str], in_speculation: bool) -> None:
+        nonlocal unlabeled_inferred
+        entity_sources = [s for s in external_sources if eid and s.entity_id == eid]
+        best, support = _best_support(sent, entity_sources, terms) if entity_sources else (None, 0.0)
+
+        claim = ClaimRecord(claim=sent[:160], entity=name, entity_id=eid)
+        if best is not None and support >= 0.55:
+            claim.source_title = best.title
+            claim.source_url = best.url
+            claim.publisher = best.publisher
+            claim.published_at = best.published_at
+            claim.captured_at = best.captured_at
+            claim.excerpt = best.excerpt
+            claim.source_type = best.source_type
+            claim.evidence_level = "direct"
+            claim.confidence = "high"
+            claim.status = STATUS_STALE if best.status == STATUS_STALE else STATUS_VERIFIED
+            claim.source_ids = [best.source_id]
+        elif best is not None and support >= 0.25:
+            claim.source_title = best.title
+            claim.source_url = best.url
+            claim.publisher = best.publisher
+            claim.excerpt = best.excerpt
+            claim.source_type = best.source_type
+            claim.evidence_level = "partial"
+            claim.confidence = "medium"
+            claim.status = STATUS_PARTIAL
+            claim.source_ids = [best.source_id]
+        elif entity_sources:
+            claim.evidence_level = "none"
+            claim.status = STATUS_INFERRED
+            if not in_speculation:
+                unlabeled_inferred += 1
+                review.findings.append(Finding(
+                    rule="speculation_as_fact",
+                    severity="warning",
+                    message=f"這句對{name}的描述在來源摘錄裡找不到直接依據，應標示為推測。",
+                    sentence=sent,
+                ))
+        else:
+            claim.status = STATUS_WRONG_ENTITY if not eid else STATUS_INSUFFICIENT
+            review.findings.append(Finding(
+                rule="claim_without_source",
+                severity="error",
+                message=f"回答對{name}下了結論，但檢索結果裡沒有任何{name}的可驗證來源。",
+                sentence=sent,
+            ))
+        review.claims.append(claim.finalize())
+
     for sent in sentences:
         pos = body.find(sent, pos)
         # 句子本身以【可能推測】開頭時，起點在標籤前，也算在推測區內
         in_speculation = _in_spans(max(pos, 0), spec_spans) or bool(_SPECULATION_HEAD.match(sent))
         label = _LABEL_LINE.match(sent)
         if label and label.group(1) in {"研究對象", "來源整理", "尚待確認"}:
-            continue   # 標籤行：點名對象、列來源、列未確認項，不是對外校的事實主張
+            # 標籤行不是主張，但點名了對象的話要更新繼承目標
+            named_here = next(
+                (t for t in targets if any(term in sent for term in t[2])), None,
+            )
+            if named_here is not None:
+                current_target = named_here
+            continue
         if _in_spans(max(pos, 0), source_spans):
             continue   # 來源清單內容
-        for eid, name, terms in targets:
-            if not any(t in sent for t in terms):
-                continue
-            if _QUESTION.search(sent) or _DISCLAIMER.search(sent):
-                break
-            entity_sources = [s for s in external_sources if eid and s.entity_id == eid]
-            excerpts = [s.excerpt for s in entity_sources]
-            support = _support(sent, excerpts, terms) if excerpts else 0.0
 
-            claim = ClaimRecord(claim=sent[:160], entity=name, entity_id=eid)
-            if entity_sources and support >= 0.55:
-                best = entity_sources[0]
-                claim.source_title = best.title
-                claim.source_url = best.url
-                claim.publisher = best.publisher
-                claim.published_at = best.published_at
-                claim.captured_at = best.captured_at
-                claim.excerpt = best.excerpt
-                claim.source_type = best.source_type
-                claim.evidence_level = "direct"
-                claim.confidence = "high"
-                claim.status = STATUS_STALE if best.status == STATUS_STALE else STATUS_VERIFIED
-                claim.source_ids = [s.source_id for s in entity_sources]
-            elif entity_sources and support >= 0.25:
-                best = entity_sources[0]
-                claim.source_title = best.title
-                claim.source_url = best.url
-                claim.publisher = best.publisher
-                claim.excerpt = best.excerpt
-                claim.source_type = best.source_type
-                claim.evidence_level = "partial"
-                claim.confidence = "medium"
-                claim.status = STATUS_PARTIAL
-                claim.source_ids = [s.source_id for s in entity_sources]
-            elif entity_sources:
-                claim.evidence_level = "none"
-                claim.status = STATUS_INFERRED
-                if not in_speculation:
-                    unlabeled_inferred += 1
-                    review.findings.append(Finding(
-                        rule="speculation_as_fact",
-                        severity="warning",
-                        message=f"這句對{name}的描述在來源摘錄裡找不到直接依據，應標示為推測。",
-                        sentence=sent,
-                    ))
-            else:
-                claim.status = STATUS_WRONG_ENTITY if not eid else STATUS_INSUFFICIENT
-                review.findings.append(Finding(
-                    rule="claim_without_source",
+        # 「標籤＋內容同一行」（【已驗證資料】每週五…）：剝掉標籤，內容照樣驗證
+        in_claim_section = _in_spans(max(pos, 0), claim_spans)
+        sent_body = sent
+        if label and label.group(1) in {"已驗證資料", "外校已驗證資料", "兩者差異"}:
+            sent_body = sent[label.end():].strip()
+            in_claim_section = True
+            if not sent_body:
+                continue
+
+        named = next((t for t in targets if any(term in sent_body for term in t[2])), None)
+        if named is not None:
+            current_target = named
+            if _QUESTION.search(sent_body) or _DISCLAIMER.search(sent_body):
+                continue
+            _verify_claim(sent_body, named[0], named[1], named[2], in_speculation)
+            continue
+
+        # 沒點名：只有在「講研究對象的區段」裡、且不是淡江句／問句／免責句時，
+        # 才繼承目前的研究對象。
+        if (
+            current_target is not None
+            and in_claim_section
+            and not in_speculation
+            and not any(w in sent_body for w in _HOME_WORDS)
+            and not _QUESTION.search(sent_body)
+            and not _DISCLAIMER.search(sent_body)
+            and not _LABEL_LINE.match(sent_body)
+            and len(sent_body) >= 8
+        ):
+            term_hit = next((t for t in HOME_SIGNATURE_TERMS if t in sent_body), None)
+            if term_hit:
+                finding = Finding(
+                    rule="data_contamination",
                     severity="error",
-                    message=f"回答對{name}下了結論，但檢索結果裡沒有任何{name}的可驗證來源。",
-                    sentence=sent,
-                ))
-            review.claims.append(claim.finalize())
-            break
+                    message=f"淡江內部內容「{term_hit}」被寫成{current_target[1]}的做法。",
+                    sentence=sent_body,
+                )
+                contaminated.append(finding)
+                review.findings.append(finding)
+                continue
+            _verify_claim(sent_body, current_target[0], current_target[1], current_target[2], in_speculation)
 
     # 3. 外校研究但證據全是內部資料
     if targets and not external_sources and review.claims:
