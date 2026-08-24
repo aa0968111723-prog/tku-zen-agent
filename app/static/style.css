@@ -964,3 +964,7 @@ select {
     scroll-behavior: auto !important;
   }
 }
+
+/* [hidden] 必須永遠贏過任何 display 規則——否則 .gate{display:grid}、#settings{display:flex}
+   會讓登入後的閘門與未開啟的抽屜繼續蓋在畫面上（整合驗證抓到的真 bug）。 */
+[hidden] { display: none !important; }
