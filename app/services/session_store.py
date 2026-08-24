@@ -137,6 +137,8 @@ CREATE TABLE IF NOT EXISTS research_sources (
     verification   TEXT NOT NULL DEFAULT 'needs_verification',
     source_type    TEXT NOT NULL DEFAULT 'external_reference',
     source_file    TEXT NOT NULL DEFAULT '',
+    entity_id      TEXT NOT NULL DEFAULT '',
+    school         TEXT NOT NULL DEFAULT '',
     created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_research_sources_project ON research_sources(project_id, created_at DESC);
@@ -231,11 +233,22 @@ class SessionStore:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._migrate()
             self._conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """既有資料庫的欄位補齊。CREATE TABLE IF NOT EXISTS 不會替舊表加欄位。"""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(research_sources)")}
+        # 政大事故後：每筆研究來源都要標注屬於哪個實體與學校，
+        # 才能在來源卡與驗證時對照「來源對象是否等於研究對象」。
+        if "entity_id" not in cols:
+            self._conn.execute("ALTER TABLE research_sources ADD COLUMN entity_id TEXT NOT NULL DEFAULT ''")
+        if "school" not in cols:
+            self._conn.execute("ALTER TABLE research_sources ADD COLUMN school TEXT NOT NULL DEFAULT ''")
 
     def close(self) -> None:
         with self._lock:
@@ -558,7 +571,8 @@ class SessionStore:
                 ids.append(sid)
                 self._conn.execute(
                     "INSERT INTO research_sources(id, project_id, session_id, title, url, source_date, summary,"
-                    " credibility, verification, source_type, source_file, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " credibility, verification, source_type, source_file, entity_id, school, created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         sid, project_id, session_id,
                         str(source.get("title") or source.get("source") or "未命名來源")[:300],
@@ -569,6 +583,8 @@ class SessionStore:
                         str(source.get("verification") or "needs_verification"),
                         str(source.get("source_type") or "external_reference"),
                         str(source.get("source_file") or "")[:300],
+                        str(source.get("entity_id") or "")[:80],
+                        str(source.get("school") or source.get("organization_school") or "")[:120],
                         _now(),
                     ),
                 )

@@ -45,7 +45,7 @@ def _events(body: str) -> list[dict]:
 def test_sse_wire_format_unchanged(client, monkeypatch):
     """每個事件都是 `data: {json}` + 空行，最後一定有 done。"""
 
-    async def fake_turn(ctx, message, *, destination, model=None, attachments=None):
+    async def fake_turn(ctx, message, *, destination, model=None, attachments=None, requested=None):
         yield {"type": "message", "text": "測試回覆"}
         yield {"type": "task_completed", "summary": {}, "artifacts": []}
 
@@ -68,7 +68,7 @@ def test_sse_wire_format_unchanged(client, monkeypatch):
 
 
 def test_sse_error_event_is_generic_chinese(client, monkeypatch):
-    async def boom(ctx, message, *, destination, model=None, attachments=None):
+    async def boom(ctx, message, *, destination, model=None, attachments=None, requested=None):
         raise RuntimeError("NVIDIA api_key leaked in traceback")
         yield  # pragma: no cover
 
@@ -85,7 +85,7 @@ def test_sse_error_event_is_generic_chinese(client, monkeypatch):
 def test_all_event_labels_are_chinese(client, monkeypatch):
     """使用者看得到的欄位不可出現英文內部工具名。"""
 
-    async def fake_turn(ctx, message, *, destination, model=None, attachments=None):
+    async def fake_turn(ctx, message, *, destination, model=None, attachments=None, requested=None):
         from app import tools
 
         yield {"type": "tool_started", "name": "create_social_carousel",
@@ -108,7 +108,7 @@ def test_all_event_labels_are_chinese(client, monkeypatch):
 def test_cancel_endpoint_stops_stream_and_releases_lock(client, monkeypatch):
     import asyncio
 
-    async def slow_turn(ctx, message, *, destination, model=None, attachments=None):
+    async def slow_turn(ctx, message, *, destination, model=None, attachments=None, requested=None):
         for i in range(100):
             yield {"type": "step", "label": f"步驟 {i}"}
             await asyncio.sleep(0.05)
@@ -164,7 +164,7 @@ def test_cancel_other_users_session_is_404(tmp_db, tmp_output_dir, monkeypatch):
 def test_second_turn_on_same_session_is_rejected(client, monkeypatch):
     import asyncio
 
-    async def slow_turn(ctx, message, *, destination, model=None, attachments=None):
+    async def slow_turn(ctx, message, *, destination, model=None, attachments=None, requested=None):
         for _ in range(60):
             yield {"type": "step", "label": "跑"}
             await asyncio.sleep(0.05)

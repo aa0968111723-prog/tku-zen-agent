@@ -307,6 +307,11 @@ async def test_clarified_zhengda_gets_honest_no_source_reply(tmp_output_dir, mon
     """規格情境 5：確認對象後仍查無來源 → 誠實回覆，不生成、不顯示完成。"""
     from app import orchestrator as orch
 
+    # 真實流程是兩輪：先「政大呢」被反問，回覆選項才算澄清（狀態式，
+    # 首句剛好含「正式社團」不得跳過反問——稽核漏洞 D）。
+    _fake1, events1 = await run(orch, monkeypatch, [say("不該被呼叫")], "政大呢", ctx)
+    assert any(e["type"] == "clarification_needed" for e in events1)
+
     fake, events = await run(
         orch, monkeypatch, [say("不該被呼叫")],
         "我指的是政大的正式社團，請只使用可驗證的官方公開來源研究，主題是茶會內容。",

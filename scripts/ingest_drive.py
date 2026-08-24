@@ -73,23 +73,30 @@ def headers_look_like_roster(headers: list[str]) -> bool:
 # 第二道防線：有些工作表根本沒有標題列，第一列就是人名資料
 # （例如以個接人命名的「柏能」「安倢」分頁，近千筆同學的姓名系級手機與私人筆記）。
 # 標題檢查對這種完全無效，所以再看內容長什麼樣子。
-_CONTACTISH = re.compile(r"09\d{2}[-\s]?\d{3}[-\s]?\d{3}|[\w.+-]+@[\w-]+\.[\w.]+|\b\d{9}\b")
+_CONTACTISH = re.compile(r"(?:\+?886[-\s]?9|09)\d{2}[-\s]?\d{3}[-\s]?\d{3}|[\w.+-]+@[\w-]+\.[\w.]+|\b\d{9}\b")
 _CLASSISH = re.compile(
     r"大[一二三四五]|[一二三四五]年級|"
     r"(?:資工|資管|企管|經濟|中文|英文|會計|統計|土木|化工|機電|大傳|教科|運管|財金|"
     r"保險|公行|國企|資圖|日文|法文|西語|俄文|歷史|數學|物理|化學|建築|電機|水環|"
     r"航太|管科|教設|海科|產經|觀光|資訊|法律|師培|體育|音樂|美術)\s?[一二三四五1-5][A-Za-z]?\b"
 )
+# 跨校名冊（輔導培訓總表這類）：一列一個「某某大學＋人名」。
+# 系級規則是淡江限定，對「國立政治大學領袖社 | 梁方寧」完全不命中，
+# 所以另外把「大學／學院＋分隔符」也算成名冊訊號（稽核漏洞 54）。
+_XSCHOOLISH = re.compile(r"(?:大學|學院|科大)\s*(?:領袖社|禪學社|同學|學員)?\s*[|｜]")
 ROSTER_ROW_RATIO = 0.3
 ROSTER_MIN_ROWS = 5
 
 
 def rows_look_like_roster(rows: list[str]) -> bool:
-    """抽樣看資料列：夠多列帶著聯絡方式或系級，就是名冊。"""
+    """抽樣看資料列：夠多列帶著聯絡方式、系級或跨校成員欄位，就是名冊。"""
     sample = [r for r in rows[:40] if r.strip()]
     if len(sample) < ROSTER_MIN_ROWS:
         return False
-    hits = sum(1 for r in sample if _CONTACTISH.search(r) or _CLASSISH.search(r))
+    hits = sum(
+        1 for r in sample
+        if _CONTACTISH.search(r) or _CLASSISH.search(r) or _XSCHOOLISH.search(r)
+    )
     return hits / len(sample) >= ROSTER_ROW_RATIO
 
 # 這些是設計檔（海報、名牌、文宣），抽出來的文字沒有意義
@@ -101,7 +108,9 @@ MAX_CHARS = 60_000       # 單檔上限，超過截斷（避免一份 PPT 洗掉
 
 REDACTIONS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"), "［信箱］"),
+    (re.compile(r"\+?886[-\s]?9\d{2}[-\s]?\d{3}[-\s]?\d{3}\b"), "［手機］"),
     (re.compile(r"\b09\d{2}[-\s]?\d{3}[-\s]?\d{3}\b"), "［手機］"),
+    (re.compile(r"\+?886[-\s]?[2-8][-\s]?\d{3,4}[-\s]?\d{4}\b"), "［市話］"),
     (re.compile(r"\b0[2-8][-\s]?\d{3,4}[-\s]?\d{4}\b"), "［市話］"),
     (re.compile(r"\b[A-Z][12]\d{8}\b"), "［身分證］"),
     (re.compile(r"\b\d{9}\b"), "［學號］"),
@@ -315,6 +324,21 @@ def safe_name(path: str) -> str:
     return (stem or "未命名")[:110]
 
 
+def _guard_flat_text(text: str, filename_flagged: bool) -> tuple[str, str]:
+    """pptx/pdf/odt/txt/md/csv 沒有表格結構可只抽欄位，
+    但檔名 PII 閘門與內容名冊偵測仍必須生效（原本這幾種格式是死角，
+    稽核漏洞 55）：一旦判定是名冊，整份只留存在紀錄，不擷取內文。"""
+    lines = [l for l in text.splitlines() if l.strip()]
+    if filename_flagged or rows_look_like_roster(lines):
+        return (
+            "（名冊類檔案：內容含同學個人資料，依名冊處理原則未擷取內文，"
+            f"只保留檔案存在紀錄。原始內容共 {len(lines)} 行。"
+            "如需查閱請回到雲端原始檔案。）",
+            "僅欄位結構",
+        )
+    return text, ""
+
+
 def extract(name: str, data: bytes) -> tuple[str, str]:
     """回傳 (文字, 備註)。"""
     ext = Path(name).suffix.lower()
@@ -325,13 +349,13 @@ def extract(name: str, data: bytes) -> tuple[str, str]:
     if ext == ".xlsx":
         return from_xlsx(data, headers_only)
     if ext == ".pptx":
-        return from_pptx(data), ""
+        return _guard_flat_text(from_pptx(data), headers_only)
     if ext == ".pdf":
-        return from_pdf(data), ""
+        return _guard_flat_text(from_pdf(data), headers_only)
     if ext == ".odt":
-        return from_odt(data), ""
+        return _guard_flat_text(from_odt(data), headers_only)
     if ext in {".txt", ".md", ".csv"}:
-        return from_plain(data), ""
+        return _guard_flat_text(from_plain(data), headers_only)
     return "", "不支援的格式"
 
 

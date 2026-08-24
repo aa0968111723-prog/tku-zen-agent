@@ -70,22 +70,3 @@ def parse(text: str) -> ParsedQuery:
 
     q.keywords = [w for w in (q.activity, q.document_type) if w]
     return q
-
-
-def expansions(q: ParsedQuery) -> list[str]:
-    """由結構化結果反推出幾個互補的檢索字串。"""
-    out = [q.topic]
-    if q.activity and q.document_type:
-        out.append(f"{q.activity} {q.document_type}")
-    elif q.activity:
-        out.append(q.activity)
-    elif q.document_type:
-        out.append(q.document_type)
-    if q.explicit_year and q.activity:
-        out.append(f"{q.explicit_year} {q.activity}")
-    seen: list[str] = []
-    for s in out:
-        s = s.strip()
-        if s and s not in seen:
-            seen.append(s)
-    return seen

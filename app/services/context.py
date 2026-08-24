@@ -26,9 +26,24 @@ class RequestContext:
 
 _ctx: ContextVar[RequestContext | None] = ContextVar("tku_request_context", default=None)
 
+# 本輪的研究範圍（ResearchScope.to_dict()）。
+# 工具（search_knowledge、search_previous_examples）要靠它判斷：
+# 外部研究模式下，淡江內部資料不得作為外校證據。
+# 存 dict 而不是 dataclass，避免 services 層反向依賴 research 層。
+_research_scope: ContextVar[dict | None] = ContextVar("tku_research_scope", default=None)
+
 
 def current() -> RequestContext | None:
     return _ctx.get()
+
+
+def set_research_scope(scope: dict | None) -> None:
+    """orchestrator 在檢索與工具執行前設定本輪研究範圍。"""
+    _research_scope.set(scope)
+
+
+def research_scope() -> dict | None:
+    return _research_scope.get()
 
 
 def require_user() -> str:
