@@ -3,88 +3,183 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>淡江大學領袖禪學社 · AI 代理</title>
+<meta name="theme-color" content="#1f5673">
+<title>淡江大學領袖禪學社 · 工作台</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧘</text></svg>">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
-<!-- 部署模式：需要存取碼 -->
 <div id="gate" class="gate" hidden>
   <form class="gate-card" id="gate-form">
     <span class="mark" aria-hidden="true"></span>
     <h1>淡江大學領袖禪學社</h1>
-    <p>這是社團幹部專用的 AI 代理，請輸入存取碼。</p>
-    <input type="password" id="gate-token" placeholder="存取碼" autocomplete="current-password" required>
-    <button type="submit">進入</button>
-    <p class="gate-error" id="gate-error" hidden></p>
+    <label class="gate-label" for="gate-token">請輸入授權碼</label>
+    <input type="password" id="gate-token" name="access-code" placeholder="請輸入授權碼" autocomplete="off" required>
+    <button type="submit" class="primary">進入工作台</button>
+    <p class="gate-error" id="gate-error" role="alert" hidden></p>
   </form>
 </div>
 
 <div id="app" hidden>
 
-<header class="topbar">
-  <div class="brand">
-    <span class="mark" aria-hidden="true"></span>
-    <div class="brand-text">
-      <strong>淡江大學領袖禪學社</strong>
-      <span id="term-label">專屬 AI 代理</span>
+  <p id="draft-bar" class="draft-bar">目前為草稿模式——不會自動發布任何內容</p>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <div class="brand-text">
+        <strong>領袖禪學社</strong>
+        <span id="term-label">工作台</span>
+      </div>
     </div>
-  </div>
-
-  <div class="controls">
-    <label class="field">
-      <span>產出落點</span>
-      <select id="destination">
-        <option value="local">本機</option>
-        <option value="drive">Google 雲端</option>
-        <option value="both">本機＋雲端</option>
-      </select>
-    </label>
-    <label class="field">
-      <span>模型</span>
-      <select id="model"></select>
-    </label>
-    <button id="term-btn" class="ghost" type="button" title="設定本學期的社長、社課時間等資料">本學期設定</button>
-    <button id="reset" class="ghost" type="button" title="清空對話重新開始">新對話</button>
-  </div>
-</header>
-
-<div id="banner" class="banner" hidden></div>
-
-<main id="chat" class="chat" aria-live="polite">
-  <section class="welcome" id="welcome">
-    <h1>今天要做什麼？</h1>
-    <p class="lede">
-      我讀得到社團知識庫、八份任務劇本，還有 108–115 學年度的歷年檔案。
-      說一句就好，我會直接把檔案做出來。
-    </p>
-    <div class="chips" id="chips">
-      <button type="button" data-prompt="幫我做一份 115 學年度上學期的社課排程表，18 週，欄位要有週次、日期、主題、帶課者、需要準備的器材、備註。">社課排程表</button>
-      <button type="button" data-prompt="幫我做這學期的招生企劃，要包含目標人數、招生管道、時程、分工、預算，還有可以直接用的文案範例。">招生企劃書</button>
-      <button type="button" data-prompt="做一份新生報名表的 Google 表單，要收基本資料、系級、怎麼知道我們社團的、有沒有靜坐經驗、想從社團得到什麼。">新生報名表</button>
-      <button type="button" data-prompt="幫我做期初茶會的企劃書跟活動細流。">期初茶會</button>
-      <button type="button" data-prompt="做一份社團經費預算表，收入跟支出分開，支出分社課、營隊、文宣、器材、雜支，小計跟結餘要用公式。">經費預算表</button>
-      <button type="button" data-prompt="幫我寫三則招生用的 IG 貼文，語氣要生活化、貼近大學生，每則都要有 hashtag。">IG 招生貼文</button>
-      <button type="button" data-prompt="幫我做幹部交接手冊，說明每個職位在做什麼、一年的工作節奏、交接要交什麼東西。">幹部交接手冊</button>
-      <button type="button" data-prompt="幫我做這學年度的社團評鑑年度績效報告。">社團評鑑報告</button>
+    <div class="top-actions">
+      <button id="reset" class="ghost" type="button">新任務</button>
+      <button id="settings-btn" class="icon-btn" type="button" aria-label="開啟設定" aria-haspopup="dialog" aria-controls="settings">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M5 12H3M21 12h-2M6.3 6.3l1.4 1.4M16.3 16.3l1.4 1.4M17.7 6.3l-1.4 1.4M7.7 16.3l-1.4 1.4"/></svg>
+      </button>
     </div>
-  </section>
-</main>
+  </header>
 
-<footer class="composer">
-  <div class="composer-inner">
-    <textarea id="input" rows="1" placeholder="例如：幫我做一份挑戰營的器材清單和分工表…（Enter 送出，Shift+Enter 換行）"></textarea>
-    <button id="send" type="button" aria-label="送出">
-      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4Z"/></svg>
-    </button>
+  <div id="banner" class="banner" hidden></div>
+  <p id="status-bar" class="status-bar" role="status" aria-live="polite" aria-atomic="true"></p>
+
+  <div id="workspace">
+    <section id="home" class="home">
+      <h1>今天要做什麼？</h1>
+      <p class="lede">說一句就好。網宣會先做成草稿，不會自動發出去。</p>
+      <div class="quick-grid" id="quick-actions">
+        <button type="button" data-action="ig">做網宣</button>
+        <button type="button" data-action="event">規劃活動</button>
+        <button type="button" data-action="lookup">查社團資料</button>
+        <button type="button" data-action="research">研究其他學校</button>
+        <button type="button" data-action="docs">產生文件</button>
+        <button type="button" data-action="continue">繼續上一個任務</button>
+      </div>
+
+      <section class="home-block">
+        <h2>最近任務</h2>
+        <div id="recent-sessions" class="home-list"></div>
+      </section>
+      <section class="home-block">
+        <h2>最近產出</h2>
+        <div id="recent-artifacts" class="home-list"></div>
+      </section>
+    </section>
+
+    <section id="guide-ig" class="guide" hidden>
+      <button type="button" class="back-btn" data-back="home">返回</button>
+      <h1>做網宣</h1>
+      <p class="lede">選目標與平台，再用一句話說明需求。產出僅供草稿。</p>
+      <form id="ig-form" class="guide-form">
+        <fieldset>
+          <legend>目標</legend>
+          <div class="choice-row" id="ig-goal">
+            <label><input type="radio" name="ig-goal" value="招生" checked>招生</label>
+            <label><input type="radio" name="ig-goal" value="期初茶會">期初茶會</label>
+            <label><input type="radio" name="ig-goal" value="演講">演講</label>
+            <label><input type="radio" name="ig-goal" value="營隊">營隊</label>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>平台</legend>
+          <div class="choice-row" id="ig-platform">
+            <label><input type="radio" name="ig-platform" value="貼文" checked>貼文</label>
+            <label><input type="radio" name="ig-platform" value="輪播">輪播</label>
+            <label><input type="radio" name="ig-platform" value="限動">限動</label>
+            <label><input type="radio" name="ig-platform" value="Reels">Reels</label>
+          </div>
+        </fieldset>
+        <label class="term-field">
+          <span class="term-label">一句需求</span>
+          <textarea id="ig-need" rows="3" placeholder="例如：週三茶會，強調不用有基礎、可以帶走手作" required></textarea>
+        </label>
+        <button type="submit" class="primary">開始撰寫</button>
+      </form>
+    </section>
+
+    <section id="guide-research" class="guide" hidden>
+      <button type="button" class="back-btn" data-back="home">返回</button>
+      <h1>研究其他學校</h1>
+      <p class="lede">學校可留空，代表比較全部找得到的公開資料。只做內部參考，不會照抄。</p>
+      <form id="research-form" class="guide-form">
+        <label class="term-field">
+          <span class="term-label">學校（可留空）</span>
+          <input type="text" id="research-school" placeholder="例如：台大、政大；留空＝全部比較">
+        </label>
+        <label class="term-field">
+          <span class="term-label">想了解什麼</span>
+          <textarea id="research-need" rows="3" placeholder="例如：期初茶會限動怎麼寫才會有人來" required></textarea>
+        </label>
+        <button type="submit" class="primary">開始研究</button>
+      </form>
+    </section>
+
+    <main id="chat" class="chat" hidden></main>
   </div>
-  <p class="hint" id="hint"></p>
-</footer>
+
+  <footer class="composer" id="composer">
+    <div class="composer-inner">
+      <textarea id="input" rows="1" placeholder="例如：幫我寫三則招生貼文草稿…"></textarea>
+      <button id="send" type="button" aria-label="送出">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4Z"/></svg>
+      </button>
+    </div>
+  </footer>
 
 </div>
 
-<!-- 本學期設定 -->
+<div id="settings-backdrop" class="backdrop" hidden></div>
+<aside id="settings" class="drawer" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
+  <header class="drawer-head">
+    <h2 id="settings-title">設定</h2>
+    <button class="icon-btn" id="settings-close" type="button" aria-label="關閉設定">×</button>
+  </header>
+  <div class="drawer-body">
+    <label class="term-field">
+      <span class="term-label">產出位置</span>
+      <select id="destination">
+        <option value="local">本機</option>
+        <option value="drive">雲端</option>
+        <option value="both">本機＋雲端</option>
+      </select>
+    </label>
+    <label class="term-field">
+      <span class="term-label">模型</span>
+      <select id="model"></select>
+    </label>
+    <button id="logout-btn" class="ghost full" type="button">清除本機授權</button>
+    <p id="logout-hint" class="muted" hidden></p>
+
+    <section class="admin-block">
+      <h3>管理入口</h3>
+      <p id="admin-status" class="muted">輸入管理碼後可編輯本學期資料。</p>
+      <form id="admin-form" class="admin-form">
+        <label class="term-field">
+          <span class="term-label">管理碼</span>
+          <input type="password" id="admin-token" name="admin-code" placeholder="請輸入管理碼" autocomplete="off">
+        </label>
+        <button type="submit" class="primary">進入管理</button>
+      </form>
+      <p id="admin-error" class="gate-error" role="alert" hidden></p>
+      <div id="admin-tools" hidden>
+        <button id="term-btn" class="ghost full" type="button">本學期設定</button>
+        <button id="admin-logout-btn" class="ghost full" type="button">離開管理</button>
+      </div>
+    </section>
+  </div>
+</aside>
+
+<div id="session-sheet" class="modal" hidden>
+  <div class="modal-card sheet" role="dialog" aria-modal="true" aria-labelledby="session-title">
+    <header class="modal-head">
+      <h2 id="session-title">繼續上一個任務</h2>
+      <button class="icon-btn" id="session-close" type="button" aria-label="關閉">×</button>
+    </header>
+    <div id="session-list" class="home-list pad"></div>
+  </div>
+</div>
+
 <div id="term-modal" class="modal" hidden>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="term-title">
     <header class="modal-head">
@@ -92,9 +187,7 @@
       <button class="icon-btn" id="term-close" type="button" aria-label="關閉">×</button>
     </header>
     <p class="modal-lede">
-      這裡是<strong>今年事實的唯一來源</strong>。留空代表「還沒確認」——
-      代理會直接說不知道，並在產出的檔案裡填「待填」，不會拿歷年資料頂替。
-      寧可留空，不要填錯。
+      這裡是今年事實的來源。留空代表還沒確認——產出會填「待填」，不會拿往年資料頂替。
     </p>
     <form id="term-form" class="term-form"></form>
     <footer class="modal-foot">
