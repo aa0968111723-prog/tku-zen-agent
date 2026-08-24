@@ -77,6 +77,11 @@ const URL_RE = /https?:\/\/[^\s<>"'）)]+/gi;
 const TECH_RE =
   /Exception|Traceback|TypeError|ValueError|HTTP\s*\d|Error:|NVIDIA|nvapi-|堆疊|\.py\b|連線中斷|伺服器錯誤|status\s*\d|api[_-]?key/i;
 
+// 「假研究卡」防線：只有本輪真的收過後端研究驗證事件（source_cards / research_status），
+// 訊息文字才允許拆成研究卡樣式；否則一律以一般訊息渲染。新任務開始時重置。
+let researchEventsSeen = false;
+let lastResearchStatus = null;
+
 const state = {
   sessionId: null,
   busy: false,
@@ -535,6 +540,13 @@ function splitResearch(text) {
 
 function renderResearch(turn, parsed) {
   const wrap = el("div", "research-wrap");
+  if (lastResearchStatus && (lastResearchStatus.label || lastResearchStatus.status)) {
+    wrap.appendChild(el(
+      "div",
+      "research-chip " + (RESEARCH_CHIP[lastResearchStatus.status] || "st-stale"),
+      "研究狀態：" + (lastResearchStatus.label || lastResearchStatus.status)
+    ));
+  }
   wrap.appendChild(el("h3", null, "參考資料（可收合）"));
   parsed.sections.forEach((sec, i) => {
     const d = el("details", "research-card");
@@ -547,16 +559,16 @@ function renderResearch(turn, parsed) {
 }
 
 function renderTextSourceLinks(text) {
+  // 只負責把訊息文字裡的網址變成可點的一般連結。
+  // 驗證狀態的樣式與說明文字只能由後端 source_cards 事件經 renderSourceCards 渲染，這裡一律不加。
   const urls = [...new Set((text.match(URL_RE) || []).map((url) => url.replace(/[）)。,，]+$/, "")))].slice(0, 8);
   if (!urls.length) return null;
   const list = el("section", "source-list");
-  list.appendChild(el("h3", null, "來源"));
   urls.forEach((url) => {
-    const link = el("a", "source-card", url);
+    const link = el("a", null, url);
     link.href = url;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
-    try { link.appendChild(el("span", null, "來源日期：頁面未提供｜可信度：公開來源，建議開啟確認")); } catch { /* URL 保持原樣 */ }
     list.appendChild(link);
   });
   return list;
@@ -628,7 +640,7 @@ function renderMessage(turn, text) {
       box.appendChild(pre);
       continue;
     }
-    const research = splitResearch(part.text);
+    const research = researchEventsSeen ? splitResearch(part.text) : null;
     if (research) {
       if (research.leftover) {
         const extra = el("div");
@@ -1734,6 +1746,8 @@ async function runTask(text, attachments = [], draft = null, displayText = "") {
   state.activeTurn = turn;
   state.taskSummary = null;
   state.projectId = null;
+  researchEventsSeen = false;
+  lastResearchStatus = null;
   renderUnderstandingCard(turn, draft);
   seedProgress(turn);
   const workName = draft ? (preflightSummaryRows(draft).find(([key]) => key === "輸出格式") || ["", taskKindName(draft.kind)])[1] : "任務";
@@ -1959,17 +1973,29 @@ function handleEvent(turn, ev, retry) {
       state.taskSummary = ev.summary || state.taskSummary;
       updateTaskDock(state.taskSummary);
       const rsLabel = ev.research_status_label;
-      const okDone = !ev.research_status || ["complete", "internal", "partially_verified"].includes(ev.research_status);
+      const rs = ev.research_status || "";
+      // 全綠成功只留給：審核放行（verdict === "allow"），且研究狀態為完成／內部資料（或本輪沒有研究）。
+      const okDone = ev.verdict === "allow" && (!rs || rs === "complete" || rs === "internal");
+      // 部分驗證／尚未驗證 → 黃色（沿用既有 is-asking 黃球與 st-partial 研究狀態章），不得亮全綠。
+      const partialDone = !okDone && (rs === "partially_verified" || rs === "unverified");
       setFlowStep(
         turn, "verify", okDone ? "complete" : "failed", "最後檢查",
-        rsLabel ? "研究狀態：" + rsLabel : "內容與待填欄位已完成檢查。"
+        okDone
+          ? (rsLabel ? "研究狀態：" + rsLabel : "內容與待填欄位已完成檢查。")
+          : partialDone
+            ? "研究狀態：" + (rsLabel || "部分完成") + "——部分內容尚未驗證，請自行確認來源。"
+            : rsLabel
+              ? "研究狀態：" + rsLabel + "——內容未通過驗證，請補充官方來源或改用內部資料。"
+              : "內容未完全通過檢查，請確認後再使用。"
       );
       const titleNode = getTimeline(turn).querySelector(".timeline-title");
-      if (titleNode) titleNode.textContent = rsLabel || "產出完成";
-      if (ev.research_status) renderResearchStatus(turn, { status: ev.research_status, label: rsLabel });
+      if (titleNode) titleNode.textContent = rsLabel || (okDone ? "產出完成" : partialDone ? "部分完成" : "需要處理");
+      if (rs) renderResearchStatus(turn, { status: rs, label: rsLabel });
       renderCompletionActions(turn);
-      announce(rsLabel || "完成");
-      setOrb(okDone ? "complete" : "error");
+      announce(rsLabel || (okDone ? "完成" : partialDone ? "部分完成" : "需要處理"));
+      if (okDone) setOrb("complete");
+      else if (partialDone) setOrb("asking", rsLabel || "部分完成");
+      else setOrb("error");
       break;
     }
 
@@ -2001,6 +2027,7 @@ function handleEvent(turn, ev, retry) {
       break;
 
     case "source_cards":
+      researchEventsSeen = true;
       renderSourceCards(turn, ev);
       break;
 
@@ -2026,6 +2053,8 @@ function handleEvent(turn, ev, retry) {
       break;
 
     case "research_status":
+      researchEventsSeen = true;
+      lastResearchStatus = { status: ev.status || "", label: ev.label || "" };
       renderResearchStatus(turn, ev);
       break;
 
