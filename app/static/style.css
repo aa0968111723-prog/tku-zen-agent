@@ -779,6 +779,14 @@ a:focus-visible {
 .composer-inner:focus-within #clear-input { display: grid; }
 
 .composer-inner:focus-within { border-color: var(--accent); }
+.attachment-status {
+  margin: 5px 4px 0;
+  color: var(--ink-2);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 textarea {
   flex: 1;

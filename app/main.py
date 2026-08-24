@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 from pathlib import Path
@@ -28,11 +30,18 @@ app = FastAPI(title="淡江大學領袖禪學社 AI 工作台", docs_url=None, r
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
+class ImageAttachment(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    media_type: str = Field(pattern=r"^image/(jpeg|png|webp)$")
+    data_url: str = Field(min_length=32, max_length=3_000_000)
+
+
 class ChatRequest(BaseModel):
     session_id: str | None = None
     message: str = Field(min_length=1, max_length=8000)
     destination: str = config.DEFAULT_DESTINATION
     model: str | None = None
+    attachments: list[ImageAttachment] = Field(default_factory=list, max_length=2)
 
 
 class SessionRequest(BaseModel):
@@ -453,6 +462,18 @@ async def download(artifact_id: str, user_id: str = Depends(current_user)) -> Fi
 @general_router.post("/chat")
 async def chat(req: ChatRequest, user_id: str = Depends(current_user)) -> StreamingResponse:
     session_id = _resolve_session(user_id, req.session_id)
+    attachments: list[dict[str, str]] = []
+    for item in req.attachments:
+        prefix = f"data:{item.media_type};base64,"
+        if not item.data_url.startswith(prefix):
+            raise HTTPException(status_code=422, detail="圖片格式不正確，請重新選取 JPG、PNG 或 WebP 圖片")
+        try:
+            raw = base64.b64decode(item.data_url[len(prefix):], validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=422, detail="圖片內容無法讀取，請重新選取") from None
+        if not raw or len(raw) > 2_000_000:
+            raise HTTPException(status_code=422, detail="每張圖片需小於 2MB，請壓縮後再加入")
+        attachments.append({"name": item.name, "media_type": item.media_type, "data_url": item.data_url})
 
     async def stream():
         yield f'data: {json.dumps({"type": "session", "session_id": session_id}, ensure_ascii=False)}\n\n'
@@ -462,6 +483,7 @@ async def chat(req: ChatRequest, user_id: str = Depends(current_user)) -> Stream
                 req.message,
                 destination=req.destination,
                 model=req.model,
+                attachments=attachments,
             ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception:  # noqa: BLE001

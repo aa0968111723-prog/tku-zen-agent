@@ -68,6 +68,11 @@ def estimate_cost(input_tokens: int, output_tokens: int) -> float:
     )
 
 
+def route_vision_model() -> str:
+    """圖片附件使用已設定的視覺模型，未設定則保留原本模型選擇。"""
+    return config.NVIDIA_VISION_MODEL or route_model("execute")
+
+
 # ── 連線池 ───────────────────────────────────────────────────
 # 原本每次呼叫都 `async with httpx.AsyncClient()`，等於每一輪工具呼叫
 # 都重新做一次 TCP + TLS 握手。改成共用一個 client。

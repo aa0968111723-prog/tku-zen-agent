@@ -176,10 +176,11 @@ async def run_turn(
     *,
     destination: str,
     model: str | None = None,
+    attachments: list[dict[str, str]] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """跑完一輪。事件會即時 yield 出去給前端。"""
     with ctx_mod.use(ctx):
-        async for event in _run(ctx, user_message, destination=destination, model=model):
+        async for event in _run(ctx, user_message, destination=destination, model=model, attachments=attachments):
             yield event
 
 
@@ -189,6 +190,7 @@ async def _run(
     *,
     destination: str,
     model: str | None,
+    attachments: list[dict[str, str]] | None,
 ) -> AsyncIterator[dict[str, Any]]:
     store = get_store()
     session_id = ctx.session_id or ""
@@ -354,7 +356,8 @@ async def _run(
     # ── Execute ──────────────────────────────────────────
     state.stage = Stage.EXECUTE
     memory_service.save_state(store, project_id, state)
-    client = _client(decision["model"])
+    selected_model = model or (config.NVIDIA_VISION_MODEL or decision["model"] if attachments else decision["model"])
+    client = _client(selected_model)
     tool_schemas = tools.schemas_for(routing.tool_names())
     activity_context = activity_service.project_activity_context(store, ctx.user_id, project_id)
 
@@ -374,6 +377,15 @@ async def _run(
         ),
         user_message=user_message,
     )
+    # 附件只送到這次模型請求，不寫入對話紀錄或資料庫。歷史任務仍保留使用者
+    # 的文字描述，避免把可能含個資的影像 Base64 留在伺服器。
+    if attachments:
+        content: list[dict[str, Any]] = [{"type": "text", "text": user_message}]
+        content.extend(
+            {"type": "image_url", "image_url": {"url": item["data_url"]}}
+            for item in attachments
+        )
+        messages[-1]["content"] = content
     memory_service.persist_user_message(store, session_id, user_message)
 
     produced: list[dict[str, Any]] = []
@@ -401,7 +413,7 @@ async def _run(
                 )
                 yield {"type": event_type, "summary": controlled_after_model.public_summary()}
                 return
-            _record_usage(state, reply, decision["model"])
+            _record_usage(state, reply, selected_model)
             memory_service.save_state(store, project_id, state)
         except LLMError:
             controlled_after_error = _control_state(store, project_id)
@@ -734,10 +746,10 @@ async def _run(
 
 # ── 輔助 ─────────────────────────────────────────────────────
 
-def _client(model: str | None):
-    from ..llm import route_model
+def _client(model: str | None, *, has_images: bool = False):
+    from ..llm import route_model, route_vision_model
 
-    return NvidiaClient(model=model or route_model("execute"))
+    return NvidiaClient(model=model or (route_vision_model() if has_images else route_model("execute")))
 
 
 def _tool_detail(name: str, result: dict[str, Any]) -> str:

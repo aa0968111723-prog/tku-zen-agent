@@ -83,7 +83,7 @@ const state = {
   activeTurn: null,
   abortController: null,
   taskSummary: null,
-  attachment: null,
+  attachments: [],
   voice: null,
 };
 
@@ -1002,10 +1002,12 @@ function preflightPrompt(draft) {
 function confirmPreflight() {
   const draft = state.preflight;
   if (!draft) return;
+  const attachments = state.attachments.slice();
   closePreflight();
   $("input").value = "";
   $("input").style.height = "auto";
-  runTask(preflightPrompt(draft));
+  clearAttachments();
+  runTask(preflightPrompt(draft), attachments);
 }
 
 function skipPreflight() {
@@ -1025,7 +1027,7 @@ async function ensureSession() {
   return state.sessionId;
 }
 
-async function runTask(text) {
+async function runTask(text, attachments = []) {
   text = (text || $("input").value).trim();
   if (!text || state.busy) return;
 
@@ -1047,7 +1049,7 @@ async function runTask(text) {
   renderTaskControls(turn);
   state.abortController = new AbortController();
 
-  const retry = () => runTask(text);
+  const retry = () => runTask(text, attachments);
 
   try {
     const sid = await ensureSession();
@@ -1059,6 +1061,7 @@ async function runTask(text) {
         message: text,
         destination: $("destination").value,
         model: $("model").value || null,
+        attachments,
       }),
     });
     if (resp.status === 429) {
@@ -1725,9 +1728,31 @@ async function newChat() {
 $("reset").addEventListener("click", newChat);
 
 $("send").addEventListener("click", () => send());
+function renderAttachmentStatus() {
+  const status = $("attachment-status");
+  const names = state.attachments.map((item) => item.name);
+  status.hidden = !names.length;
+  status.textContent = names.length ? "已加入圖片：" + names.join("、") + "（只供這次任務理解，不會保存）" : "";
+}
+
+function clearAttachments() {
+  state.attachments = [];
+  renderAttachmentStatus();
+}
+
+function readDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
 $("clear-input").addEventListener("click", () => {
   $("input").value = "";
   $("input").style.height = "auto";
+  clearAttachments();
   $("input").focus();
   announce("已清除輸入內容");
 });
@@ -1735,6 +1760,23 @@ $("attachment").addEventListener("change", async () => {
   const file = $("attachment").files && $("attachment").files[0];
   $("attachment").value = "";
   if (!file) return;
+  if (file.type.startsWith("image/")) {
+    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+      announce("請選擇 JPG、PNG 或 WebP 圖片。");
+      return;
+    }
+    if (file.size > 2_000_000) { announce("每張圖片需小於 2MB，請壓縮後再加入。"); return; }
+    if (state.attachments.length >= 2) { announce("一次最多加入 2 張圖片。"); return; }
+    try {
+      const dataUrl = await readDataUrl(file);
+      state.attachments.push({ name: file.name, media_type: file.type, data_url: dataUrl });
+      $("input").value = ($("input").value + "\n【已加入圖片：「" + file.name + "」；請根據圖片中可見的內容完成需求。】").trim();
+      $("input").dispatchEvent(new Event("input"));
+      renderAttachmentStatus();
+      announce("已加入圖片；只會傳給這次任務，不會保存。");
+    } catch { announce("無法讀取這張圖片，請重新選取。"); }
+    return;
+  }
   if (file.size > 50000) { announce("文件超過 50KB，請先擷取需要的段落再加入。"); return; }
   try {
     const text = (await file.text()).trim();

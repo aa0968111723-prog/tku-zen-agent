@@ -76,6 +76,25 @@ async def test_plain_answer_without_tools(monkeypatch, ctx):
 
 
 @pytest.mark.asyncio
+async def test_image_attachment_is_sent_only_to_current_model_request(monkeypatch, ctx, tmp_db):
+    from app import orchestrator as orch
+
+    fake, _events = await collect(
+        orch,
+        monkeypatch,
+        [say("已讀取圖片內容。")],
+        "請依圖片寫文案",
+        ctx,
+        attachments=[{"name": "海報.png", "media_type": "image/png", "data_url": "data:image/png;base64,AA=="}],
+    )
+    user = next(message for message in fake.calls[0]["messages"] if message["role"] == "user")
+    assert isinstance(user["content"], list)
+    assert user["content"][1]["image_url"]["url"] == "data:image/png;base64,AA=="
+    stored = tmp_db.load_messages(ctx.session_id)
+    assert "data:image" not in "\n".join(message["content"] for message in stored)
+
+
+@pytest.mark.asyncio
 async def test_llm_failure_becomes_readable_error(monkeypatch, ctx):
     from app import orchestrator as orch
 

@@ -145,10 +145,10 @@
   <footer class="composer" id="composer">
     <div class="composer-inner">
       <div class="composer-tools" aria-label="加入內容工具">
-        <label class="composer-tool" for="attachment" title="加入文字文件內容">
+        <label class="composer-tool" for="attachment" title="加入文字文件或圖片">
           <span>附件</span><span class="sr-only">加入附件或文件</span>
         </label>
-        <input id="attachment" type="file" accept=".txt,.md,.csv,text/plain,text/markdown,text/csv" aria-label="加入文字文件">
+        <input id="attachment" type="file" accept=".txt,.md,.csv,text/plain,text/markdown,text/csv,image/jpeg,image/png,image/webp" aria-label="加入文字文件或圖片">
         <button id="voice-input" class="composer-tool" type="button" aria-label="使用語音輸入">語音</button>
       </div>
       <textarea id="input" rows="1" aria-label="任務需求" placeholder="例如：幫我寫三則招生貼文草稿…"></textarea>
@@ -237,8 +237,9 @@
       <button class="icon-btn" id="session-close" type="button" aria-label="關閉">×</button>
     </header>
     <div id="session-list" class="home-list pad"></div>
-  </div>
-</div>
+      </div>
+      <p id="attachment-status" class="attachment-status" aria-live="polite" hidden></p>
+    </div>
 
 <div id="term-modal" class="modal" hidden>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="term-title">
