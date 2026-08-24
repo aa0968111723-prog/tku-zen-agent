@@ -771,6 +771,20 @@ function handleEvent(turn, ev, retry) {
       finishStep(turn, "retrieval", true);
       break;
 
+    case "step_started":
+      progressLine(turn, ev.step_id || "workflow-step", "◇", ev.description || "執行下一步…");
+      break;
+
+    case "step_failed":
+      progressLine(turn, ev.step_id || "workflow-step", "!", "這一步需要重試", ev.text || ev.error_code || "");
+      finishStep(turn, ev.step_id || "workflow-step", false);
+      break;
+
+    case "research_sources_saved":
+      progressLine(turn, "research-sources", "⌕", "已保存研究來源", "之後產出可以回到來源檢查");
+      finishStep(turn, "research-sources", true);
+      break;
+
     case "tool_started": {
       const key = pushToolKey(turn, ev.name, callId);
       progressLine(turn, key, "▸", (ev.label || ev.name || "工具") + (ev.preview ? "：" + ev.preview : ""));
@@ -817,6 +831,31 @@ function handleEvent(turn, ev, retry) {
       progressLine(turn, "done", "●", "完成");
       finishStep(turn, "done", true);
       announce("完成");
+      break;
+
+    case "task_paused":
+      progressLine(turn, "workflow-status", "Ⅱ", "任務已暫停", "可按繼續，或說「接續剛才」");
+      finishStep(turn, "workflow-status", true);
+      break;
+
+    case "task_resumed":
+      progressLine(turn, "workflow-status", "▶", "任務已恢復", ev.summary && ev.summary.next_action ? ev.summary.next_action : "");
+      finishStep(turn, "workflow-status", true);
+      break;
+
+    case "task_retry_ready":
+      progressLine(turn, "workflow-status", "↻", "已準備重試失敗步驟", "說「接續剛才」開始");
+      finishStep(turn, "workflow-status", true);
+      break;
+
+    case "task_cancelled":
+      progressLine(turn, "workflow-status", "■", "任務已取消", "已保留已完成的步驟");
+      finishStep(turn, "workflow-status", true);
+      break;
+
+    case "task_failed":
+      progressLine(turn, "workflow-status", "!", "任務有一步失敗", "可重試失敗步驟");
+      finishStep(turn, "workflow-status", false);
       break;
 
     case "done":

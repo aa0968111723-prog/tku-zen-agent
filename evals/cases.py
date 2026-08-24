@@ -24,6 +24,16 @@ class Case:
 
 
 CASES: list[Case] = [
+    # ── 複合任務與延續 ────────────────────────────────────
+    Case(
+        "comp-01",
+        "研究其他學校招生方式後，幫我產生淡江招生輪播",
+        "social_publicity",
+        ("document",),
+        ("招生",),
+        tools=("search_social_references", "create_social_carousel"),
+        tags=("深度優化", "複合任務"),
+    ),
     # ── 活動籌備 ──────────────────────────────────────────
     Case("plan-01", "幫我做期初茶會企劃", "event_planning", ("document",), ("茶會",),
          tools=("create_document",), tags=("必測",)),

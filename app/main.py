@@ -16,7 +16,9 @@ from pydantic import BaseModel, Field
 from . import config, orchestrator, retrieval
 from .services import auth, context as ctx_mod
 from .services import current_term as term_service
+from .services import memory as memory_service
 from .services.session_store import get_store
+from .orchestrator.state import Stage, WorkflowStatus
 
 logger = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
@@ -166,6 +168,95 @@ async def list_artifacts(
 ) -> dict[str, Any]:
     items = get_store().list_artifacts(user_id, project_id=project_id, limit=min(limit, 100))
     return {"artifacts": [a.public() for a in items]}
+
+
+def _task_state(user_id: str, project_id: str):
+    store = get_store()
+    if not store.get_project(project_id, user_id):
+        raise HTTPException(status_code=404, detail="找不到這個任務")
+    state = memory_service.load_state(store, project_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="這個任務目前沒有可恢復的工作流")
+    return store, state
+
+
+def _task_payload(project_id: str, state, *, action: str = "") -> dict[str, Any]:
+    payload = state.public_summary()
+    payload.update({
+        "project_id": project_id,
+        "action": action,
+        "steps": [
+            {
+                "step_id": s.step_id,
+                "description": s.description,
+                "status": s.status,
+                "done": s.done,
+                "attempts": s.attempts,
+                "error": s.last_error,
+                "note": s.note,
+                "depends_on": s.depends_on,
+            }
+            for s in state.plan_steps
+        ],
+    })
+    return payload
+
+
+@general_router.get("/tasks/{project_id}")
+async def task_status(project_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+    _store, state = _task_state(user_id, project_id)
+    return _task_payload(project_id, state)
+
+
+async def _control_task(project_id: str, action: str, user_id: str) -> dict[str, Any]:
+    store, state = _task_state(user_id, project_id)
+    if action == "pause":
+        if state.workflow_status in {WorkflowStatus.COMPLETED, WorkflowStatus.CANCELLED}:
+            raise HTTPException(status_code=409, detail="已結束的任務不能暫停")
+        state.workflow_status = WorkflowStatus.PAUSED
+        state.next_action = "按繼續，或在對話中說「接續剛才」"
+    elif action == "resume":
+        if state.workflow_status == WorkflowStatus.CANCELLED:
+            raise HTTPException(status_code=409, detail="已取消的任務請使用重新執行")
+        state.workflow_status = WorkflowStatus.IN_PROGRESS
+        state.completion_status = "in_progress"
+        state.next_action = state.next_step().description if state.next_step() else ""
+    elif action == "retry":
+        count = state.reset_failed_steps()
+        if not count:
+            raise HTTPException(status_code=409, detail="目前沒有可重試的失敗步驟")
+        state.next_action = "只重試失敗步驟"
+    elif action == "cancel":
+        if state.workflow_status == WorkflowStatus.COMPLETED:
+            raise HTTPException(status_code=409, detail="已完成的任務不能取消")
+        state.workflow_status = WorkflowStatus.CANCELLED
+        state.completion_status = "failed"
+        state.stage = Stage.FAILED
+        state.next_action = "如要再做，請說「重新執行這個任務」"
+    else:
+        raise HTTPException(status_code=400, detail="不支援的任務操作")
+    memory_service.save_state(store, project_id, state)
+    return _task_payload(project_id, state, action=action)
+
+
+@general_router.post("/tasks/{project_id}/pause")
+async def pause_task(project_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+    return await _control_task(project_id, "pause", user_id)
+
+
+@general_router.post("/tasks/{project_id}/resume")
+async def resume_task(project_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+    return await _control_task(project_id, "resume", user_id)
+
+
+@general_router.post("/tasks/{project_id}/retry")
+async def retry_task(project_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+    return await _control_task(project_id, "retry", user_id)
+
+
+@general_router.post("/tasks/{project_id}/cancel")
+async def cancel_task(project_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+    return await _control_task(project_id, "cancel", user_id)
 
 
 @general_router.get("/download")

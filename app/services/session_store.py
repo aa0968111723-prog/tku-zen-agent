@@ -25,7 +25,7 @@ from typing import Any
 
 from .. import config
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _now() -> str:
@@ -113,6 +113,33 @@ CREATE TABLE IF NOT EXISTS working_memory (
     updated_at TEXT NOT NULL,
     UNIQUE(project_id, key)
 );
+
+CREATE TABLE IF NOT EXISTS retrieval_cache (
+    project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    cache_key    TEXT NOT NULL,
+    fingerprint  TEXT NOT NULL,
+    query_text   TEXT NOT NULL,
+    context_text TEXT NOT NULL,
+    meta         TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY(project_id, cache_key)
+);
+
+CREATE TABLE IF NOT EXISTS research_sources (
+    id             TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    session_id     TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+    title          TEXT NOT NULL DEFAULT '',
+    url            TEXT NOT NULL DEFAULT '',
+    source_date    TEXT NOT NULL DEFAULT '',
+    summary        TEXT NOT NULL DEFAULT '',
+    credibility    REAL NOT NULL DEFAULT 0,
+    verification   TEXT NOT NULL DEFAULT 'needs_verification',
+    source_type    TEXT NOT NULL DEFAULT 'external_reference',
+    source_file    TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_research_sources_project ON research_sources(project_id, created_at DESC);
 """
 
 
@@ -127,6 +154,7 @@ class Artifact:
     created_at: str
     project_id: str | None = None
     meta: dict[str, Any] | None = None
+    parent_id: str | None = None
 
     def public(self) -> dict[str, Any]:
         """給前端看的樣子 —— 沒有伺服器絕對路徑。"""
@@ -137,6 +165,7 @@ class Artifact:
             "drive_url": self.drive_url,
             "version": self.version,
             "created_at": self.created_at,
+            "parent_artifact_id": self.parent_id,
         }
 
 
@@ -369,7 +398,7 @@ class SessionStore:
         return Artifact(
             id=aid, filename=filename, kind=kind, local_path=str(local_path),
             drive_url=drive_url, version=version, created_at=now,
-            project_id=project_id, meta=meta or {},
+            project_id=project_id, meta=meta or {}, parent_id=parent,
         )
 
     def get_artifact(self, artifact_id: str, user_id: str) -> Artifact | None:
@@ -384,7 +413,7 @@ class SessionStore:
             id=row["id"], filename=row["filename"], kind=row["kind"],
             local_path=row["local_path"], drive_url=row["drive_url"],
             version=row["version"], created_at=row["created_at"],
-            project_id=row["project_id"], meta=json.loads(row["meta"]),
+            project_id=row["project_id"], meta=json.loads(row["meta"]), parent_id=row["parent_id"],
         )
 
     def update_artifact_drive_url(self, artifact_id: str, drive_url: str) -> None:
@@ -393,28 +422,110 @@ class SessionStore:
             self._conn.commit()
 
     def list_artifacts(
-        self, user_id: str, project_id: str | None = None, limit: int = 30
+        self, user_id: str, project_id: str | None = None, limit: int = 30,
+        *, include_history: bool = False,
     ) -> list[Artifact]:
         with self._lock:
             if project_id:
                 rows = self._conn.execute(
                     "SELECT * FROM artifacts WHERE user_id=? AND project_id=?"
-                    " ORDER BY created_at DESC LIMIT ?",
+                    " ORDER BY created_at DESC, version DESC LIMIT ?",
                     (user_id, project_id, limit),
                 ).fetchall()
             else:
                 rows = self._conn.execute(
-                    "SELECT * FROM artifacts WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+                    "SELECT * FROM artifacts WHERE user_id=? ORDER BY created_at DESC, version DESC LIMIT ?",
                     (user_id, limit),
                 ).fetchall()
-        return [
+        records = [
             Artifact(
                 id=r["id"], filename=r["filename"], kind=r["kind"], local_path=r["local_path"],
                 drive_url=r["drive_url"], version=r["version"], created_at=r["created_at"],
-                project_id=r["project_id"], meta=json.loads(r["meta"]),
+                project_id=r["project_id"], meta=json.loads(r["meta"]), parent_id=r["parent_id"],
             )
             for r in rows
         ]
+        if include_history:
+            return records[:limit]
+        latest: list[Artifact] = []
+        seen: set[str] = set()
+        for record in records:
+            if record.filename in seen:
+                continue
+            seen.add(record.filename)
+            latest.append(record)
+            if len(latest) >= limit:
+                break
+        return latest
+
+    # ── retrieval cache ────────────────────────────────────
+
+    def cache_retrieval(
+        self, project_id: str, cache_key: str, fingerprint: str, query_text: str,
+        context_text: str, meta: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO retrieval_cache(project_id, cache_key, fingerprint, query_text, context_text, meta, created_at)"
+                " VALUES(?,?,?,?,?,?,?)"
+                " ON CONFLICT(project_id, cache_key) DO UPDATE SET fingerprint=excluded.fingerprint,"
+                " query_text=excluded.query_text, context_text=excluded.context_text, meta=excluded.meta,"
+                " created_at=excluded.created_at",
+                (project_id, cache_key[:160], fingerprint, query_text[:2000], context_text, json.dumps(meta or {}, ensure_ascii=False), _now()),
+            )
+            self._conn.commit()
+
+    def get_retrieval_cache(self, project_id: str, cache_key: str, fingerprint: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM retrieval_cache WHERE project_id=? AND cache_key=? AND fingerprint=?",
+                (project_id, cache_key, fingerprint),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "query_text": row["query_text"],
+            "context_text": row["context_text"],
+            "meta": json.loads(row["meta"]),
+            "created_at": row["created_at"],
+        }
+
+    # ── research provenance ────────────────────────────────
+
+    def record_research_sources(
+        self, project_id: str, sources: list[dict[str, Any]], session_id: str | None = None,
+    ) -> list[str]:
+        ids: list[str] = []
+        with self._lock:
+            for source in sources:
+                sid = new_id("rs")
+                ids.append(sid)
+                self._conn.execute(
+                    "INSERT INTO research_sources(id, project_id, session_id, title, url, source_date, summary,"
+                    " credibility, verification, source_type, source_file, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        sid, project_id, session_id,
+                        str(source.get("title") or source.get("source") or "未命名來源")[:300],
+                        str(source.get("url") or "")[:1000],
+                        str(source.get("date") or source.get("source_date") or "")[:80],
+                        str(source.get("summary") or source.get("excerpt") or "")[:2000],
+                        float(source.get("credibility") or 0),
+                        str(source.get("verification") or "needs_verification"),
+                        str(source.get("source_type") or "external_reference"),
+                        str(source.get("source_file") or "")[:300],
+                        _now(),
+                    ),
+                )
+            self._conn.commit()
+        return ids
+
+    def list_research_sources(self, project_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM research_sources WHERE project_id=? ORDER BY created_at DESC LIMIT ?",
+                (project_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     # ── working memory ───────────────────────────────────────
 

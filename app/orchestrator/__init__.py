@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -30,7 +31,7 @@ from ..services.session_store import get_store
 from ..skills import SKILL_BY_NAME
 from . import planner
 from .prompt import build_system_prompt
-from .state import OrchestrationState, Stage
+from .state import OrchestrationState, Stage, WorkflowStatus
 
 MAX_TOOL_ROUNDS = 8
 MAX_REPAIRS = 2
@@ -49,6 +50,60 @@ def _preview(args: dict[str, Any]) -> str:
     for key in ("query", "filename", "form_title", "title", "keys"):
         if args.get(key):
             return str(args[key])[:60]
+    return ""
+
+
+def _step_index_for_tool(state: OrchestrationState, name: str) -> int | None:
+    if name in {"search_social_references", "compare_social_strategies", "analyze_social_positioning"}:
+        wanted = ("research", "研究")
+    elif name in ARTIFACT_TOOLS:
+        wanted = ("artifact", "建立", "產出")
+    else:
+        return None
+    for i, step in enumerate(state.plan_steps):
+        if step.status in {"completed", "skipped"}:
+            continue
+        if step.kind in wanted or any(word in step.description for word in wanted[1:]):
+            return i
+    return None
+
+
+def _verification_index(state: OrchestrationState) -> int | None:
+    for i, step in enumerate(state.plan_steps):
+        if step.kind == "verify" or "檢查產出" in step.description:
+            return i
+    return None
+
+
+def _record_usage(state: OrchestrationState, reply: Reply) -> None:
+    metrics = state.metrics
+    metrics["model_calls"] = int(metrics.get("model_calls", 0)) + 1
+    metrics.setdefault("estimated_cost_usd", 0.0)
+    metrics.setdefault("cost_basis", "NVIDIA Build 免費模型；若回應含 token usage 則保存用量")
+    usage = reply.raw.get("usage") if isinstance(reply.raw, dict) else None
+    if isinstance(usage, dict):
+        for key, target in (("prompt_tokens", "input_tokens"), ("completion_tokens", "output_tokens"), ("total_tokens", "total_tokens")):
+            if usage.get(key) is not None:
+                metrics[target] = int(metrics.get(target, 0)) + int(usage[key])
+
+
+def _control_state(store, project_id: str) -> OrchestrationState | None:
+    latest = memory_service.load_state(store, project_id)
+    if latest and latest.workflow_status in {WorkflowStatus.PAUSED, WorkflowStatus.CANCELLED}:
+        return latest
+    return None
+
+
+def _control_command(message: str) -> str:
+    text = (message or "").strip()
+    if text in {"暫停", "暫停任務", "先暫停這個任務"}:
+        return "pause"
+    if text in {"繼續", "繼續任務", "恢復任務", "接續剛才"}:
+        return "resume"
+    if text in {"重試", "重試失敗步驟", "重新執行失敗步驟"}:
+        return "retry"
+    if text in {"取消", "取消任務", "取消這個任務"}:
+        return "cancel"
     return ""
 
 
@@ -76,15 +131,71 @@ async def _run(
     session_id = ctx.session_id or ""
 
     # ── Understand ───────────────────────────────────────
-    state, routing = planner.understand(user_message)
+    session = store.get_session(session_id, ctx.user_id) if session_id else None
+    existing_project_id = ctx.project_id or (session or {}).get("project_id")
+    previous = memory_service.load_state(store, existing_project_id) if existing_project_id else None
+    command = _control_command(user_message)
+    restart = bool(previous and re.search(r"取消.*重新執行|重新執行(?:這個|上一個)?任務", user_message))
+    if command and existing_project_id and previous and not (
+        command == "resume" and previous.workflow_status == WorkflowStatus.COMPLETED
+    ):
+        if command == "pause":
+            previous.workflow_status = WorkflowStatus.PAUSED
+            previous.next_action = "說「繼續」或按繼續恢復"
+            memory_service.save_state(store, existing_project_id, previous)
+            yield {"type": "task_paused", "summary": previous.public_summary()}
+            return
+        if command == "resume":
+            previous.workflow_status = WorkflowStatus.IN_PROGRESS
+            previous.completion_status = "in_progress"
+            previous.next_action = previous.next_step().description if previous.next_step() else ""
+            memory_service.save_state(store, existing_project_id, previous)
+            yield {"type": "task_resumed", "summary": previous.public_summary()}
+            return
+        if command == "retry":
+            count = previous.reset_failed_steps()
+            if count:
+                previous.next_action = "只重試失敗步驟；請說「接續剛才」開始"
+            memory_service.save_state(store, existing_project_id, previous)
+            yield {"type": "task_retry_ready", "reset_steps": count, "summary": previous.public_summary()}
+            return
+        if command == "cancel":
+            previous.workflow_status = WorkflowStatus.CANCELLED
+            previous.completion_status = "failed"
+            previous.stage = Stage.FAILED
+            previous.next_action = "如要再做，請說「重新執行這個任務」"
+            memory_service.save_state(store, existing_project_id, previous)
+            yield {"type": "task_cancelled", "summary": previous.public_summary()}
+            return
+    if restart and previous:
+        previous.workflow_status = WorkflowStatus.IN_PROGRESS
+        previous.completion_status = "in_progress"
+        previous.next_action = "重新執行既有任務"
+        memory_service.save_state(store, existing_project_id, previous)
+        state, routing = planner.continue_previous(user_message, previous)
+    elif previous and planner.is_continuation_only(user_message):
+        state, routing = planner.continue_previous(user_message, previous)
+    else:
+        state, routing = planner.understand(user_message)
+        if previous and routing.reuse_previous:
+            state = memory_service.reconcile_progress(state, previous)
     project_id = memory_service.ensure_project(store, ctx, state)
     ctx = ctx_mod.RequestContext(user_id=ctx.user_id, session_id=session_id, project_id=project_id)
+    state.workflow_status = WorkflowStatus.IN_PROGRESS
+    state.completion_status = "in_progress"
+    state.metrics.setdefault("tool_calls", 0)
+    state.metrics.setdefault("failure_count", 0)
+    state.metrics.setdefault("retry_count", 0)
+    state.metrics.setdefault("estimated_cost_usd", 0.0)
+    memory_service.save_state(store, project_id, state)
 
     yield {
         "type": "task_understood",
         "task_type": state.task_type.value,
-        "skill": routing.skill.label,
+        "skill": routing.label,
         "produces": [planner.ARTIFACT_LABEL.get(a, a) for a in state.artifacts_expected],
+        "task_sequence": list(routing.task_sequence),
+        "workflow_status": state.workflow_status.value,
     }
 
     # ── Plan ─────────────────────────────────────────────
@@ -92,6 +203,10 @@ async def _run(
     yield {
         "type": "plan_created",
         "steps": [s.description for s in state.plan_steps],
+        "step_details": [
+            {"step_id": s.step_id, "description": s.description, "status": s.status, "depends_on": s.depends_on}
+            for s in state.plan_steps
+        ],
         "missing_facts": [
             term_service.FIELD_BY_KEY[k].label
             for k in state.missing_facts
@@ -101,29 +216,70 @@ async def _run(
 
     # ── Retrieve ─────────────────────────────────────────
     state.stage = Stage.RETRIEVE
+    memory_service.save_state(store, project_id, state)
     yield {"type": "retrieval_started", "queries": state.retrieval_queries}
 
-    bundle = await asyncio.to_thread(
-        retrieval.build_context,
-        state.retrieval_queries,
-        task_type=state.task_type.value,
+    retrieval_task_type = "social_research" if routing.task_sequence else state.task_type.value
+    index = await asyncio.to_thread(retrieval.get_index)
+    cached = memory_service.get_cached_context(
+        store, project_id, state.retrieval_queries, state.task_type.value, index.fingerprint
     )
-    state.retrieved_sources = bundle.source_labels()
-    state.mark_step(0, f"{len(bundle.hits)} 段")
+    if cached:
+        context_block = cached["context_text"]
+        cached_meta = cached.get("meta") or {}
+        state.retrieved_sources = list(cached_meta.get("source_labels") or [])
+        retrieval_event = {
+            "type": "retrieval_result",
+            "count": int(cached_meta.get("count", 0)),
+            "sources": list(cached_meta.get("display_sources") or state.retrieved_sources),
+            "curated": int(cached_meta.get("curated", 0)),
+            "archive": int(cached_meta.get("archive", 0)),
+            "external_reference": int(cached_meta.get("external_reference", 0)),
+            "conflicts": list(cached_meta.get("conflicts") or []),
+            "cached": True,
+        }
+    else:
+        bundle = await asyncio.to_thread(
+            retrieval.build_context,
+            state.retrieval_queries,
+            task_type=retrieval_task_type,
+        )
+        context_block = bundle.render()
+        state.retrieved_sources = bundle.source_labels()
+        memory_service.save_cached_context(
+            store, project_id, state.retrieval_queries, state.task_type.value, index.fingerprint,
+            context_block,
+            {
+                "count": len(bundle.hits),
+                "source_labels": bundle.source_labels(),
+                "display_sources": bundle.display_sources(),
+                "curated": bundle.curated_count,
+                "archive": bundle.archive_count,
+                "external_reference": getattr(bundle, "external_count", 0),
+                "conflicts": getattr(bundle, "conflicts", []),
+            },
+        )
+        retrieval_event = {
+            "type": "retrieval_result",
+            "count": len(bundle.hits),
+            "sources": bundle.display_sources(),
+            "curated": bundle.curated_count,
+            "archive": bundle.archive_count,
+            "external_reference": getattr(bundle, "external_count", 0),
+            "conflicts": getattr(bundle, "conflicts", []),
+            "cached": False,
+        }
+    if not routing.task_sequence:
+        state.mark_step(0, f"{retrieval_event['count']} 段")
+    memory_service.save_state(store, project_id, state)
 
-    yield {
-        "type": "retrieval_result",
-        "count": len(bundle.hits),
-        "sources": bundle.display_sources(),
-        "curated": bundle.curated_count,
-        "archive": bundle.archive_count,
-        "external_reference": getattr(bundle, "external_count", 0),
-    }
+    yield retrieval_event
 
     # ── Execute ──────────────────────────────────────────
     state.stage = Stage.EXECUTE
+    memory_service.save_state(store, project_id, state)
     client = _client(model)
-    tool_schemas = tools.schemas_for(routing.skill.tool_names())
+    tool_schemas = tools.schemas_for(routing.tool_names())
 
     messages = memory_service.build_messages(
         store,
@@ -132,9 +288,11 @@ async def _run(
         system_prompt=build_system_prompt(
             state=state,
             routing=routing,
-            context_block=bundle.render(),
+            context_block=context_block,
             destination=destination,
             project_facts=memory_service.recall_facts(store, project_id),
+            previous_artifacts=memory_service.recent_artifacts(store, ctx.user_id, project_id),
+            research_sources=store.list_research_sources(project_id),
         ),
         user_message=user_message,
     )
@@ -145,18 +303,37 @@ async def _run(
     final_text = ""
 
     while state.tool_rounds < MAX_TOOL_ROUNDS:
+        controlled = _control_state(store, project_id)
+        if controlled:
+            state = controlled
+            event_type = "task_paused" if state.workflow_status == WorkflowStatus.PAUSED else "task_cancelled"
+            yield {"type": event_type, "summary": state.public_summary()}
+            return
         state.tool_rounds += 1
         try:
             reply: Reply = await client.chat(messages, tool_schemas)
-        except LLMError as exc:
+            _record_usage(state, reply)
+            memory_service.save_state(store, project_id, state)
+        except LLMError:
+            state.metrics["failure_count"] = int(state.metrics.get("failure_count", 0)) + 1
             state.stage = Stage.FAILED
             state.completion_status = "failed"
+            state.workflow_status = WorkflowStatus.FAILED
+            state.last_error_code = "model_error"
+            state.next_action = "按重試失敗步驟，或稍後再試"
+            state.fail_step(_step_index_for_tool(state, "model"), "模型服務無法回應", code="model_error") if _step_index_for_tool(state, "model") is not None else None
+            memory_service.save_state(store, project_id, state)
             logger.exception("LLM call failed")
             yield {"type": "error", "text": "系統忙碌中，請稍後再試"}
             return
         except Exception:  # noqa: BLE001
+            state.metrics["failure_count"] = int(state.metrics.get("failure_count", 0)) + 1
             state.stage = Stage.FAILED
             state.completion_status = "failed"
+            state.workflow_status = WorkflowStatus.FAILED
+            state.last_error_code = "model_unexpected_error"
+            state.next_action = "按重試失敗步驟，或稍後再試"
+            memory_service.save_state(store, project_id, state)
             logger.exception("model call failed")
             yield {"type": "error", "text": "系統忙碌中，請稍後再試"}
             return
@@ -183,6 +360,15 @@ async def _run(
             yield {"type": "message", "text": reply.content.strip()}
 
         for tc in reply.tool_calls:
+            step_index = _step_index_for_tool(state, tc.name)
+            if step_index is not None:
+                state.start_step(step_index)
+                memory_service.save_state(store, project_id, state)
+                yield {
+                    "type": "step_started",
+                    "step_id": state.plan_steps[step_index].step_id,
+                    "description": state.plan_steps[step_index].description,
+                }
             yield {
                 "type": "tool_started",
                 "name": tc.name,
@@ -190,7 +376,17 @@ async def _run(
                 "preview": _preview(tc.arguments),
             }
 
-            result = await asyncio.to_thread(tools.dispatch, tc.name, tc.arguments)
+            state.metrics["tool_calls"] = int(state.metrics.get("tool_calls", 0)) + 1
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(tools.dispatch, tc.name, tc.arguments),
+                    timeout=config.TOOL_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                result = {"ok": False, "code": "tool_timeout", "message": "工具執行逾時，這一步可以單獨重試"}
+            except Exception:  # noqa: BLE001
+                logger.exception("tool dispatch failed: %s", tc.name)
+                result = {"ok": False, "code": "tool_failed", "message": "工具執行失敗，這一步可以單獨重試"}
 
             tool_msg = {
                 "role": "tool",
@@ -214,7 +410,32 @@ async def _run(
             yield event
 
             if not result.get("ok"):
+                state.metrics["failure_count"] = int(state.metrics.get("failure_count", 0)) + 1
+                state.metrics["retry_count"] = int(state.metrics.get("retry_count", 0)) + 1
+                if step_index is not None:
+                    state.fail_step(step_index, result.get("message", "工具執行失敗"), code=result.get("code", "tool_failed"))
+                    state.next_action = "重試失敗步驟，或補充缺少的資料"
+                    memory_service.save_state(store, project_id, state)
+                    yield {
+                        "type": "step_failed",
+                        "step_id": state.plan_steps[step_index].step_id,
+                        "error_code": result.get("code", "tool_failed"),
+                        "text": result.get("message", "工具執行失敗"),
+                    }
                 continue
+
+            if tc.name in {"search_social_references", "compare_social_strategies", "analyze_social_positioning"}:
+                source_ids = memory_service.record_research_sources(store, project_id, session_id, result)
+                if source_ids:
+                    yield {"type": "research_sources_saved", "source_ids": source_ids, "count": len(source_ids)}
+                if step_index is not None:
+                    state.mark_step(step_index, f"{len(result.get('references') or [])} 個來源")
+                    # 確定性研究工具已完成來源整理，下一節點可以直接使用。
+                    for i, step in enumerate(state.plan_steps):
+                        if step.kind == "synthesis":
+                            state.mark_step(i, "研究結果已可供後續產出使用")
+                            break
+                    memory_service.save_state(store, project_id, state)
 
             # ── Verify（產檔類工具才有）──────────────────
             if tc.name in ARTIFACT_TOOLS and result.get("local_path"):
@@ -227,7 +448,7 @@ async def _run(
                     path,
                     task_type=state.task_type.value,
                     rules=state.verification_rules,
-                    external=routing.skill.name in {"recruitment", "social_publicity"},
+                    external=routing.skill.name in {"recruitment", "social_publicity"} or bool(routing.task_sequence),
                 )
                 state.verification_results.append(report.to_dict())
 
@@ -245,9 +466,15 @@ async def _run(
                     produced.append(art)
                     state.artifacts_produced.append(art)
                     memory_service.record_artifact_fact(store, project_id, art)
+                    if step_index is not None:
+                        state.mark_step(step_index, f"版本 {art.get('version', 1)}")
+                    verify_index = _verification_index(state)
+                    if verify_index is not None:
+                        state.mark_step(verify_index, report.summary())
                     yield {"type": "artifact_ready", **art}
                 elif repairs < MAX_REPAIRS:
                     repairs += 1
+                    state.metrics["retry_count"] = int(state.metrics.get("retry_count", 0)) + 1
                     state.repair_attempts = repairs
                     state.stage = Stage.REPAIR
                     yield {
@@ -264,11 +491,19 @@ async def _run(
                     art["warning"] = "自動檢查仍有未修正的問題，請人工確認後再使用。"
                     produced.append(art)
                     state.artifacts_produced.append(art)
+                    if step_index is not None:
+                        state.fail_step(step_index, "產出仍有驗證錯誤", code="verification_failed")
+                    state.workflow_status = WorkflowStatus.FAILED
+                    state.completion_status = "failed"
+                    state.next_action = "重試失敗步驟，或先修正驗證錯誤"
                     yield {"type": "artifact_ready", **art}
 
         state.stage = Stage.EXECUTE
+        memory_service.save_state(store, project_id, state)
     else:
         state.completion_status = "blocked"
+        state.workflow_status = WorkflowStatus.BLOCKED
+        state.next_action = "縮小需求或重試失敗步驟"
         yield {
             "type": "error",
             "text": (
@@ -279,11 +514,25 @@ async def _run(
         memory_service.save_state(store, project_id, state)
         return
 
+    if any(step.status == "failed" for step in state.plan_steps):
+        state.workflow_status = WorkflowStatus.FAILED
+        state.completion_status = "failed"
+        state.next_action = "重試失敗步驟"
+        memory_service.save_state(store, project_id, state)
+        yield {
+            "type": "task_failed",
+            "summary": state.public_summary(),
+            "text": "有一步沒有完成，已保留其他進度；可以按「重試失敗步驟」繼續。",
+        }
+        return
+
     # ── Deliver ──────────────────────────────────────────
     state.stage = Stage.DELIVER
     for i in range(1, len(state.plan_steps)):
         state.mark_step(i)
     state.completion_status = "completed"
+    state.workflow_status = WorkflowStatus.COMPLETED
+    state.next_action = "可以修改上一份產出，或沿用這個任務繼續工作"
 
     if not final_text:
         final_text = _fallback_summary(produced, state)
@@ -324,6 +573,7 @@ def _artifact_payload(result: dict[str, Any], report: verification.Report) -> di
         "artifact_id": result.get("artifact_id"),
         "filename": result.get("filename"),
         "version": result.get("version", 1),
+        "parent_artifact_id": result.get("parent_artifact_id"),
         "drive_url": result.get("drive_url"),
         "verified": report.ok,
         "warnings": [i.message for i in report.warnings],

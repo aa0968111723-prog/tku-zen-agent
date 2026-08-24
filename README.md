@@ -208,8 +208,8 @@ python scripts/ingest_line.py --dry-run
 
 ```bash
 python scripts/selftest.py    # 快速檢查，30 秒
-python -m pytest              # 319 個測試（含認證／權限／網宣／前端靜態）
-python -m evals               # 54 個真實社團情境
+python -m pytest              # 330 個測試（含工作流／SSE／artifact／認證／權限／網宣／前端靜態）
+python -m evals               # 55 個真實社團情境
 ```
 
 **全部不需要 API 金鑰。** 需要模型回應的地方用可腳本化的假模型，
@@ -227,7 +227,7 @@ Evals 的九個維度與目前分數：
 | **hallucination（門檻必須為 0）** | **0 件** |
 | task completion | 100% |
 | artifact validity | 100% |
-| latency（框架開銷） | 平均 107 ms |
+| latency（框架開銷） | 平均約 110 ms（依機器與索引快取而異） |
 
 ---
 
@@ -257,11 +257,19 @@ app/
 ├── verification/         產出檢查與修正指示
 ├── tools/                7 個工具
 └── static/               聊天介面、本學期設定
-evals/                    54 個情境 + 九維評分
-tests/                    319 個測試
+evals/                    55 個情境 + 九維評分
+tests/                    330 個測試
 ```
 
 ### 幾個刻意的取捨
+
+### 長任務與任務延續
+
+每個專案會保存步驟狀態、失敗原因、最近產出與研究來源。前端仍可直接使用
+`/api/chat` SSE；需要外部控制時，可呼叫 `GET /api/tasks/{project_id}` 查看狀態，
+並使用同一路徑下的 `/pause`、`/resume`、`/retry`、`/cancel`。`retry` 只重設失敗步驟，
+不會清掉已完成步驟。對話中也可以說「接續剛才」、「把上一份改成簡報」或「將輪播改成
+Reels 腳本」，系統會沿用同一個 project 的摘要、來源與最新 artifact。
 
 **規劃與路由用規則不用模型。** 確定性、不花額度、不多一輪延遲，
 而且 evals 才測得起來。模型負責的是「內容怎麼寫」。

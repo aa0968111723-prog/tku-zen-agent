@@ -196,7 +196,8 @@ KNOWLEDGE_SKILL = SKILL_BY_NAME["knowledge"]
 # 明確要求「做出檔案」
 _MAKE_VERBS = re.compile(
     r"(幫我(做|寫|生|建|列|排|規劃|整理|產)|做一?[份個張]|產出|產生|生成|建立|寫一?[份篇]|"
-    r"排一?[份張]|列一?[份張]|給我一?[份張個]|做成|輸出|匯出|來一?[份張]|更新一?[份張])"
+    r"排一?[份張]|列一?[份張]|給我一?[份張個]|做成|改成|轉成|轉為|輸出|匯出|來一?[份張]|更新一?[份張]|"
+    r"沿用上一份|接續剛才|接著做)"
 )
 
 # 問「今年的某個具體事實」—— 這種只要一句話回答，不該產檔
@@ -209,6 +210,10 @@ _FACT_LOOKUP = re.compile(
 _IDENTITY_QUESTION = re.compile(
     r"(是什麼|什麼樣的|是不是|為什麼|介紹一下|通常怎麼|有哪些活動|在做什麼|做些什麼|怎麼回)"
 )
+
+_QUERY_INTENT = re.compile(r"(查詢|查一下|查查看|列出|目前有|有哪些|請問)")
+
+_CONTINUATION_ONLY = re.compile(r"^\s*(接續(?:剛才|上一個)?|繼續(?:剛才)?|接著做|沿用上一個活動資料)\s*[。！!]*$", re.I)
 
 
 def _score(message: str, skill: Skill) -> float:
@@ -234,7 +239,12 @@ def is_lookup(message: str) -> bool:
     """只是要一句話答案，不是要檔案。"""
     if wants_artifact(message):
         return False
-    return bool(_FACT_LOOKUP.search(message) or _IDENTITY_QUESTION.search(message))
+    return bool(_FACT_LOOKUP.search(message) or _IDENTITY_QUESTION.search(message) or _QUERY_INTENT.search(message))
+
+
+def is_continuation_only(message: str) -> bool:
+    """只說「繼續」時，交給上一個 project 的任務圖處理。"""
+    return bool(_CONTINUATION_ONLY.match(message or ""))
 
 
 @dataclass
@@ -244,25 +254,81 @@ class Routing:
     runner_up: str = ""
     produce_artifact: bool = True
     scores: dict[str, float] = field(default_factory=dict)
+    task_sequence: tuple[str, ...] = ()
+    display_label: str = ""
+    continuation: bool = False
+    reuse_previous: bool = False
+    preferred_tool: str = ""
+    preferred_artifact: str = ""
+
+    def tool_names(self) -> tuple[str, ...]:
+        """複合任務暴露依賴節點的工具聯集。"""
+        names: list[str] = []
+        sequence = self.task_sequence or (self.skill.name,)
+        for name in sequence:
+            skill = SKILL_BY_NAME.get(name)
+            if not skill:
+                continue
+            candidates = skill.tool_names()
+            if self.preferred_tool and name == self.skill.name and self.preferred_tool in candidates:
+                candidates = tuple(t for t in candidates if t in BASE_TOOLS or t == self.preferred_tool)
+            for tool in candidates:
+                if tool not in names:
+                    names.append(tool)
+        return tuple(names)
+
+    @property
+    def label(self) -> str:
+        return self.display_label or self.skill.label
 
 
 def route(message: str) -> Routing:
     """把使用者輸入分到一個 skill，決定這一輪要暴露哪些工具。"""
     scores = {s.name: _score(message, s) for s in SKILLS}
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    continuation = bool(re.search(r"(接續|繼續|剛才|上一份|上次|沿用|改成|轉成|轉為)", message))
+    preferred_tool, preferred_artifact = _preferred_output(message)
+
+    # 複合任務要把依賴關係寫進 routing，而不是讓模型自行猜「研究」何時完成。
+    if (
+        re.search(r"(研究|比較|分析).*(其他學校|外校|他校)", message, re.S)
+        and re.search(r"(後|然後|接著|再).*(輪播|貼文|網宣|Reels|限動)", message, re.I | re.S)
+    ):
+        return Routing(
+            skill=SKILL_BY_NAME["social_publicity"],
+            score=scores["social_research"] + scores["social_publicity"],
+            runner_up="social_research",
+            produce_artifact=True,
+            scores=scores,
+            task_sequence=("social_research", "social_publicity"),
+            display_label="外校研究＋淡江網宣",
+            continuation=continuation,
+            preferred_tool=preferred_tool,
+            preferred_artifact=preferred_artifact,
+        )
 
     # 純查詢：路由到 knowledge，連產檔工具都不暴露。
     # 這比「路由到領域 skill 但標記不產檔」更保險 —— 模型看不到 create_*
     # 就不可能手滑生出一個沒人要的檔案。
     if is_lookup(message):
-        return Routing(skill=KNOWLEDGE_SKILL, score=scores["knowledge"], produce_artifact=False, scores=scores)
+        return Routing(
+            skill=KNOWLEDGE_SKILL, score=scores["knowledge"], produce_artifact=False,
+            scores=scores, continuation=continuation,
+            preferred_tool=preferred_tool,
+            preferred_artifact=preferred_artifact,
+        )
 
     best_name, best_score = ranked[0]
     produce = wants_artifact(message)
 
     if best_score <= 0:
         skill = DEFAULT_SKILL if produce else KNOWLEDGE_SKILL
-        return Routing(skill=skill, score=0.0, produce_artifact=produce, scores=scores)
+        return Routing(
+            skill=skill, score=0.0, produce_artifact=produce, scores=scores,
+            continuation=continuation, reuse_previous=continuation,
+            preferred_tool=preferred_tool,
+            preferred_artifact=preferred_artifact,
+        )
 
     skill = SKILL_BY_NAME[best_name]
 
@@ -281,4 +347,23 @@ def route(message: str) -> Routing:
         runner_up=ranked[1][0] if len(ranked) > 1 else "",
         produce_artifact=produce or bool(skill.artifacts_expected),
         scores=scores,
+        continuation=continuation,
+        reuse_previous=continuation,
+        preferred_tool=preferred_tool,
+        preferred_artifact=preferred_artifact,
     )
+
+
+def _preferred_output(message: str) -> tuple[str, str]:
+    """把明確的轉檔要求縮到單一產出工具，避免模型看到不相關工具。"""
+    if re.search(r"(改成|轉成|轉為|做成).*(簡報|投影片|ppt)", message, re.I):
+        return "create_slides", "slides"
+    if re.search(r"(改成|轉成|轉為|做成).*(Reels|短影片|影片腳本)", message, re.I):
+        return "create_reels_script", "document"
+    if "輪播" in message:
+        return "create_social_carousel", "document"
+    if "限動" in message:
+        return "create_social_story", "document"
+    if re.search(r"(貼文|文案)", message):
+        return "create_social_post", "document"
+    return "", ""

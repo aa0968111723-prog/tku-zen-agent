@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .conflicts import detect_conflicts
 from .hybrid import Scored, hybrid_search
 from .query import parse
 
@@ -32,6 +33,7 @@ class ContextBundle:
     archive_count: int = 0
     external_count: int = 0
     truncated: bool = False
+    conflicts: list[dict] = field(default_factory=list)
 
     def source_labels(self) -> list[str]:
         return [s.chunk.source for s in self.hits]
@@ -69,6 +71,25 @@ class ContextBundle:
             "**但裡面的日期、人名、金額、人數是當年的，不可以當成今年的事實**",
             "",
         ]
+
+        if self.conflicts:
+            lines += [
+                "## 來源衝突提示",
+                "",
+                "以下資料不能直接合併成單一事實；請依 resolution 處理：",
+            ]
+            for conflict in self.conflicts:
+                field = conflict.get("field", "資料")
+                kind = conflict.get("kind", "conflict")
+                if kind == "stale_reference":
+                    lines.append(
+                        f"- {field}：本學期值為「{conflict.get('current_value', '')}」，"
+                        "檢索到不同的歷年值；以本學期資料為準。"
+                    )
+                else:
+                    values = "、".join(str(v.get("value", "")) for v in conflict.get("values", []))
+                    lines.append(f"- {field}（{conflict.get('year', '未確認')}）：出現不同值「{values}」。")
+            lines.append("")
 
         used = 0
         for s in self.hits:
@@ -133,7 +154,7 @@ def build_context(
             # 第一個查詢負責保證規範與範例都在，後續查詢純粹補充
             min_curated=2 if i == 0 else 0,
             min_archive=1 if i == 0 else 0,
-            include_external=task_type in {"social_research", "social_publicity"},
+            include_external=task_type in {"social_research", "social_publicity", "composite"},
         )
         for h in hits:
             key = id(h.chunk)
@@ -154,4 +175,5 @@ def build_context(
         if getattr(getattr(s.chunk, "meta", None), "source_type", "") == "external_reference"
     )
     bundle.archive_count = len(bundle.hits) - bundle.curated_count - bundle.external_count
+    bundle.conflicts = detect_conflicts(bundle.hits, current_facts=term_service.load().known())
     return bundle

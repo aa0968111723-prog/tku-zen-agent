@@ -53,6 +53,7 @@ class Artifact:
     details: list[str] = field(default_factory=list)
     artifact_id: str | None = None
     version: int = 1
+    meta: dict = field(default_factory=dict)
 
     def to_result(self) -> dict:
         # 給模型看的訊息刻意不含伺服器絕對路徑：模型用不到，
@@ -73,6 +74,7 @@ class Artifact:
             "filename": self.filename,
             "artifact_id": self.artifact_id,
             "version": self.version,
+            "parent_artifact_id": self.meta.get("parent_artifact_id"),
             # local_path 只在伺服器內部流轉（verification、download 用），
             # main.py 送到前端之前會拿掉。
             "local_path": str(self.local_path) if self.local_path else None,
@@ -137,9 +139,11 @@ def _register(artifact: Artifact, path: Path) -> None:
             kind=path.suffix.lstrip(".").lower(),
             local_path=str(path),
             drive_url=artifact.drive_url,
+            meta=artifact.meta,
         )
     except Exception:  # noqa: BLE001 —— 登記失敗不該讓已經產好的檔案變成失敗
         return
 
     artifact.artifact_id = record.id
     artifact.version = record.version
+    artifact.meta["parent_artifact_id"] = record.parent_id

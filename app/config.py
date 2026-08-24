@@ -92,6 +92,7 @@ def auth_mode() -> str:
 # ── 伺服器 ────────────────────────────────────────────────────
 HOST = (os.getenv("HOST") or "127.0.0.1").strip()
 PORT = int(os.getenv("PORT") or 8848)
+TOOL_TIMEOUT_SECONDS = float(os.getenv("TOOL_TIMEOUT_SECONDS") or 120)
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 (ROOT / "data").mkdir(parents=True, exist_ok=True)

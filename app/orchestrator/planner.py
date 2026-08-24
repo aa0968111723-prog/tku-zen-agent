@@ -13,8 +13,8 @@ from __future__ import annotations
 import re
 
 from ..services import current_term as term_service
-from ..skills import Routing, route
-from .state import OrchestrationState, PlanStep, Stage, TaskType
+from ..skills import Routing, is_continuation_only, route
+from .state import OrchestrationState, PlanStep, Stage, TaskType, WorkflowStatus
 
 # 這些問題問的是「今年的事實」，一定要先查當期狀態
 _CURRENT_FACT_HINTS = re.compile(
@@ -88,13 +88,28 @@ def build_retrieval_queries(message: str, routing: Routing) -> list[str]:
 
 def plan_for(routing: Routing, needs_artifact: bool) -> list[PlanStep]:
     skill = routing.skill
+    if routing.task_sequence:
+        steps = [
+            PlanStep("研究指定的外校公開資料", kind="research"),
+            PlanStep("整理研究來源與可用洞察", kind="synthesis"),
+            PlanStep("建立淡江網宣", kind="artifact"),
+            PlanStep("檢查產出是否符合社團規範", kind="verify"),
+            PlanStep("交付並說明後續步驟", kind="deliver"),
+        ]
+        # 依描述產生穩定 id，避免依賴 hash 的跨程序不一致。
+        for i, step in enumerate(steps, 1):
+            step.step_id = f"composite-{i}"
+        steps[1].depends_on = [steps[0].step_id]
+        steps[2].depends_on = [steps[0].step_id]
+        return steps
     steps = [PlanStep("查社團知識庫與歷年範例")]
 
     if not needs_artifact:
         steps.append(PlanStep("依知識庫內容回答"))
         return steps
 
-    kinds = list(skill.artifacts_expected) or ["document"]
+    kinds = [routing.preferred_artifact] if routing.preferred_artifact else list(skill.artifacts_expected)
+    kinds = kinds or ["document"]
     for kind in kinds:
         steps.append(PlanStep(f"建立{ARTIFACT_LABEL.get(kind, kind)}"))
     steps.append(PlanStep("檢查產出是否符合社團規範"))
@@ -104,7 +119,7 @@ def plan_for(routing: Routing, needs_artifact: bool) -> list[PlanStep]:
 
 def verification_rules_for(routing: Routing) -> list[str]:
     rules = ["no_fabricated_current_facts", "no_stale_year_as_current", "placeholder_for_unknown"]
-    if routing.skill.name == "social_publicity":
+    if routing.skill.name == "social_publicity" or "social_publicity" in routing.task_sequence:
         rules += ["verify_social_copy", "no_health_claims", "not_religious_recruitment", "external_tone"]
     if routing.skill.name == "recruitment":
         rules += ["no_health_claims", "not_religious_recruitment", "external_tone"]
@@ -125,13 +140,14 @@ def understand(message: str) -> tuple[OrchestrationState, Routing]:
     state = OrchestrationState()
     state.intent = message.strip()[:300]
     try:
-        state.task_type = TaskType(routing.skill.task_type)
+        state.task_type = TaskType("composite" if routing.task_sequence else routing.skill.task_type)
     except ValueError:
         state.task_type = TaskType.UNKNOWN
     state.selected_skill = routing.skill.name
     state.required_facts = detect_required_facts(message, routing.skill.required_facts)
     state.retrieval_queries = build_retrieval_queries(message, routing)
-    state.artifacts_expected = list(routing.skill.artifacts_expected) if needs_artifact else []
+    expected = [routing.preferred_artifact] if routing.preferred_artifact else list(routing.skill.artifacts_expected)
+    state.artifacts_expected = expected if needs_artifact else []
     state.verification_rules = verification_rules_for(routing) if needs_artifact else []
     state.plan_steps = plan_for(routing, needs_artifact)
 
@@ -142,6 +158,22 @@ def understand(message: str) -> tuple[OrchestrationState, Routing]:
     state.missing_facts = [k for k in state.required_facts if k not in known]
 
     state.stage = Stage.PLAN
+    state.workflow_status = WorkflowStatus.IN_PROGRESS
+    state.next_action = state.next_step().description if state.next_step() else ""
+    return state, routing
+
+
+def continue_previous(
+    message: str, previous: OrchestrationState,
+) -> tuple[OrchestrationState, Routing]:
+    """還原上一個未完成任務，不建立新的任務圖，也不丟掉已完成步驟。"""
+    routing = route(previous.intent)
+    state = OrchestrationState.from_dict(previous.to_dict())
+    state.intent = message.strip()[:300] or previous.intent
+    state.stage = Stage.EXECUTE
+    state.workflow_status = WorkflowStatus.IN_PROGRESS
+    state.completion_status = "in_progress"
+    state.next_action = state.next_step().description if state.next_step() else ""
     return state, routing
 
 
