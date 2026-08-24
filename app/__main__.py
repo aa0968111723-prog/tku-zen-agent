@@ -25,7 +25,12 @@ def _fix_windows_console() -> None:
         pass
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+            # Pipe 的接收端（例如 pytest）會用 Windows 系統碼頁解碼；只有真正的
+            # 主控台才切到 UTF-8，避免子程序輸出被父程序以 cp950 解碼時壞掉。
+            if stream.isatty():
+                stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+            else:
+                stream.reconfigure(errors="replace")  # type: ignore[union-attr]
         except Exception:  # noqa: BLE001
             pass
 

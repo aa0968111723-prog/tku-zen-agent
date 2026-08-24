@@ -13,10 +13,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from typing import Any
 
-from ..orchestrator.state import OrchestrationState
+from ..orchestrator.state import OrchestrationState, Stage, WorkflowStatus
 from . import context as ctx_mod
 from .session_store import SessionStore
 
@@ -84,6 +85,51 @@ def load_state(store: SessionStore, project_id: str) -> OrchestrationState | Non
         return None
 
 
+def set_workflow_status(
+    store: SessionStore, project_id: str, status: WorkflowStatus,
+    *, next_action: str = "", error_code: str = "",
+) -> OrchestrationState | None:
+    """由 API 控制工作流；只改公開生命週期，不改已完成步驟。"""
+    state = load_state(store, project_id)
+    if state is None:
+        return None
+    state.workflow_status = status
+    state.next_action = next_action
+    state.last_error_code = error_code
+    if status == WorkflowStatus.PAUSED:
+        state.completion_status = "in_progress"
+    elif status == WorkflowStatus.CANCELLED:
+        state.completion_status = "failed"
+        state.stage = Stage.FAILED
+    elif status == WorkflowStatus.IN_PROGRESS:
+        state.completion_status = "in_progress"
+    save_state(store, project_id, state)
+    return state
+
+
+def reconcile_progress(current: OrchestrationState, previous: OrchestrationState | None) -> OrchestrationState:
+    """把相同描述的步驟進度帶到延續任務，新增步驟維持 pending。"""
+    if previous is None:
+        return current
+    old = {step.description: step for step in previous.plan_steps}
+    for step in current.plan_steps:
+        prior = old.get(step.description)
+        if not prior:
+            continue
+        step.done = prior.done
+        step.status = prior.status
+        step.attempts = prior.attempts
+        step.note = prior.note
+        step.last_error = prior.last_error
+        step.step_id = prior.step_id
+    current.artifacts_produced = list(previous.artifacts_produced)
+    current.retrieved_sources = list(previous.retrieved_sources)
+    current.verification_results = list(previous.verification_results)
+    current.repair_attempts = previous.repair_attempts
+    current.metrics.update(previous.metrics)
+    return current
+
+
 # ── 事實 ─────────────────────────────────────────────────────
 
 def extract_facts(text: str) -> dict[str, str]:
@@ -126,6 +172,40 @@ def record_artifact_fact(store: SessionStore, project_id: str, artifact: dict[st
         + (f"，雲端 {artifact['drive_url']}" if artifact.get("drive_url") else ""),
         source="artifact",
     )
+
+
+def recent_artifacts(store: SessionStore, user_id: str, project_id: str, limit: int = 8) -> list[dict[str, Any]]:
+    """給延續任務看的最新 artifact，不把整條版本鏈塞進模型。"""
+    return [a.public() for a in store.list_artifacts(user_id, project_id=project_id, limit=limit)]
+
+
+def retrieval_cache_key(queries: list[str], task_type: str) -> str:
+    value = json.dumps({"queries": queries, "task_type": task_type}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def get_cached_context(store: SessionStore, project_id: str, queries: list[str], task_type: str, fingerprint: str) -> dict[str, Any] | None:
+    return store.get_retrieval_cache(project_id, retrieval_cache_key(queries, task_type), fingerprint)
+
+
+def save_cached_context(
+    store: SessionStore, project_id: str, queries: list[str], task_type: str, fingerprint: str,
+    context_text: str, meta: dict[str, Any],
+) -> None:
+    store.cache_retrieval(
+        project_id, retrieval_cache_key(queries, task_type), fingerprint,
+        "\n".join(queries), context_text, meta,
+    )
+
+
+def record_research_sources(store: SessionStore, project_id: str, session_id: str | None, result: dict[str, Any]) -> list[str]:
+    sources = result.get("source_records") or result.get("references") or []
+    if not isinstance(sources, list):
+        return []
+    ids = store.record_research_sources(project_id, sources, session_id=session_id)
+    if ids:
+        store.remember(project_id, "最近研究來源", "、".join(ids), source="research")
+    return ids
 
 
 # ── 訊息 ─────────────────────────────────────────────────────

@@ -41,6 +41,17 @@ def _path(name: str, default: str) -> Path:
 NVIDIA_API_KEY = _secret("NVIDIA_API_KEY")
 NVIDIA_BASE_URL = (os.getenv("NVIDIA_BASE_URL") or "https://integrate.api.nvidia.com/v1").rstrip("/")
 NVIDIA_MODEL = (os.getenv("NVIDIA_MODEL") or "meta/llama-3.1-70b-instruct").strip()
+NVIDIA_FAST_MODEL = (os.getenv("NVIDIA_FAST_MODEL") or "meta/llama-3.1-8b-instruct").strip()
+NVIDIA_STRONG_MODEL = (os.getenv("NVIDIA_STRONG_MODEL") or NVIDIA_MODEL).strip()
+# NVIDIA Build 目前通常以額度計費而非美元；需要自架或付費端點時可填實際單價。
+NVIDIA_INPUT_COST_PER_MILLION = float(os.getenv("NVIDIA_INPUT_COST_PER_MILLION") or 0)
+NVIDIA_OUTPUT_COST_PER_MILLION = float(os.getenv("NVIDIA_OUTPUT_COST_PER_MILLION") or 0)
+# ── fal.ai 視覺服務（選用）────────────────────────────────────
+# 文字代理仍使用上方的 NVIDIA 模型。只有圖片理解與使用者主動生成的
+# 視覺稿會送往 fal.ai；未設定時，文字工作台仍可正常使用。
+FAL_KEY = (os.getenv("FAL_KEY") or "").strip()
+FAL_VISION_MODEL = (os.getenv("FAL_VISION_MODEL") or "google/gemini-2.5-flash").strip()
+FAL_IMAGE_MODEL = (os.getenv("FAL_IMAGE_MODEL") or "fal-ai/flux/schnell").strip()
 
 # 給介面下拉選單用：已知支援 function calling 的免費模型
 KNOWN_TOOL_MODELS = [
@@ -104,6 +115,8 @@ def auth_mode() -> str:
 # ── 伺服器 ────────────────────────────────────────────────────
 HOST = (os.getenv("HOST") or "127.0.0.1").strip()
 PORT = int(os.getenv("PORT") or 8848)
+TOOL_TIMEOUT_SECONDS = float(os.getenv("TOOL_TIMEOUT_SECONDS") or 120)
+TOOL_MAX_ATTEMPTS = max(1, int(os.getenv("TOOL_MAX_ATTEMPTS") or 2))
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 (ROOT / "data").mkdir(parents=True, exist_ok=True)

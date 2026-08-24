@@ -21,6 +21,7 @@ ALLOWED_EVENTS = {
     # 研究驗證引擎的結構化事件（進度與依據，不是推理過程）
     "clarification_needed", "source_cards", "answer_review",
     "contamination_warning", "research_status",
+    "visual_analysis_started", "visual_analysis_completed",
 }
 
 
@@ -76,6 +77,38 @@ async def test_plain_answer_without_tools(monkeypatch, ctx):
     )
     msgs = [e for e in events if e["type"] == "message"]
     assert msgs and "領袖禪學社" in msgs[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_image_attachment_is_summarized_by_fal_only_for_current_model_request(monkeypatch, ctx, tmp_db):
+    from app import orchestrator as orch
+
+    async def describe_images(attachments):
+        assert attachments[0]["data_url"] == "data:image/png;base64,AA=="
+        return "海報上有新生茶會與報名資訊。"
+
+    monkeypatch.setattr(orch.fal_service, "describe_images", describe_images)
+
+    fake, events = await collect(
+        orch,
+        monkeypatch,
+        [say("已讀取圖片內容。")],
+        "請依圖片寫文案",
+        ctx,
+        attachments=[{"name": "海報.png", "media_type": "image/png", "data_url": "data:image/png;base64,AA=="}],
+    )
+    user = next(message for message in fake.calls[0]["messages"] if message["role"] == "user")
+    assert isinstance(user["content"], str)
+    assert "【圖片可見資訊" in user["content"]
+    assert "新生茶會" in user["content"]
+    assert "data:image" not in user["content"]
+    assert [event["type"] for event in events if event["type"].startswith("visual_")] == [
+        "visual_analysis_started", "visual_analysis_completed",
+    ]
+    stored = tmp_db.load_messages(ctx.session_id)
+    history = "\n".join(message["content"] for message in stored)
+    assert "data:image" not in history
+    assert "圖片可見資訊" not in history
 
 
 @pytest.mark.asyncio

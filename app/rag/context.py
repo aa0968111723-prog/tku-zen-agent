@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from ..research.claims import SourceRecord, source_from_chunk
 from ..research.entities import ResearchMode, ResearchScope
+from .conflicts import detect_conflicts
 from .hybrid import Scored, hybrid_search
 from .query import parse
 
@@ -45,6 +46,7 @@ class ContextBundle:
     archive_count: int = 0
     external_count: int = 0
     truncated: bool = False
+    conflicts: list[dict] = field(default_factory=list)
     _source_records: list[SourceRecord] | None = None
 
     # ── 池 ───────────────────────────────────────────────
@@ -124,6 +126,25 @@ class ContextBundle:
             "**但裡面的日期、人名、金額、人數是當年的，不可以當成今年的事實**",
             "",
         ]
+        if self.conflicts:
+            lines += [
+                "## 來源衝突提示",
+                "",
+                "以下資料不能直接合併成單一事實；請依 resolution 處理：",
+            ]
+            for conflict in self.conflicts:
+                field_name = conflict.get("field", "資料")
+                kind = conflict.get("kind", "conflict")
+                if kind == "stale_reference":
+                    lines.append(
+                        f"- {field_name}：本學期值為「{conflict.get('current_value', '')}」，"
+                        "檢索到不同的歷年值；以本學期資料為準。"
+                    )
+                else:
+                    values = "、".join(str(v.get("value", "")) for v in conflict.get("values", []))
+                    lines.append(f"- {field_name}（{conflict.get('year', '未確認')}）：出現不同值「{values}」。")
+            lines.append("")
+
         self._append_blocks(lines, self.hits)
         return "\n".join(lines)
 
@@ -274,7 +295,7 @@ def build_context(
 
     if mode != ResearchMode.EXTERNAL:
         # ── 淡江內部池（internal / comparative / 舊行為）────
-        include_external_legacy = scope is None and task_type in {"social_research", "social_publicity"}
+        include_external_legacy = scope is None and task_type in {"social_research", "social_publicity", "composite"}
         for i, raw in enumerate(queries or []):
             if not raw.strip():
                 continue
@@ -309,4 +330,5 @@ def build_context(
     )
     bundle.external_count = sum(1 for s in bundle.hits if _is_external_chunk(s.chunk))
     bundle.archive_count = len(bundle.hits) - bundle.curated_count - bundle.external_count
+    bundle.conflicts = detect_conflicts(bundle.hits, current_facts=term_service.load().known())
     return bundle

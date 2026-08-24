@@ -143,3 +143,20 @@ def test_empty_message_is_rejected(client):
 
 def test_oversized_message_is_rejected(client):
     assert client.post("/api/chat", json={"message": "x" * 9000}).status_code == 422
+
+
+def test_image_attachment_rejects_wrong_data_url(client):
+    response = client.post(
+        "/api/chat",
+        json={
+            "message": "請看圖片",
+            "attachments": [{"name": "x.png", "media_type": "image/png", "data_url": "data:image/png;base64,not-base64"}],
+        },
+    )
+    assert response.status_code == 422
+    assert "圖片" in response.text
+
+
+def test_image_attachment_rejects_more_than_two_images(client):
+    image = {"name": "x.png", "media_type": "image/png", "data_url": "data:image/png;base64,AA=="}
+    assert client.post("/api/chat", json={"message": "請看圖片", "attachments": [image, image, image]}).status_code == 422

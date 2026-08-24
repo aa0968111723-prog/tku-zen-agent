@@ -17,6 +17,11 @@ from ..research import entities as research_entities
 _YEAR = re.compile(r"(?<!\d)(1[0-2]\d)(?!\d)")
 _YEAR_SEM = re.compile(r"(?<!\d)(1[0-2]\d)[-_ ]?([12])(?!\d)")
 _GREGORIAN = re.compile(r"(?<!\d)(20[0-3]\d)(?!\d)")
+_URL = re.compile(r"https?://[^\s)\]}>]+")
+_SOURCE_DATE = re.compile(
+    r"(?:最後檢索日期|擷取日期|資料日期|更新日期|發布日期|日期)\s*[:：]\s*"
+    r"(20\d{2}[-/]\d{1,2}[-/]\d{1,2}|1[0-2]\d\s*學年度)"
+)
 
 DOC_TYPE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("細流", ("細流", "流程表", "跑流程", "時間軸")),
@@ -72,15 +77,32 @@ class ChunkMeta:
     contains_sensitive_structure: bool = False
     updated_at: str | None = None
     tags: list[str] = field(default_factory=list)
+    source_title: str = ""
+    source_url: str = ""
+    source_date: str = ""
+    summary: str = ""
+    credibility: float = 0.0
+    verification: str = "needs_verification"  # verified | needs_verification | internal
+
+    @property
+    def priority(self) -> int:
+        return {
+            "current_term": 100,
+            "curated": 80,
+            "playbook": 70,
+            "archive": 50,
+            "conversation": 20,
+            "external_reference": 30,
+        }.get(self.source_type, 10)
 
     # ── 資料歸屬（政大事故後新增：每一段都要知道自己屬於誰）──
+    # source_url 與上方欄位共用：外校段落以 registry 的官方網址為準。
     entity_id: str = ""                 # research.entities 的 entity_id；外校段落對不到實體時為空
     school: str = ""                    # 正式學校名稱
     organization: str = ""              # 正式社團／組織名稱
     source_scope: str = "internal"      # internal | external —— 檢索過濾的硬邊界
     is_external: bool = False
     authority_level: str = "archive"    # official | curated | archive | user | unknown
-    source_url: str = ""                # 外校段落的官方來源網址
     published_at: str = ""
     captured_at: str = ""               # 外校資料的檢索日期（判斷過舊用）
     external_source_type: str = ""      # official_instagram | official_website | ...
@@ -113,9 +135,15 @@ class ChunkMeta:
             "source_scope": self.source_scope,
             "is_external": self.is_external,
             "authority_level": self.authority_level,
-            "source_url": self.source_url,
             "published_at": self.published_at,
             "captured_at": self.captured_at,
+            "source_title": self.source_title,
+            "source_url": self.source_url,
+            "source_date": self.source_date,
+            "summary": self.summary,
+            "credibility": self.credibility,
+            "verification": self.verification,
+            "priority": self.priority,
         }
 
 
@@ -177,8 +205,9 @@ def _attribute(meta: ChunkMeta, path: Path, label: str, text: str) -> None:
             meta.school = ""
             meta.organization = ""
             ig = _IG_URL.search(text)
-            meta.source_url = ig.group(0) if ig else ""
-            meta.external_source_type = "official_instagram" if ig else ""
+            if ig:
+                meta.source_url = ig.group(0)
+                meta.external_source_type = "official_instagram"
     else:
         meta.source_scope = "internal"
         meta.is_external = False
@@ -191,7 +220,7 @@ def _attribute(meta: ChunkMeta, path: Path, label: str, text: str) -> None:
 def infer(path: Path, label: str, text: str, source_type: str) -> ChunkMeta:
     """從路徑、來源標籤與內容推 metadata。"""
     hay = f"{path.as_posix()} {label}"
-    meta = ChunkMeta(source_type=source_type)
+    meta = ChunkMeta(source_type=source_type, source_title=path.stem or label)
 
     m = _YEAR_SEM.search(hay)
     if m:
@@ -222,5 +251,45 @@ def infer(path: Path, label: str, text: str, source_type: str) -> ChunkMeta:
         meta.audience = "external"
     meta.contains_sensitive_structure = "只保留欄位結構" in head or "名冊類" in head
 
+    url = _URL.search(text)
+    if url:
+        meta.source_url = url.group(0).rstrip("。，、；;")
+    date = _SOURCE_DATE.search(text)
+    if date:
+        meta.source_date = date.group(1).replace("/", "-").replace(" ", "")
+        meta.updated_at = meta.source_date
+
+    # 來源摘要只取原文中的公開定位／主題等短欄位；沒有時退回第一個有內容的行。
+    candidates = []
+    for line in text.splitlines():
+        stripped = line.strip().lstrip(">- *#").strip()
+        if not stripped or stripped.startswith("http"):
+            continue
+        if any(key in stripped for key in ("公開定位", "公開主題", "摘要", "可供研究")):
+            candidates.append(stripped)
+    if not candidates:
+        candidates = [
+            line.strip().lstrip(">- *#").strip()
+            for line in text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    meta.summary = (candidates[0] if candidates else "")[:320]
+
+    if source_type in {"curated", "playbook"}:
+        meta.credibility, meta.verification = 0.95, "internal"
+    elif source_type == "archive":
+        meta.credibility, meta.verification = 0.75, "internal"
+    elif source_type == "conversation":
+        meta.credibility, meta.verification = 0.5, "needs_verification"
+
+    # 實體歸屬（政大事故後新增）。外校段落的 source_url 以 registry 的
+    # 官方網址覆寫內文嗅探結果；captured_at 從檔頭「最後檢索日期」帶入。
     _attribute(meta, path, label, text)
+
+    if source_type == "external_reference":
+        if not meta.source_date and meta.captured_at:
+            meta.source_date = meta.captured_at
+        meta.credibility = 0.8 if meta.source_url and meta.source_date else (0.55 if meta.source_url else 0.3)
+        meta.verification = "verified" if meta.source_url and meta.source_date else "needs_verification"
+
     return meta

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Any
@@ -23,6 +24,17 @@ class Stage(str, Enum):
     FAILED = "failed"
 
 
+class WorkflowStatus(str, Enum):
+    """可由使用者理解、也可由 API 控制的任務生命週期。"""
+
+    IN_PROGRESS = "in_progress"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class TaskType(str, Enum):
     QUESTION = "question"            # 只是問問題，不用產檔
     EVENT_PLANNING = "event_planning"
@@ -35,6 +47,7 @@ class TaskType(str, Enum):
     UNKNOWN = "unknown"
     SOCIAL_RESEARCH = "social_research"
     SOCIAL_PUBLICITY = "social_publicity"
+    COMPOSITE = "composite"
 
 
 @dataclass
@@ -42,6 +55,22 @@ class PlanStep:
     description: str
     done: bool = False
     note: str = ""
+    step_id: str = ""
+    kind: str = "task"
+    status: str = "pending"       # pending | running | completed | failed | skipped
+    attempts: int = 0
+    last_error: str = ""
+    depends_on: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # 舊版 state 只有 done 欄位，讀回時自動補上新狀態。
+        if not self.step_id:
+            digest = hashlib.sha1(self.description.encode("utf-8"), usedforsecurity=False).hexdigest()[:10]
+            self.step_id = f"step-{digest}"
+        if self.done:
+            self.status = "completed"
+        elif self.status == "completed":
+            self.done = True
 
 
 @dataclass
@@ -70,6 +99,11 @@ class OrchestrationState:
 
     completion_status: str = "in_progress"   # in_progress | completed | blocked | failed
     tool_rounds: int = 0
+    workflow_status: WorkflowStatus = WorkflowStatus.IN_PROGRESS
+    current_step_id: str = ""
+    last_error_code: str = ""
+    next_action: str = ""
+    metrics: dict[str, Any] = field(default_factory=dict)
 
     # ── 研究驗證（政大事故後新增）────────────────────────
     research_mode: str = "internal"          # internal | external | comparative
@@ -85,15 +119,50 @@ class OrchestrationState:
 
     def mark_step(self, index: int, note: str = "") -> None:
         if 0 <= index < len(self.plan_steps):
-            self.plan_steps[index].done = True
+            step = self.plan_steps[index]
+            step.done = True
+            step.status = "completed"
             if note:
-                self.plan_steps[index].note = note
+                step.note = note
+
+    def start_step(self, index: int) -> None:
+        if 0 <= index < len(self.plan_steps):
+            step = self.plan_steps[index]
+            if step.status != "completed":
+                step.status = "running"
+                step.attempts += 1
+                self.current_step_id = step.step_id
+
+    def fail_step(self, index: int, error: str, *, code: str = "") -> None:
+        if 0 <= index < len(self.plan_steps):
+            step = self.plan_steps[index]
+            step.done = False
+            step.status = "failed"
+            step.last_error = error[:500]
+            self.last_error_code = code
+            self.current_step_id = step.step_id
+
+    def reset_failed_steps(self) -> int:
+        """只把失敗步驟恢復成待執行，保留已完成步驟。"""
+        count = 0
+        for step in self.plan_steps:
+            if step.status == "failed":
+                step.status = "pending"
+                step.done = False
+                step.last_error = ""
+                count += 1
+        if count:
+            self.workflow_status = WorkflowStatus.IN_PROGRESS
+            self.completion_status = "in_progress"
+            self.stage = Stage.EXECUTE
+            self.last_error_code = ""
+        return count
 
     def next_step(self) -> PlanStep | None:
-        return next((s for s in self.plan_steps if not s.done), None)
+        return next((s for s in self.plan_steps if not s.done and s.status != "skipped"), None)
 
     def progress(self) -> tuple[int, int]:
-        return sum(1 for s in self.plan_steps if s.done), len(self.plan_steps)
+        return sum(1 for s in self.plan_steps if s.done or s.status == "completed"), len(self.plan_steps)
 
     def needs_artifacts(self) -> bool:
         return bool(self.artifacts_expected)
@@ -104,6 +173,7 @@ class OrchestrationState:
         d = asdict(self)
         d["task_type"] = self.task_type.value
         d["stage"] = self.stage.value
+        d["workflow_status"] = self.workflow_status.value
         return d
 
     @classmethod
@@ -118,9 +188,18 @@ class OrchestrationState:
             stage = Stage(data.pop("stage", "understand"))
         except ValueError:
             stage = Stage.UNDERSTAND
-        allowed = {f for f in cls.__dataclass_fields__ if f not in {"plan_steps", "task_type", "stage"}}
+        try:
+            workflow_status = WorkflowStatus(
+                data.pop("workflow_status", data.get("completion_status", "in_progress"))
+            )
+        except ValueError:
+            workflow_status = WorkflowStatus.IN_PROGRESS
+        allowed = {
+            f for f in cls.__dataclass_fields__
+            if f not in {"plan_steps", "task_type", "stage", "workflow_status"}
+        }
         clean = {k: v for k, v in data.items() if k in allowed}
-        return cls(plan_steps=steps, task_type=task_type, stage=stage, **clean)
+        return cls(plan_steps=steps, task_type=task_type, stage=stage, workflow_status=workflow_status, **clean)
 
     # ── 給 UI 的摘要（不是 chain-of-thought）──────────────
 
@@ -130,7 +209,15 @@ class OrchestrationState:
             "task_type": self.task_type.value,
             "skill": self.selected_skill,
             "stage": self.stage.value,
+            "workflow_status": self.workflow_status.value,
             "steps_done": done,
             "steps_total": total,
             "status": self.completion_status,
+            "current_step": self.next_step().description if self.next_step() else "",
+            "next_action": self.next_action or (self.next_step().description if self.next_step() else ""),
+            "failed_steps": [
+                {"step_id": s.step_id, "description": s.description, "error": s.last_error}
+                for s in self.plan_steps if s.status == "failed"
+            ],
+            "metrics": dict(self.metrics),
         }

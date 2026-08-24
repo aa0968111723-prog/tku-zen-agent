@@ -31,15 +31,41 @@ class LLMError(RuntimeError):
 # 不同階段對模型的要求不一樣：分類/改寫要快，長文與工具呼叫要穩。
 # 使用者在介面上選的模型永遠優先（override），這裡只是沒指定時的預設。
 MODEL_ROUTES: dict[str, str] = {
-    "classify": "meta/llama-3.1-8b-instruct",   # 短、量大、要求低
+    "classify": config.NVIDIA_FAST_MODEL,         # 短、量大、要求低
     "execute": "",                              # 空 = 用 config.NVIDIA_MODEL
-    "longform": "",
+    "longform": config.NVIDIA_STRONG_MODEL,
 }
 
 
 def route_model(task: str = "execute") -> str:
     """依任務類型挑模型。沒設定就退回使用者的主力模型。"""
     return (MODEL_ROUTES.get(task) or config.NVIDIA_MODEL).strip()
+
+
+def select_model(
+    *,
+    message: str,
+    task_type: str,
+    needs_artifact: bool,
+    composite: bool = False,
+    explicit: str | None = None,
+) -> dict[str, str]:
+    """用可解釋且可測的規則選模型，不額外花一次模型分類呼叫。"""
+    if explicit:
+        return {"model": explicit.strip(), "tier": "manual", "reason": "使用者指定模型"}
+    if task_type == "knowledge" and not needs_artifact and not composite and len(message) <= 240:
+        return {"model": route_model("classify"), "tier": "economy", "reason": "簡短知識查詢"}
+    if composite or task_type in {"social_research", "composite"} or needs_artifact:
+        return {"model": route_model("longform"), "tier": "strong", "reason": "研究、產出或多步驟任務"}
+    return {"model": route_model("execute"), "tier": "standard", "reason": "一般任務"}
+
+
+def estimate_cost(input_tokens: int, output_tokens: int) -> float:
+    return round(
+        input_tokens / 1_000_000 * config.NVIDIA_INPUT_COST_PER_MILLION
+        + output_tokens / 1_000_000 * config.NVIDIA_OUTPUT_COST_PER_MILLION,
+        8,
+    )
 
 
 # ── 連線池 ───────────────────────────────────────────────────

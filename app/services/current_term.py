@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -235,3 +237,15 @@ def as_form() -> dict[str, Any]:
             for f in FIELDS
         ],
     }
+
+
+def fingerprint() -> str:
+    """本學期資料版本；供包含當期事實的 retrieval context 快取失效。"""
+    state = load()
+    payload = {
+        "values": {field.key: state.get(field.key) or "" for field in FIELDS},
+        "updated_at": state.updated_at or "",
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()

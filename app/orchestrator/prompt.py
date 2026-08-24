@@ -157,6 +157,9 @@ def build_system_prompt(
     context_block: str,
     destination: str,
     project_facts: dict[str, str] | None = None,
+    previous_artifacts: list[dict] | None = None,
+    research_sources: list[dict] | None = None,
+    activity_context: str = "",
 ) -> str:
     parts = [BASE, "## 資料優先序\n\n" + RAG_PRIORITY]
 
@@ -184,9 +187,12 @@ def build_system_prompt(
     task_block = [
         "## 這一輪的任務",
         "",
-        f"- 類型：{routing.skill.label}",
+        f"- 類型：{routing.label}",
         f"- 計畫：\n{plan}",
     ]
+    if routing.task_sequence:
+        task_block.append("- 任務依賴：" + " → ".join(routing.task_sequence))
+        task_block.append("- 先完成研究來源，再把已驗證洞察改寫成淡江自己的產出；不可把外校資料當淡江事實。")
     if state.artifacts_expected:
         from .planner import ARTIFACT_LABEL
 
@@ -206,6 +212,35 @@ def build_system_prompt(
                 "產出裡對應欄位一律填「待填」，並在回覆最後提醒使用者去補。"
             )
     parts.append("\n".join(task_block))
+
+    if previous_artifacts:
+        lines = [
+            "## 這個專案最近的產出", "",
+            "以下是可沿用或轉換的最新版本；修改時保留版本關聯，不要要求使用者重新描述全部內容。",
+            "轉成另一種格式或修改舊內容前，必須先呼叫 read_artifact 讀取原文，不可只看片名重新編造。",
+        ]
+        lines.extend(
+            f"- {a.get('filename', '未命名')}（版本 {a.get('version', 1)}，artifact_id={a.get('artifact_id', '')}）"
+            for a in previous_artifacts[:8]
+        )
+        parts.append("\n".join(lines))
+
+    if research_sources:
+        lines = ["## 這個專案已保存的研究來源", "", "研究結論只能引用下列來源；verification=needs_verification 的來源必須標成待驗證。"]
+        for source in research_sources[:12]:
+            lines.append(
+                f"- {source.get('title') or source.get('source_file') or '未命名來源'}｜"
+                f"{source.get('url') or '網址待補'}｜可信度 {source.get('credibility', 0)}｜"
+                f"{source.get('verification', 'needs_verification')}"
+            )
+        parts.append("\n".join(lines))
+
+    if activity_context.strip():
+        parts.append(
+            "## 目前活動的正式資料\n\n"
+            "以下資料來自活動與待辦紀錄。產出企劃書、簡報、網宣或會議紀錄時直接沿用；"
+            "標示待填的欄位不可自行補值。\n\n" + activity_context
+        )
 
     # 4. 檢索到的內容
     if context_block.strip():

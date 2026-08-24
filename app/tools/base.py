@@ -16,6 +16,19 @@ VALID_DESTINATIONS = {"local", "drive", "both"}
 def safe_filename(name: str, default_ext: str) -> str:
     name = (name or "").strip() or "未命名"
     name = _ILLEGAL.sub("_", name).strip(" .")
+    stem, supplied_ext = (name.rsplit(".", 1) + [""])[:2] if "." in name else (name, "")
+    # 版本由 artifact 資料表管理；使用者可見檔名永遠保持穩定，不把
+    # _2_2、final_final 或「修正版2」這類儲存層痕跡帶到下載檔名。
+    stem = re.sub(r"(?:_\d+){2,}$", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(r"(?:[_\- ]+(?:final|修正版|草稿版?))+(?:[_\- ]*\d+)*$", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(
+        r"^(\d{3})[_\- ]*(上|下)[_\- ]*",
+        lambda match: f"{match.group(1)}-{'1' if match.group(2) == '上' else '2'}-",
+        stem,
+    )
+    stem = re.sub(r"[_\s]+", "-", stem)
+    stem = re.sub(r"-+", "-", stem).strip("-") or "未命名"
+    name = f"{stem}.{supplied_ext}" if supplied_ext else stem
     if not name:
         name = "未命名"
     if not name.lower().endswith(default_ext.lower()):
@@ -33,12 +46,17 @@ def unique_path(directory: Path, filename: str) -> Path:
     p = directory / filename
     if not p.exists():
         return p
-    stem, suffix = p.stem, p.suffix
-    for i in range(2, 100):
-        cand = directory / f"{stem}_{i}{suffix}"
-        if not cand.exists():
-            return cand
-    return directory / f"{stem}_{_dt.datetime.now():%H%M%S}{suffix}"
+    # 保留舊版本，但讓每一版的 basename 都相同；真正的版本號由資料庫呈現為
+    # 草稿版／修正版／最終版，不再污染使用者看到的檔名。
+    version_root = directory / ".versions" / p.stem
+    for attempt in range(100):
+        stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        slot = version_root / (stamp if attempt == 0 else f"{stamp}-{attempt}")
+        candidate = slot / filename
+        if not candidate.exists():
+            slot.mkdir(parents=True, exist_ok=True)
+            return candidate
+    raise RuntimeError("無法建立產出版本目錄")
 
 
 @dataclass
@@ -53,6 +71,7 @@ class Artifact:
     details: list[str] = field(default_factory=list)
     artifact_id: str | None = None
     version: int = 1
+    meta: dict = field(default_factory=dict)
 
     def to_result(self) -> dict:
         # 給模型看的訊息刻意不含伺服器絕對路徑：模型用不到，
@@ -73,6 +92,8 @@ class Artifact:
             "filename": self.filename,
             "artifact_id": self.artifact_id,
             "version": self.version,
+            "parent_artifact_id": self.meta.get("parent_artifact_id"),
+            "activity_id": self.meta.get("activity_id"),
             # local_path 只在伺服器內部流轉（verification、download 用），
             # main.py 送到前端之前會拿掉。
             "local_path": str(self.local_path) if self.local_path else None,
@@ -129,7 +150,12 @@ def _register(artifact: Artifact, path: Path) -> None:
     from ..services.session_store import get_store
 
     try:
-        record = get_store().record_artifact(
+        store = get_store()
+        if ctx.project_id and not artifact.meta.get("activity_id"):
+            active = store.recall(ctx.project_id).get("__active_activity_id__")
+            if active and active.get("value"):
+                artifact.meta["activity_id"] = active["value"]
+        record = store.record_artifact(
             user_id=ctx.user_id,
             session_id=ctx.session_id,
             project_id=ctx.project_id,
@@ -137,9 +163,11 @@ def _register(artifact: Artifact, path: Path) -> None:
             kind=path.suffix.lstrip(".").lower(),
             local_path=str(path),
             drive_url=artifact.drive_url,
+            meta=artifact.meta,
         )
     except Exception:  # noqa: BLE001 —— 登記失敗不該讓已經產好的檔案變成失敗
         return
 
     artifact.artifact_id = record.id
     artifact.version = record.version
+    artifact.meta["parent_artifact_id"] = record.parent_id

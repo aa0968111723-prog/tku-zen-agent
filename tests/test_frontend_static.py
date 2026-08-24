@@ -109,6 +109,43 @@ def test_social_render_contract_present():
         assert title in JS
 
 
+def test_guided_input_and_preflight_contract_present():
+    for label in ("問 AI", "直接生成", "製作範本", "執行計畫", "填入：做網宣"):
+        assert label in HTML
+    for label in ("確認開始", "先跳過", "返回修改", "在開始前，還需要確認"):
+        assert label in HTML or label in JS
+    assert "questions: questions.slice(0, 3)" in JS
+    assert "preflightPrompt" in JS
+
+
+def test_progress_controls_do_not_expose_internal_tool_names_in_ui_labels():
+    for label in ("已理解需求", "確認必要資料", "產生初稿", "檢查內容", "產出完成"):
+        assert label in JS
+    for label in ("停止生成", "暫停任務", "重試失敗步驟", "查看任務摘要"):
+        assert label in JS
+    assert "TOOL_PHASES" in JS
+
+
+def test_accessibility_contract_for_new_sheets_and_composer():
+    assert 'aria-label="任務需求"' in HTML
+    assert 'aria-modal="true"' in HTML
+    assert "focus-visible" in CSS
+    assert "closePreflight" in JS
+
+
+def test_attachment_entry_supports_images_without_persisting_them_in_ui_state():
+    assert "image/jpeg" in HTML and "image/png" in HTML and "image/webp" in HTML
+    assert "只會傳給這次任務，不會保存" in JS
+    assert "fal.ai 視覺服務" in JS
+    assert "attachments" in JS
+
+
+def test_visual_output_uses_fal_endpoint_with_a_download_action():
+    assert "/api/visual/generate" in JS
+    assert "生成視覺稿" in JS
+    assert "開啟並下載" in JS
+
+
 def test_auth_errors_use_backend_detail():
     assert "readDetail" in JS
     assert "429" in JS
