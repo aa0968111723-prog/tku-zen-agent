@@ -70,8 +70,14 @@ class ContextBundle:
 
     def source_records(self, current_year: str | None = None) -> list[SourceRecord]:
         if self._source_records is None:
+            # 有明確研究對象時，把對象傳給來源分級：不屬於研究對象的外校
+            # 來源會標 wrong_entity，而不是掛著 verified 混進來源卡。
+            targets: list[str] | None = None
+            if self.scope is not None and self.scope.target_entities and not self.scope.generic_external:
+                targets = list(self.scope.target_entities)
             self._source_records = [
-                source_from_chunk(s.chunk, current_year=current_year) for s in self.hits
+                source_from_chunk(s.chunk, current_year=current_year, target_entities=targets)
+                for s in self.hits
             ]
         return self._source_records
 
@@ -195,8 +201,12 @@ class ContextBundle:
             kind = SOURCE_LABEL.get(meta.source_type if meta else "archive", "資料")
             detail = meta.label() if meta else ""
             if external_header and meta is not None:
-                who = meta.organization or "未對應到研究對象的外校段落"
-                header = f"#### 【外校已驗證資料】{who}"
+                if meta.organization or meta.school:
+                    header = f"#### 【外校已驗證資料】{meta.organization or meta.school}"
+                else:
+                    # 多校彙整段落：是外部參考沒錯，但不屬於任何單一學校，
+                    # 不能掛「已驗證資料」的頭銜當成研究對象的證據。
+                    header = "#### 【外校公開參考——多校彙整，不可作為單一學校的證據】"
                 bits = []
                 if meta.school:
                     bits.append(f"學校：{meta.school}")

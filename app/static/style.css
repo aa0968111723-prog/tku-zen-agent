@@ -598,6 +598,39 @@ a:focus-visible {
 
 .task-dock { display: none; }
 
+/* 手機（<960px）的任務入口：右下角浮動按鈕，開啟既有任務摘要 modal。
+   bottom 抬高到 composer 之上，避開 #send／#stop；保留 safe-area inset。
+   z-index 30：高於 composer（15），低於各 modal（80+），不會蓋住對話框。
+   動畫由全域 prefers-reduced-motion 規則統一關閉。 */
+.task-fab { display: none; }
+@media (max-width: 959.98px) {
+  .task-fab {
+    display: grid;
+    place-items: center;
+    position: fixed;
+    right: calc(14px + var(--safe-right));
+    bottom: calc(92px + var(--safe-bottom));
+    z-index: 30;
+    min-width: var(--tap);
+    min-height: var(--tap);
+    padding: 0 16px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--glass), var(--surface);
+    color: var(--ink);
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    box-shadow: var(--shadow), var(--glass-edge), var(--glow-cyan-soft);
+    transition: border-color .2s ease, box-shadow .2s ease;
+  }
+  .task-fab:hover, .task-fab:focus-visible {
+    border-color: rgba(83, 215, 255, .5);
+    color: var(--neon-cyan);
+  }
+  .task-fab[hidden] { display: none; }
+}
+
 .home-block { margin-top: 8px; }
 .home-block h2 {
   font-size: 13px;
@@ -1604,15 +1637,15 @@ select {
 .preflight-options button:hover { border-color: rgba(83, 215, 255, .45); }
 
 /* 選取：青色邊框＋柔和外發光＋右側勾選光點 */
-.preflight-options button[aria-pressed="true"] {
+.preflight-options button[aria-checked="true"] {
   background: rgba(83, 215, 255, .1);
   border: 2px solid var(--neon-cyan);
   color: var(--neon-cyan);
   font-weight: 650;
   box-shadow: var(--glow-cyan-soft), var(--glass-edge);
 }
-.preflight-options button[aria-pressed="true"]::before { opacity: 0; }
-.preflight-options button[aria-pressed="true"]::after {
+.preflight-options button[aria-checked="true"]::before { opacity: 0; }
+.preflight-options button[aria-checked="true"]::after {
   content: "✓";
   position: absolute;
   right: 9px;
@@ -1631,9 +1664,9 @@ select {
 }
 
 /* 已有選取時，未選取卡片降低存在感（漸進增強） */
-.preflight-options:has(button[aria-pressed="true"]) button[aria-pressed="false"] { opacity: .55; }
-.preflight-options:has(button[aria-pressed="true"]) button[aria-pressed="false"]:hover,
-.preflight-options:has(button[aria-pressed="true"]) button[aria-pressed="false"]:focus-visible { opacity: 1; }
+.preflight-options:has(button[aria-checked="true"]) button[aria-checked="false"] { opacity: .55; }
+.preflight-options:has(button[aria-checked="true"]) button[aria-checked="false"]:hover,
+.preflight-options:has(button[aria-checked="true"]) button[aria-checked="false"]:focus-visible { opacity: 1; }
 
 .preflight-question label { display: block; margin-top: 9px; font-size: 13px; color: var(--ink-2); }
 .preflight-question input, .question-control > input {

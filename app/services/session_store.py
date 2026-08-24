@@ -653,6 +653,7 @@ class SessionStore:
         project_id: str | None = None,
         status: str = "",
         semester: str = "",
+        academic_year: str = "",
         activity_type: str = "",
         limit: int = 50,
     ) -> list[dict[str, Any]]:
@@ -662,6 +663,7 @@ class SessionStore:
             ("project_id", project_id or ""),
             ("status", status),
             ("semester", semester),
+            ("academic_year", academic_year),
             ("activity_type", activity_type),
         ):
             if value:

@@ -116,12 +116,49 @@ def _step_index_for_tool(state: OrchestrationState, name: str) -> int | None:
         wanted = ("artifact", "建立", "產出")
     else:
         return None
+    # kind 精確比對優先——「建立文件」(artifact) 與「建立或更新活動資料」
+    # (activity) 的描述都含「建立」，關鍵字先比會讓文件工具誤配到活動步驟，
+    # 文件步驟就永遠停在 failed（稽核不可靠 #14）。
     for i, step in enumerate(state.plan_steps):
         if step.status in {"completed", "skipped"}:
             continue
-        if step.kind in wanted or any(word in step.description for word in wanted[1:]):
+        if step.kind in wanted:
+            return i
+    for i, step in enumerate(state.plan_steps):
+        if step.status in {"completed", "skipped"}:
+            continue
+        if any(word in step.description for word in wanted[1:]):
             return i
     return None
+
+
+# 產出檔名副檔名 → artifacts_expected 的 kind（產出覆蓋檢查用）
+_EXT_KIND = {
+    ".docx": "document", ".md": "document", ".pdf": "document",
+    ".xlsx": "spreadsheet", ".csv": "spreadsheet",
+    ".pptx": "slides",
+    ".gs": "form",
+}
+
+
+def _missing_artifact_kinds(state: OrchestrationState) -> list[str]:
+    """預期要產出、但這輪（含先前輪帶入）還沒產出的檔案類型。"""
+    if not state.artifacts_expected:
+        return []
+    produced: set[str] = set()
+    for art in state.artifacts_produced:
+        ext = Path(str(art.get("filename") or "")).suffix.lower()
+        produced.add(_EXT_KIND.get(ext, "document"))
+    out: list[str] = []
+    for kind in state.artifacts_expected:
+        if kind not in produced and kind not in out:
+            out.append(kind)
+    # 格式替代：預期 1 份文件、模型交出 1 份試算表（「分工表」做成表格）
+    # 是合理的格式選擇，不算缺件；只有**數量**也不足時才擋
+    # （evaluation 要文件＋試算表、只出 1 份 → 仍然缺件）。
+    if out and len(state.artifacts_produced) >= len(state.artifacts_expected):
+        return []
+    return out
 
 
 def _verification_index(state: OrchestrationState) -> int | None:
@@ -253,6 +290,7 @@ async def _run(
     previous = memory_service.load_state(store, existing_project_id) if existing_project_id else None
     command = _control_command(user_message)
     restart = bool(previous and re.search(r"取消.*重新執行|重新執行(?:這個|上一個)?任務", user_message))
+    resumed_by_command = False
     if command and existing_project_id and previous and not (
         command == "resume" and previous.workflow_status == WorkflowStatus.COMPLETED
     ):
@@ -263,19 +301,25 @@ async def _run(
             yield {"type": "task_paused", "summary": previous.public_summary()}
             return
         if command == "resume":
+            # 「繼續」＝立刻接著跑，不是只把狀態翻成 in_progress 然後
+            # 要使用者再說一次「接續剛才」（稽核不可靠 #9：系統教的
+            # 續跑句會被自己吞掉，任務永遠不會真的繼續）。
             previous.workflow_status = WorkflowStatus.IN_PROGRESS
             previous.completion_status = "in_progress"
             previous.next_action = previous.next_step().description if previous.next_step() else ""
             memory_service.save_state(store, existing_project_id, previous)
             yield {"type": "task_resumed", "summary": previous.public_summary()}
-            return
-        if command == "retry":
+            resumed_by_command = True
+            # 不 return——往下走 continue_previous 真的把任務跑下去
+        elif command == "retry":
             count = previous.reset_failed_steps()
-            if count:
-                previous.next_action = "只重試失敗步驟；請說「接續剛才」開始"
             memory_service.save_state(store, existing_project_id, previous)
             yield {"type": "task_retry_ready", "reset_steps": count, "summary": previous.public_summary()}
-            return
+            if not count:
+                yield {"type": "message", "text": "目前沒有失敗的步驟需要重試。"}
+                return
+            resumed_by_command = True
+            # 不 return——直接重跑失敗步驟
         if command == "cancel":
             previous.workflow_status = WorkflowStatus.CANCELLED
             previous.completion_status = "failed"
@@ -290,7 +334,7 @@ async def _run(
         previous.next_action = "重新執行既有任務"
         memory_service.save_state(store, existing_project_id, previous)
         state, routing = planner.continue_previous(user_message, previous)
-    elif previous and planner.is_continuation_only(user_message):
+    elif previous and (resumed_by_command or planner.is_continuation_only(user_message)):
         state, routing = planner.continue_previous(user_message, previous)
     else:
         state, routing = planner.understand(user_message, previous=previous, requested=requested)
@@ -891,6 +935,7 @@ async def _run(
         scope=scope,
         resolution=resolution,
         sources=turn_sources,
+        conflicts=list(retrieval_event.get("conflicts") or []),
     )
     state.research_status = review.research_status
     state.claim_records = [c.to_dict() for c in review.claims]
@@ -934,6 +979,32 @@ async def _run(
             state.fail_step(verify_index, "來源驗證未通過", code="answer_verification_failed")
         state.workflow_status = WorkflowStatus.BLOCKED
         state.next_action = "提供研究對象的官方來源，或改用淡江內部分析"
+    elif _missing_artifact_kinds(state):
+        # 說好要產檔卻沒產齊：completed 不能亮起來（稽核不可靠 #11；
+        # grok 審查發現 2：evaluation 要文件＋試算表，只出一份也不能算完成）。
+        # 產檔步驟標失敗，任務停在 blocked，事件用 task_failed——
+        # 不能一邊存 blocked、一邊對前端送 verdict=allow 的 task_completed
+        # 讓 UI 全綠（grok 審查發現 1）。
+        missing_kinds = _missing_artifact_kinds(state)
+        for i, step in enumerate(state.plan_steps):
+            if step.kind == "artifact" and step.status != "completed":
+                state.fail_step(i, "預期的檔案尚未產出", code="artifact_missing")
+        state.workflow_status = WorkflowStatus.BLOCKED
+        state.completion_status = "blocked"
+        state.next_action = "說「繼續」讓我把檔案做出來，或改為只要文字說明"
+        missing_labels = "、".join(planner.ARTIFACT_LABEL.get(k, k) for k in missing_kinds)
+        note = f"※ 預期的{missing_labels}還沒有產出，任務尚未完成。"
+        final_text = (final_text or "").rstrip() + "\n\n" + note + "說「繼續」讓我把檔案做出來，或告訴我改成只要文字說明。"
+
+        yield {"type": "message", "text": final_text}
+        memory_service.persist(store, session_id, {"role": "assistant", "content": final_text})
+        memory_service.save_state(store, project_id, state)
+        yield {
+            "type": "task_failed",
+            "summary": state.public_summary(),
+            "text": f"預期的{missing_labels}還沒有產出；可以說「繼續」補產出，或改為只要文字說明。",
+        }
+        return
     else:
         for i in range(1, len(state.plan_steps)):
             state.mark_step(i)
@@ -971,18 +1042,20 @@ def _source_from_reference(ref: dict[str, Any]) -> SourceRecord | None:
     """把 social 研究工具回傳的 reference 轉成來源紀錄。"""
     if not isinstance(ref, dict) or not ref.get("excerpt"):
         return None
+    # 預設值一律保守：工具真的有標 official 才算 official，
+    # 沒標的來源不能靠預設值變成「已驗證」（稽核項：預設值改保守）。
     return SourceRecord(
         title=str(ref.get("source") or ref.get("source_file") or ""),
         url=str(ref.get("source_url") or ""),
         publisher=str(ref.get("organization") or ref.get("school") or ""),
         captured_at=str(ref.get("captured_at") or ""),
         excerpt=str(ref.get("excerpt") or ""),
-        source_type=str(ref.get("source_type") or "official_instagram"),
+        source_type=str(ref.get("source_type") or "external_reference"),
         entity_id=str(ref.get("entity_id") or ""),
         school=str(ref.get("school") or ""),
         organization=str(ref.get("organization") or ""),
         source_scope="external",
-        authority_level=str(ref.get("authority_level") or "official"),
+        authority_level=str(ref.get("authority_level") or "unknown"),
         is_external=True,
     ).finalize()
 

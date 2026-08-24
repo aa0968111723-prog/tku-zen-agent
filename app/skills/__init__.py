@@ -226,6 +226,15 @@ SKILL_BY_NAME = {s.name: s for s in SKILLS}
 DEFAULT_SKILL = SKILL_BY_NAME["documents"]
 KNOWLEDGE_SKILL = SKILL_BY_NAME["knowledge"]
 
+# 按需暴露的工具：平常不佔 schema（工具數會拖垮開源模型的選擇正確率），
+# 使用者明確要求時（「做 AB 兩版」「給我圖片提示詞」）才單獨暴露。
+# 這三個原本註冊了卻沒有任何 skill 收錄（稽核半成品 #28）。
+ON_DEMAND_TOOLS: dict[str, tuple[str, ...]] = {
+    "social_publicity": (
+        "create_social_ab_test", "create_social_image_prompt", "create_social_video_prompt",
+    ),
+}
+
 # 明確要求「做出檔案」
 _MAKE_VERBS = re.compile(
     r"(幫我(做|寫|生|建|列|排|規劃|整理|產)|做一?[份個張]|產出|產生|生成|建立|寫一?[份篇]|"
@@ -328,15 +337,19 @@ class Routing:
             if not skill:
                 continue
             candidates = skill.tool_names()
-            if self.preferred_tool and name == self.skill.name and self.preferred_tool in candidates:
-                scoped = [*BASE_TOOLS]
-                if self.continuation:
-                    scoped.append("read_artifact")
-                scoped.append(self.preferred_tool)
+            if self.preferred_tool and name == self.skill.name and (
+                self.preferred_tool in candidates
+                or self.preferred_tool in ON_DEMAND_TOOLS.get(name, ())
+            ):
+                scoped = [*BASE_TOOLS, self.preferred_tool]
                 candidates = tuple(dict.fromkeys(scoped))
             for tool in candidates:
                 if tool not in names:
                     names.append(tool)
+        # 續接／改稿一律可讀舊產出——prompt 要求模型「先讀上一份再改」，
+        # 工具卻沒暴露就是自相矛盾（稽核半成品 #29）。
+        if self.continuation and "read_artifact" not in names:
+            names.append("read_artifact")
         return tuple(names)
 
     @property
@@ -440,6 +453,12 @@ def _preferred_output(message: str) -> tuple[str, str]:
     """把明確的轉檔要求縮到單一產出工具，避免模型看到不相關工具。"""
     if re.search(r"(改成|轉成|轉為|做成).*(簡報|投影片|ppt)", message, re.I):
         return "create_slides", "slides"
+    if re.search(r"(AB\s?測試|A/B|兩個版本|做兩版|雙版本)", message, re.I):
+        return "create_social_ab_test", "document"
+    if re.search(r"(圖片|貼文圖|封面圖).{0,6}(提示詞|prompt)", message, re.I):
+        return "create_social_image_prompt", "document"
+    if re.search(r"(影片|短片).{0,6}(提示詞|prompt)", message, re.I):
+        return "create_social_video_prompt", "document"
     if re.search(r"(改成|轉成|轉為|做成).*(Reels|短影片|影片腳本)", message, re.I):
         return "create_reels_script", "document"
     if "輪播" in message:

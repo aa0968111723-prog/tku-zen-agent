@@ -531,6 +531,14 @@ def resolve(message: str, *, awaiting_clarification: bool = False) -> EntityReso
             else:
                 res.unresolved.append(UnresolvedMention(mention=alias, school=school, reason="no_registered_club"))
 
+    # 等待澄清時，簡短點名**已收錄社團**或提供帳號的回覆（「北醫禪學社」
+    # 「@nccu_zen」）也算回答了反問——不能因為沒用卡片句型就再問一次。
+    # 只重複講學校名（「就是政大」）不算：反問問的是哪個社團，還是不知道。
+    if awaiting_clarification and not res.clarified:
+        names_target = bool(res.external or res.no_source_entities or res.user_provided_accounts)
+        if names_target and len(text) <= 25:
+            res.clarified = True
+
     return res
 
 

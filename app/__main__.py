@@ -48,7 +48,7 @@ def _abort_missing_access_token() -> None:
         "─" * 62,
         summary,
         "",
-        "  沒有授權碼的話，任何拿到網址的人都能用這個代理、消耗 NVIDIA 額度，",
+        "  沒有授權碼的話，任何拿到網址的人都能用這個代理、消耗模型額度或點數，",
         "  還看得到彼此的對話與檔案，所以這裡直接拒絕啟動。",
         "",
         "  解法（以 Zeabur 為例，其他平台同理）：",
@@ -87,7 +87,8 @@ def main() -> None:
     print("─" * 62)
     print("  淡江大學領袖禪學社 · 專屬 AI 代理")
     print("─" * 62)
-    print(f"  模型　　：{config.NVIDIA_MODEL}")
+    print(f"  模型　　：{config.LLM_MODEL}（{config.LLM_PROVIDER}）")
+    print(f"  視覺服務：{'已啟用' if config.FAL_KEY else '未設定（圖片功能停用）'}")
     print(f"  產出落點：{config.DEFAULT_DESTINATION}")
     print(f"  產出資料夾：{config.OUTPUT_DIR}")
     for p in problems:

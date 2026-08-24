@@ -25,12 +25,16 @@ _PATTERNS: dict[str, re.Pattern[str]] = {
 def detect_conflicts(
     hits: list[Scored], current_facts: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    values: dict[tuple[str, str], dict[str, dict[str, Any]]] = defaultdict(dict)
+    """分組鍵含 entity——外校與淡江同年不同值**不是**衝突（本來就該不同），
+    「以淡江本學期為準」的 resolution 也絕不能蓋到外校的值上
+    （稽核漏洞 18：comparative 模式把外校資料列成衝突並指示以淡江為準）。"""
+    values: dict[tuple[str, str, str], dict[str, dict[str, Any]]] = defaultdict(dict)
     for scored in hits:
         meta = getattr(scored.chunk, "meta", None)
         if not meta:
             continue
         year = meta.academic_year or "unknown"
+        entity_id = getattr(meta, "entity_id", "") or ""
         for field, pattern in _PATTERNS.items():
             match = pattern.search(scored.chunk.text)
             if not match:
@@ -38,11 +42,14 @@ def detect_conflicts(
             value = re.sub(r"\s+", " ", match.group(1)).strip(" ：:")
             if not value:
                 continue
-            values[(field, year)].setdefault(
+            values[(field, year, entity_id)].setdefault(
                 value,
                 {
                     "value": value,
                     "year": year,
+                    "entity_id": entity_id,
+                    "school": getattr(meta, "school", "") or "",
+                    "is_external": bool(getattr(meta, "is_external", False)),
                     "source": scored.chunk.source,
                     "source_type": meta.source_type,
                     "priority": meta.priority,
@@ -50,14 +57,21 @@ def detect_conflicts(
             )
 
     conflicts: list[dict[str, Any]] = []
-    for (field, year), records in values.items():
+    for (field, year, entity_id), records in values.items():
         if len(records) > 1 and year != "unknown":
+            is_external = any(r.get("is_external") for r in records.values())
             conflicts.append({
                 "field": field,
                 "kind": "same_year_conflict",
                 "year": year,
+                "entity_id": entity_id,
+                "school": next((r.get("school") for r in records.values() if r.get("school")), ""),
                 "values": list(records.values()),
-                "resolution": "不要自行選值，請使用者確認；若是本學期欄位，以 current_term 為準。",
+                "resolution": (
+                    "同一外校的來源之間出現不同值，標示為來源衝突；不要合併，也不要以淡江資料為準。"
+                    if is_external
+                    else "不要自行選值，請使用者確認；若是本學期欄位，以 current_term 為準。"
+                ),
             })
 
     current = current_facts or {}
@@ -65,10 +79,12 @@ def detect_conflicts(
         if field not in _PATTERNS or not current_value:
             continue
         historical: list[dict[str, Any]] = []
-        for (candidate, _year), records in values.items():
+        for (candidate, _year, _eid), records in values.items():
             if candidate != field:
                 continue
             for record in records.values():
+                if record.get("is_external"):
+                    continue   # 外校的值跟淡江本學期不同是正常的，不是過期參照
                 if re.sub(r"\s+", " ", str(record["value"])).strip() != re.sub(r"\s+", " ", str(current_value)).strip():
                     historical.append(record)
         if historical:
