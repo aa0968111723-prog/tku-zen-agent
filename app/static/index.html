@@ -3,12 +3,20 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#1f5673">
+<meta name="theme-color" content="#050607">
 <title>淡江大學領袖禪學社 · 工作台</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧘</text></svg>">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+
+<div id="bg-fx" aria-hidden="true">
+  <span class="fx-halo fx-red"></span>
+  <span class="fx-halo fx-yellow"></span>
+  <span class="fx-halo fx-green"></span>
+  <span class="fx-orbit"></span>
+  <span class="fx-orbit fx-orbit-2"></span>
+</div>
 
 <div id="gate" class="gate" hidden>
   <form class="gate-card" id="gate-form">
@@ -33,7 +41,13 @@
         <span id="term-label">視覺化 AI 任務工作台</span>
       </div>
       <div id="ai-orb" class="ai-orb is-idle" role="status" aria-live="polite" aria-label="禪光 AI：等待中">
-        <span class="ai-orb-core" aria-hidden="true"></span>
+        <span class="ai-orb-visual" aria-hidden="true">
+          <span class="orb-ring ring-red"></span>
+          <span class="orb-ring ring-yellow"></span>
+          <span class="orb-ring ring-green"></span>
+          <span class="orb-ring ring-cyan"></span>
+          <span class="ai-orb-core"></span>
+        </span>
         <span id="ai-orb-label" class="ai-orb-label">等待中</span>
       </div>
     </div>

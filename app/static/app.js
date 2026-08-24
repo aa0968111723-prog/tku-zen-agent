@@ -1210,6 +1210,7 @@ function addArtifact(turn, art) {
   const raw = art.preview || turn._lastContent || "";
   const card = el("article", "artifact work-card result-card");
   card.dataset.kind = ["docx", "pptx", "xlsx", "pdf", "md"].includes(ext) ? "document" : "artifact";
+  card.dataset.verified = art.verified === false ? "warn" : "ok";
   card.setAttribute("aria-label", "產出結果：" + artifactTitle(filename));
   const sum = el("header", "result-head");
   sum.appendChild(el("div", "icon", FILE_ICONS[ext] || "▪"));
