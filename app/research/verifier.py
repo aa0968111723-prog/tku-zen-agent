@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, field
 
 from .claims import (
+    STATUS_CONFLICTED,
     STATUS_INFERRED,
     STATUS_INSUFFICIENT,
     STATUS_PARTIAL,
@@ -68,8 +69,10 @@ HOME_SIGNATURE_TERMS: tuple[str, ...] = (
 
 _HOME_WORDS = ("淡江", "淡大", "本社", "我們社")
 _SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?；;\n])")
+# 「沒有…資料」中間允許插入校名——「知識庫沒有政大的資料」是誠實拒答，
+# 不能因為插了「政大的」三個字就被當成事實主張攔下（對抗審查提醒）。
 _DISCLAIMER = re.compile(
-    r"(沒有(足夠|公開|可靠)?(的)?(來源|資料|證據)|查不到|找不到|尚待確認|待確認|未確認|"
+    r"(沒有[^，。；;\n]{0,12}(來源|資料|證據)|查不到|找不到|尚待確認|待確認|未確認|"
     r"無法確認|不確定|尚未驗證|請提供|需要你提供|不提供確定結論)"
 )
 _QUESTION = re.compile(r"[?？]\s*$")
@@ -220,17 +223,40 @@ def review_answer(
     resolution: EntityResolution,
     sources: list[SourceRecord],
     strict: bool = True,
+    conflicts: list[dict] | None = None,
 ) -> AnswerReview:
-    """回答送出前的品質閘門。"""
+    """回答送出前的品質閘門。
+
+    ``conflicts``：檢索層偵測到的來源衝突（rag.conflicts）。
+    回答裡用到衝突欄位的值時，該 claim 標為 conflicted 並提醒使用者。
+    """
     review = AnswerReview()
     body = text or ""
 
     external_sources = [s for s in sources if s.is_external]
+    internal_sources = [s for s in sources if not s.is_external]
     spec_spans = _speculation_spans(body)
 
     if scope.mode == ResearchMode.INTERNAL:
         review.research_status = RESEARCH_INTERNAL
         _check_internal_answer(body, review, sources)
+        # 來源衝突提示：內部回答用到「同年不同值」的欄位值也要警告
+        for sent in _sentences(body):
+            if _QUESTION.search(sent) or _DISCLAIMER.search(sent):
+                continue
+            for conflict in conflicts or []:
+                if conflict.get("kind") != "same_year_conflict":
+                    continue
+                values = [str(v.get("value", "")) for v in conflict.get("values", [])]
+                hit = [v for v in values if v and v in sent]
+                if hit and len(values) > 1:
+                    review.findings.append(Finding(
+                        rule="conflicted_sources",
+                        severity="warning",
+                        message=f"「{hit[0]}」這個值在不同來源間互相矛盾，請先確認再使用。",
+                        sentence=sent,
+                    ))
+                    break
         # 只有使用者明確要求「只用淡江內部資料」時才強制附資料歸屬說明，
         # 一般任務不加，避免每一句回覆都掛尾註。
         if scope.internal_only_requested and INTERNAL_ATTRIBUTION not in body:
@@ -291,6 +317,47 @@ def review_answer(
     # 只有一個對象時直接視為該對象（Codex review 抓到的繞過閘門漏洞）。
     current_target: tuple[str, str, list[str]] | None = targets[0] if len(targets) == 1 else None
 
+    def _internal_contamination(sent: str, name: str, terms: list[str]) -> bool:
+        """污染兜底：外校句子的內容其實高度出自淡江內部來源摘錄。
+
+        17 個招牌詞（HOME_SIGNATURE_TERMS）只擋得住已知活動名；
+        詞庫外的淡江內容被寫成外校做法，靠「跟內部摘錄的重疊度」抓
+        （稽核漏洞 24：詞庫外只 degrade 不 block）。
+        句子有提到淡江的（比較句）不算——那是合法的兩者對照。
+        """
+        if not internal_sources or any(w in sent for w in _HOME_WORDS):
+            return False
+        overlap = _support(sent, [s.excerpt for s in internal_sources if s.excerpt], terms)
+        if overlap < 0.6:
+            return False
+        finding = Finding(
+            rule="data_contamination",
+            severity="error",
+            message=f"這句被寫成{name}的做法，但內容與淡江內部資料高度重合，疑似資料混淆。",
+            sentence=sent,
+        )
+        contaminated.append(finding)
+        review.findings.append(finding)
+        return True
+
+    def _mark_conflicted(sent: str, claim: ClaimRecord) -> None:
+        """回答用到檢索層判定「同年不同值」的欄位值 → 標 conflicted。"""
+        for conflict in conflicts or []:
+            if conflict.get("kind") != "same_year_conflict":
+                continue
+            values = [str(v.get("value", "")) for v in conflict.get("values", [])]
+            hit = [v for v in values if v and v in sent]
+            if hit and len(values) > 1:
+                claim.status = STATUS_CONFLICTED
+                claim.confidence = "low"
+                review.findings.append(Finding(
+                    rule="conflicted_sources",
+                    severity="warning",
+                    message=f"「{hit[0]}」這個值在不同來源間互相矛盾，請先確認再使用。",
+                    sentence=sent,
+                ))
+                return
+
     def _verify_claim(sent: str, eid: str, name: str, terms: list[str], in_speculation: bool) -> None:
         nonlocal unlabeled_inferred
         entity_sources = [s for s in external_sources if eid and s.entity_id == eid]
@@ -313,12 +380,18 @@ def review_answer(
             claim.source_title = best.title
             claim.source_url = best.url
             claim.publisher = best.publisher
+            claim.published_at = best.published_at
+            claim.captured_at = best.captured_at
             claim.excerpt = best.excerpt
             claim.source_type = best.source_type
             claim.evidence_level = "partial"
             claim.confidence = "medium"
             claim.status = STATUS_PARTIAL
             claim.source_ids = [best.source_id]
+        elif _internal_contamination(sent, name, terms):
+            claim.evidence_level = "none"
+            claim.confidence = "low"
+            claim.status = STATUS_WRONG_ENTITY
         elif entity_sources:
             claim.evidence_level = "none"
             claim.status = STATUS_INFERRED
@@ -338,6 +411,7 @@ def review_answer(
                 message=f"回答對{name}下了結論，但檢索結果裡沒有任何{name}的可驗證來源。",
                 sentence=sent,
             ))
+        _mark_conflicted(sent, claim)
         review.claims.append(claim.finalize())
 
     for sent in sentences:
