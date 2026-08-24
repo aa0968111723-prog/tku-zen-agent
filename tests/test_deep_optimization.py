@@ -155,7 +155,8 @@ async def test_restart_phrase_reuses_previous_task_graph(tmp_db, monkeypatch):
 
     understood = next(event for event in events if event["type"] == "task_understood")
     assert understood["skill"] == "活動籌備"
-    assert any(event["type"] == "task_completed" for event in events)
+    # 重新執行有沿用任務圖；但模型沒真的產檔 → 誠實回報 task_failed，不得全綠
+    assert any(event["type"] == "task_failed" for event in events)
 
 
 def test_artifact_list_exposes_latest_version_only_and_keeps_parent(tmp_db, tmp_path):
@@ -248,7 +249,7 @@ async def test_continuation_reuses_cached_retrieval(tmp_output_dir, tmp_db, monk
     ctx = RequestContext(user_id=uid, session_id=sid)
     fake1 = FakeLLM(script=[say("第一輪完成")])
     monkeypatch.setattr(orch, "NvidiaClient", lambda **_: fake1)
-    first = [event async for event in orch.run_turn(ctx, "期初茶會企劃書要怎麼寫", destination="local")]
+    first = [event async for event in orch.run_turn(ctx, "期初茶會企劃書通常怎麼寫", destination="local")]
     assert any(event["type"] == "task_completed" for event in first)
 
     fake2 = FakeLLM(script=[say("接續完成")])

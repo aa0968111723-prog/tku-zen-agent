@@ -414,7 +414,7 @@ async def test_internal_only_flow_stays_internal(tmp_output_dir, monkeypatch, ct
     term.update({"academic_year": "115"})
     fake, events = await run(
         orch, monkeypatch, [say("期初茶會的做法整理如上。")],
-        "只用淡江內部資料，幫我整理期初茶會的重點做法", ctx,
+        "只用淡江內部資料，期初茶會通常怎麼安排", ctx,
     )
     prompt = fake.system_prompt()
     assert "研究模式：淡江內部資料" in prompt
