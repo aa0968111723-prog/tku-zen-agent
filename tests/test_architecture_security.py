@@ -35,6 +35,7 @@ def test_anonymous_business_endpoints_are_401(secured_client):
         ("/api/sessions", "get", None),
         ("/api/artifacts", "get", None),
         ("/api/download?artifact_id=x", "get", None),
+        ("/api/visual/generate", "post", {"prompt": "幫我做一張社團招生視覺稿"}),
         ("/api/term", "get", None),
         ("/api/health", "get", None),
     ]

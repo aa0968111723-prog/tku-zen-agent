@@ -267,8 +267,9 @@ class Index:
         k: int = 6,
         min_curated: int | None = None,
         include_external: bool = False,
+        source_types: set[str] | None = None,
     ) -> list[tuple[float, Chunk]]:
-        return self.search_scored(query, k, min_curated, include_external)[0]
+        return self.search_scored(query, k, min_curated, include_external, source_types)[0]
 
     def search_scored(
         self,
@@ -276,6 +277,7 @@ class Index:
         k: int = 6,
         min_curated: int | None = None,
         include_external: bool = False,
+        source_types: set[str] | None = None,
     ) -> tuple[list[tuple[float, Chunk]], float]:
         """回傳 (結果, 信心值)。
 
@@ -291,6 +293,8 @@ class Index:
         scored: list[tuple[float, Chunk]] = []
         for c in self.chunks:
             if not include_external and getattr(c.meta, "source_type", "") == "external_reference":
+                continue
+            if source_types and getattr(c.meta, "source_type", "") not in source_types:
                 continue
             length = c.length
             score = 0.0

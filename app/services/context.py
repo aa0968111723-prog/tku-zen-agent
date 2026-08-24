@@ -38,6 +38,15 @@ def require_user() -> str:
     return ctx.user_id
 
 
+def replace_current(ctx: RequestContext) -> None:
+    """在同一個 request scope 內補上後來才建立的 project_id。
+
+    外層 ``use`` 仍負責在請求結束時還原 ContextVar；這裡只更新目前值，
+    讓後續 threadpool 工具取得正確的 project。
+    """
+    _ctx.set(ctx)
+
+
 @contextlib.contextmanager
 def use(ctx: RequestContext) -> Iterator[RequestContext]:
     token = _ctx.set(ctx)

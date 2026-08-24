@@ -66,9 +66,47 @@ class ScriptedModel:
         if last.get("role") == "user" and "請修正後" in str(last.get("content") or ""):
             return self._make_artifact(available, clean=True)
 
+        # 活動營運案例：先讀寫正式活動資料，再根據工具結果回答。
+        if not self.case.artifacts and self.case.tools and self.turn == 1:
+            name = next((candidate for candidate in self.case.tools if candidate in available), "")
+            if name:
+                arguments: dict[str, Any] = {}
+                if name == "create_activity":
+                    arguments = {
+                        "name": "期初茶會", "activity_type": "茶會",
+                        "tasks": [{"title": "確認場地", "group_name": "活動組"}],
+                    }
+                return Reply(tool_calls=[ToolCall(id=f"c_{name}", name=name, arguments=arguments)])
+
         # 純查詢：不產檔，照 prompt 的規矩回答
         if not self.case.artifacts:
             return Reply(content=self._answer(prompt, unset))
+
+        # 複合任務：先用研究工具取得外校來源，再產出淡江自己的輪播草稿。
+        if "研究其他學校" in self.case.message:
+            if self.turn == 1 and "search_social_references" in available:
+                return Reply(
+                    tool_calls=[
+                        ToolCall(
+                            id="c_social_research",
+                            name="search_social_references",
+                            arguments={"query": "招生", "schools": "外校"},
+                        )
+                    ]
+                )
+            if self.turn == 2 and "create_social_carousel" in available:
+                return Reply(
+                    tool_calls=[
+                        ToolCall(
+                            id="c_social_carousel",
+                            name="create_social_carousel",
+                            arguments={
+                                "filename": "淡江招生輪播",
+                                "content": "# 第一張\n\n淡江招生資訊待確認。",
+                            },
+                        )
+                    ]
+                )
 
         # 第一輪先查歷年範例（如果這個 skill 有這個工具）
         if self.turn == 1 and "search_previous_examples" in available:
@@ -119,6 +157,8 @@ class ScriptedModel:
     def _make_artifact(self, available: set[str], *, clean: bool) -> Reply:
         kind = self.case.artifacts[0] if self.case.artifacts else "document"
         name = TOOL_FOR.get(kind, "create_document")
+        if "輪播" in self.case.message and "create_social_carousel" in available:
+            name = "create_social_carousel"
         if name not in available:
             name = next(
                 (TOOL_FOR[k] for k in self.case.artifacts if TOOL_FOR.get(k) in available),

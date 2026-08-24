@@ -98,8 +98,16 @@ NVIDIA_API_KEY=nvapi-你的金鑰
 未經本學期資料確認的日期、與外校資料的長句重疊（抄襲防護）、
 外校專名或連結混進淡江文案——任何一項中都會擋下重寫。
 
-模型每次只會看到**該任務需要的 3–6 個工具**，不是全部。工具多了之後
+模型每次只會看到**該任務需要的 3–7 個工具**，不是全部。工具多了之後
 開源模型的選擇正確率會明顯下降，而且每個 schema 都要佔輸入 token。
+
+活動不再只存在企劃書裡：工作台會正式保存活動日期、地點、目標、總負責人，
+以及每項工作的組別、負責人、期限與狀態。因此可以直接問「這場活動缺什麼」、
+「誰負責什麼」或「哪些工作逾期」，再沿用同一筆資料產生企劃書、簡報與網宣。
+
+簡短查詢預設使用快速模型，研究、文件與複合任務使用較強模型；每個 project
+保存模型呼叫、token、估算成本、工具重試與失敗分類。同一輪相同的唯讀工具
+呼叫會直接重用，會寫資料或產檔的工具則永遠不快取。
 
 ### 為什麼 Google 表單要多一個步驟
 
@@ -216,8 +224,8 @@ python scripts/ingest_line.py --dry-run
 
 ```bash
 python scripts/selftest.py    # 快速檢查，30 秒
-python -m pytest              # 319 個測試（含認證／權限／網宣／前端靜態）
-python -m evals               # 54 個真實社團情境
+python -m pytest              # 347 個測試（含活動／工作流／SSE／artifact／認證／權限／網宣）
+python -m evals               # 60 個真實社團情境
 ```
 
 **全部不需要 API 金鑰。** 需要模型回應的地方用可腳本化的假模型，
@@ -231,11 +239,11 @@ Evals 的九個維度與目前分數：
 | skill routing | 100% |
 | tool selection | 98% |
 | retrieval relevance | 99% |
-| grounding | 100% |
+| grounding | 95% |
 | **hallucination（門檻必須為 0）** | **0 件** |
 | task completion | 100% |
 | artifact validity | 100% |
-| latency（框架開銷） | 平均 107 ms |
+| latency（框架開銷） | 平均約 127 ms（依機器與索引快取而異） |
 
 ---
 
@@ -257,19 +265,32 @@ app/
 ├── retrieval.py          BM25（中文二元組、標題加權、文件層級加權）
 ├── services/
 │   ├── session_store.py  SQLite：user/session/project/message/artifact/memory
+│   ├── activities.py     活動缺口、逾期、分工與衍生產出摘要
 │   ├── auth.py           本機單人 / 部署存取碼
 │   ├── current_term.py   本學期真實資料
 │   ├── memory.py         工作記憶、事實抽取、對話壓縮
 │   └── context.py        請求身分（contextvars）
-├── skills/               8 個 skill 與規則式路由
+├── skills/               11 個 skill 與規則式路由
 ├── verification/         產出檢查與修正指示
-├── tools/                7 個工具
+├── tools/                25 個工具
 └── static/               聊天介面、本學期設定
-evals/                    54 個情境 + 九維評分
-tests/                    319 個測試
+evals/                    60 個情境 + 九維評分
+tests/                    347 個測試
 ```
 
 ### 幾個刻意的取捨
+
+### 長任務與任務延續
+
+每個專案會保存步驟狀態、失敗原因、最近產出與研究來源。前端仍可直接使用
+`/api/chat` SSE；需要外部控制時，可呼叫 `GET /api/tasks/{project_id}` 查看狀態，
+並使用同一路徑下的 `/pause`、`/resume`、`/retry`、`/cancel`。`retry` 只重設失敗步驟，
+不會清掉已完成步驟。對話中也可以說「接續剛才」、「把上一份改成簡報」或「將輪播改成
+Reels 腳本」，系統會沿用同一個 project 的摘要、來源與最新 artifact。
+
+活動營運 API 提供 `GET/POST /api/activities`、`GET/PATCH /api/activities/{id}`、
+`POST /api/activities/{id}/tasks`、`PATCH /api/activities/{id}/tasks/{task_id}`，以及
+`GET /api/activities/{id}/artifacts`。活動、待辦與產出都會驗證使用者歸屬。
 
 **規劃與路由用規則不用模型。** 確定性、不花額度、不多一輪延遲，
 而且 evals 才測得起來。模型負責的是「內容怎麼寫」。

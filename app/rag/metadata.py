@@ -15,6 +15,11 @@ from pathlib import Path
 _YEAR = re.compile(r"(?<!\d)(1[0-2]\d)(?!\d)")
 _YEAR_SEM = re.compile(r"(?<!\d)(1[0-2]\d)[-_ ]?([12])(?!\d)")
 _GREGORIAN = re.compile(r"(?<!\d)(20[0-3]\d)(?!\d)")
+_URL = re.compile(r"https?://[^\s)\]}>]+")
+_SOURCE_DATE = re.compile(
+    r"(?:最後檢索日期|擷取日期|資料日期|更新日期|發布日期|日期)\s*[:：]\s*"
+    r"(20\d{2}[-/]\d{1,2}[-/]\d{1,2}|1[0-2]\d\s*學年度)"
+)
 
 DOC_TYPE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("細流", ("細流", "流程表", "跑流程", "時間軸")),
@@ -70,6 +75,23 @@ class ChunkMeta:
     contains_sensitive_structure: bool = False
     updated_at: str | None = None
     tags: list[str] = field(default_factory=list)
+    source_title: str = ""
+    source_url: str = ""
+    source_date: str = ""
+    summary: str = ""
+    credibility: float = 0.0
+    verification: str = "needs_verification"  # verified | needs_verification | internal
+
+    @property
+    def priority(self) -> int:
+        return {
+            "current_term": 100,
+            "curated": 80,
+            "playbook": 70,
+            "archive": 50,
+            "conversation": 20,
+            "external_reference": 30,
+        }.get(self.source_type, 10)
 
     def label(self) -> str:
         """給 context builder 顯示的來源標籤。"""
@@ -93,6 +115,13 @@ class ChunkMeta:
             "team": self.team,
             "contains_sensitive_structure": self.contains_sensitive_structure,
             "updated_at": self.updated_at,
+            "source_title": self.source_title,
+            "source_url": self.source_url,
+            "source_date": self.source_date,
+            "summary": self.summary,
+            "credibility": self.credibility,
+            "verification": self.verification,
+            "priority": self.priority,
         }
 
 
@@ -112,7 +141,7 @@ def _match_first(text: str, rules: tuple[tuple[str, tuple[str, ...]], ...]) -> s
 def infer(path: Path, label: str, text: str, source_type: str) -> ChunkMeta:
     """從路徑、來源標籤與內容推 metadata。"""
     hay = f"{path.as_posix()} {label}"
-    meta = ChunkMeta(source_type=source_type)
+    meta = ChunkMeta(source_type=source_type, source_title=path.stem or label)
 
     m = _YEAR_SEM.search(hay)
     if m:
@@ -142,5 +171,39 @@ def infer(path: Path, label: str, text: str, source_type: str) -> ChunkMeta:
     if meta.document_type == "文宣" or any(k in hay_low for k in ("ig", "貼文", "海報", "文宣", "限動", "宣傳")):
         meta.audience = "external"
     meta.contains_sensitive_structure = "只保留欄位結構" in head or "名冊類" in head
+
+    url = _URL.search(text)
+    if url:
+        meta.source_url = url.group(0).rstrip("。，、；;")
+    date = _SOURCE_DATE.search(text)
+    if date:
+        meta.source_date = date.group(1).replace("/", "-").replace(" ", "")
+        meta.updated_at = meta.source_date
+
+    # 來源摘要只取原文中的公開定位／主題等短欄位；沒有時退回第一個有內容的行。
+    candidates = []
+    for line in text.splitlines():
+        stripped = line.strip().lstrip(">- *#").strip()
+        if not stripped or stripped.startswith("http"):
+            continue
+        if any(key in stripped for key in ("公開定位", "公開主題", "摘要", "可供研究")):
+            candidates.append(stripped)
+    if not candidates:
+        candidates = [
+            line.strip().lstrip(">- *#").strip()
+            for line in text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    meta.summary = (candidates[0] if candidates else "")[:320]
+
+    if source_type in {"curated", "playbook"}:
+        meta.credibility, meta.verification = 0.95, "internal"
+    elif source_type == "archive":
+        meta.credibility, meta.verification = 0.75, "internal"
+    elif source_type == "conversation":
+        meta.credibility, meta.verification = 0.5, "needs_verification"
+    elif source_type == "external_reference":
+        meta.credibility = 0.8 if meta.source_url and meta.source_date else (0.55 if meta.source_url else 0.3)
+        meta.verification = "verified" if meta.source_url and meta.source_date else "needs_verification"
 
     return meta
