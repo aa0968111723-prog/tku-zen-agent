@@ -15,7 +15,7 @@ import re
 from ..research import entities as research_entities
 from ..research.entities import EntityResolution, ResearchMode, ResearchScope
 from ..services import current_term as term_service
-from ..skills import SKILL_BY_NAME, Routing, is_continuation_only, route
+from ..skills import SKILL_BY_NAME, Routing, is_continuation_only, route, wants_artifact
 from .state import OrchestrationState, PlanStep, Stage, TaskType, WorkflowStatus
 
 # 這些問題問的是「今年的事實」，一定要先查當期狀態
@@ -198,10 +198,17 @@ def verification_rules_for(routing: Routing) -> list[str]:
 # 代名詞／延續語 follow-up：這句話沒有點名任何對象，但明顯在講「剛才那個」。
 # 「政大呢」事故的殘餘路徑之一：反問政大之後使用者接「那他們的茶會呢」，
 # 若這句被當成全新的內部任務，檢索就會拿淡江資料回答政大的問題。
-_FOLLOWUP_REFERENCE = re.compile(
-    r"(他們|她們|它們|該校|對方|那(?:個|間|所)?(?:學校|社團|帳號)|同一(?:個|間|所)|"
-    r"呢[?？]?\s*$)"
+#
+# 收緊規則（grok 審查抓到的反例）：
+#   · 明確指代（他們／該校／對方／那個學校）才是強訊號。
+#   · 句尾「呢」只是弱訊號——「幫我寫一份社課企劃書呢」是新的淡江產檔任務，
+#     不能因為一個語尾詞被鎖回外校研究。
+#   · 「我們」開頭的句子講的是本社，一律不繼承。
+_FOLLOWUP_STRONG = re.compile(
+    r"(他們|她們|它們|該校|對方|那(?:個|間|所)?(?:學校|社團|帳號))"
 )
+_FOLLOWUP_WEAK_NE = re.compile(r"呢[?？]?\s*$")
+_HOME_SELF = re.compile(r"(我們|本社|咱們)")
 
 
 def _is_scope_followup(message: str, resolution: EntityResolution) -> bool:
@@ -210,7 +217,13 @@ def _is_scope_followup(message: str, resolution: EntityResolution) -> bool:
         return False
     if resolution.user_provided_accounts:
         return False
-    return bool(_FOLLOWUP_REFERENCE.search(message.strip()))
+    text = message.strip()
+    if _HOME_SELF.search(text):
+        return False
+    if _FOLLOWUP_STRONG.search(text):
+        return True
+    # 句尾「呢」：只有在**不是產檔請求**時才算延續（「招生文案呢」）
+    return bool(_FOLLOWUP_WEAK_NE.search(text)) and not wants_artifact(text)
 
 
 def understand(
@@ -275,6 +288,12 @@ def understand(
         scope.target_entities = list(previous.target_entities)
         scope.target_schools = list(previous.target_schools)
         inherited = True
+        if wants_artifact(message) and scope.mode == ResearchMode.EXTERNAL:
+            # 「幫我寫給對方的邀請函」：明確要產出檔案、外校只是語境
+            # → 比較分析模式，保留產檔工具；防冒名由驗證層把關。
+            # 注意用 wants_artifact（明確產檔動詞）而不是 routing.produce_artifact
+            # ——後者對「那他們的茶會呢」也是 True（skill 預設會產檔）。
+            scope.mode = ResearchMode.COMPARATIVE
 
     # 複合任務（外校研究 → 淡江網宣）一定是比較分析：網宣步驟需要淡江內部資料
     if routing.task_sequence and scope.mode == ResearchMode.EXTERNAL:
@@ -300,6 +319,7 @@ def understand(
         elif (
             scope.mode == ResearchMode.COMPARATIVE
             and routing.skill.name in {"knowledge", "documents"}
+            and not routing.produce_artifact
         ):
             routing = dataclasses.replace(
                 routing,

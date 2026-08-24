@@ -65,8 +65,10 @@ RESEARCH_TOOLS = {
     "search_social_references", "compare_social_strategies", "analyze_social_positioning",
 }
 
-# 只有淡江內部資料的檢索工具 —— 外部研究模式下不得使用（不能拿淡江資料當外校證據）
-INTERNAL_RETRIEVAL_TOOLS = {"search_knowledge", "search_previous_examples"}
+# 只有淡江內部資料的檢索工具 —— 外部研究模式下不得使用（不能拿淡江資料當外校證據）。
+# get_current_term 也在列：淡江本學期的社長／社課時間一旦在外校研究回合流進
+# context，「北醫現在的社長是誰」就可能被答成淡江社長（grok 審查抓到的通道）。
+INTERNAL_RETRIEVAL_TOOLS = {"search_knowledge", "search_previous_examples", "get_current_term"}
 
 
 def _scope_tool_guard(scope: ResearchScope, name: str) -> dict[str, Any] | None:
@@ -80,8 +82,9 @@ def _scope_tool_guard(scope: ResearchScope, name: str) -> dict[str, Any] | None:
             "ok": False,
             "code": "scope_blocked",
             "message": (
-                "目前是外校研究模式。知識庫與歷年檔案只有淡江大學領袖禪學社的資料，"
-                "不能作為研究對象的證據。請改用外校研究工具查公開參考資料；"
+                "目前是外校研究模式。知識庫、歷年檔案與本學期資料都只屬於"
+                "淡江大學領袖禪學社，不能作為研究對象的證據，也不得寫成研究對象的"
+                "社長、時間或活動。請改用外校研究工具查公開參考資料；"
                 "查不到就誠實說找不到可靠來源。"
             ),
         }

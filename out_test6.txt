@@ -1,0 +1,3 @@
+hospital resolve: ['tmu-zen'] False
+hospital understand: external ['tmu-zen'] social_research
+進行政大 understand: internal [] event_planning pending: False

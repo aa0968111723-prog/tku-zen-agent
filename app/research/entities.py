@@ -142,19 +142,26 @@ _FALSE_PREV: dict[str, str] = {
     "台大": "平舞陽燈檯",
     "臺大": "平舞陽燈檯",
     "清大": "澄釐",
-    "東吳": "",
-    "北科": "",
+}
+
+# 也會被「後一個字」接走：「成大事」≠ 成大、「台北醫院」≠ 北醫、
+# 「台北藝術節」≠ 北藝（grok 審查抓到的反例——致詞裡的「成大事」很常見）。
+_FALSE_NEXT: dict[str, str] = {
+    "成大": "事器業功",
+    "北醫": "院",
+    "北藝": "術",
 }
 
 
 def alias_mentioned(text: str, alias: str) -> bool:
-    """別名是否真的以「獨立稱呼」出現在文字裡（至少一次未被前字吞掉）。"""
+    """別名是否真的以「獨立稱呼」出現在文字裡（至少一次未被前後字吞掉）。"""
     if not alias or alias not in text:
         return False
     if len(alias) > 2:
         return True
     bad_prev = _FALSE_PREV.get(alias, "")
-    if not bad_prev:
+    bad_next = _FALSE_NEXT.get(alias, "")
+    if not bad_prev and not bad_next:
         return True
     start = 0
     while True:
@@ -162,8 +169,11 @@ def alias_mentioned(text: str, alias: str) -> bool:
         if i == -1:
             return False
         prev = text[i - 1] if i > 0 else ""
-        # 句首（prev 為空）一定算獨立稱呼；注意 "" in "…" 恆為 True，不能直接用 in
-        if not prev or prev not in bad_prev:
+        after = text[i + len(alias)] if i + len(alias) < len(text) else ""
+        # 句首／句尾（prev/after 為空）一定算獨立稱呼；
+        # 注意 "" in "…" 恆為 True，不能直接用 in
+        swallowed = (prev and prev in bad_prev) or (after and after in bad_next)
+        if not swallowed:
             return True
         start = i + 1
 

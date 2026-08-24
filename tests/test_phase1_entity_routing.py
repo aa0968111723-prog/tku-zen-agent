@@ -54,6 +54,33 @@ def test_new_internal_task_does_not_inherit_external_scope():
     assert not state.clarification_pending
 
 
+def test_artifact_request_with_ne_suffix_is_not_a_followup():
+    """grok 反例：「幫我寫一份社課企劃書呢」是新的淡江產檔任務，
+    不能因為語尾「呢」被鎖回外校研究。"""
+    prev = _previous_awaiting_zhengda()
+    state, routing = planner.understand("幫我寫一份社課企劃書呢", previous=prev)
+    assert state.research_mode == "internal"
+    assert routing.skill.name != "social_research"
+    assert state.artifacts_expected
+
+
+def test_womens_sentence_is_home_not_followup():
+    """grok 反例：「那我們的茶會呢」講的是本社，不繼承外校 scope。"""
+    prev_state, _ = planner.understand("研究北醫禪學社的 IG")
+    state, _ = planner.understand("那我們的茶會呢", previous=prev_state)
+    assert state.research_mode == "internal"
+
+
+def test_artifact_for_counterpart_becomes_comparative():
+    """「幫我寫給對方的邀請函」：淡江的產出＋外校語境 → 比較分析、保留產檔。"""
+    prev_state, _ = planner.understand("研究北醫禪學社的 IG")
+    prev_state.completion_status = "in_progress"
+    state, routing = planner.understand("幫我寫給對方的邀請函", previous=prev_state)
+    assert state.research_mode == "comparative"
+    assert state.target_entities == ["tmu-zen"]
+    assert state.artifacts_expected, "比較模式的產檔請求不得被改走純研究"
+
+
 def test_followup_after_resolved_external_targets_entity():
     """北醫研究成功後接「他們的招生貼文呢」→ 繼承 tmu-zen，不再反問。"""
     prev_state, _ = planner.understand("研究北醫禪學社的 IG")
@@ -160,6 +187,28 @@ def test_external_intent_not_triggered_by_swallowed_aliases():
     assert not has_external_intent("在行政大樓前集合")
 
 
+def test_external_intent_not_triggered_by_next_char_swallow():
+    """grok 反例：後一個字接走簡稱——成大事、台北醫院、台北藝術節。"""
+    assert not has_external_intent("幫我寫社長致詞，主題是希望社員成大事")
+    assert not has_external_intent("明天下午在台北醫院集合，幫我寫行前通知")
+    assert not has_external_intent("幫我寫台北藝術節志工招募文宣")
+    # 正常稱呼仍要觸發
+    assert has_external_intent("北醫呢")
+    assert has_external_intent("成大領袖社的社課")
+    assert has_external_intent("北藝禪學社怎麼經營 IG")
+
+
+def test_external_mode_blocks_get_current_term():
+    """grok 反例：外校研究回合不得拿到淡江本學期社長／社課時間。"""
+    from app.orchestrator import _scope_tool_guard
+
+    external = E.ResearchScope(mode=E.ResearchMode.EXTERNAL, target_entities=["tmu-zen"])
+    blocked = _scope_tool_guard(external, "get_current_term")
+    assert blocked is not None and blocked["code"] == "scope_blocked"
+    comparative = E.ResearchScope(mode=E.ResearchMode.COMPARATIVE, target_entities=["tmu-zen"])
+    assert _scope_tool_guard(comparative, "get_current_term") is None
+
+
 def test_route_swallowed_alias_stays_internal():
     r = route("幫我把完成大合照排進挑戰營細流")
     assert r.skill.name != "social_research"
@@ -224,6 +273,14 @@ def test_extract_facts_skips_external_school_facts():
     facts = memory_service.extract_facts("北科的社長是王小明")
     assert facts == {}
     facts = memory_service.extract_facts("我們社長是林小華")
+    assert facts.get("社長") == "林小華"
+
+
+def test_extract_facts_comma_clause_isolation():
+    """grok 反例：同一句話裡逗號隔開的淡江事實不能被外校名整筆丟棄。"""
+    facts = memory_service.extract_facts("我們社長是林小華，北科的社長是王小明")
+    assert facts.get("社長") == "林小華"
+    facts = memory_service.extract_facts("北科的社長是王小明，我們社長是林小華")
     assert facts.get("社長") == "林小華"
 
 

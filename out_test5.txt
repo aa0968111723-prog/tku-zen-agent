@@ -1,0 +1,4 @@
+multi-school LABEL: ('shu-zen', '世新大學')
+multi-school TEXT: ('', '')
+HOME label + 1 ext text: ('', '')
+entity after 6000 chars: ('', '')
