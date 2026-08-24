@@ -24,6 +24,17 @@ class Case:
 
 
 CASES: list[Case] = [
+    # ── 活動營運資料 ──────────────────────────────────────
+    Case("act-01", "建立活動：期初茶會，日期地點先待填", "event_planning", (), ("茶會",),
+         tools=("create_activity",), tags=("深度優化", "活動管理")),
+    Case("act-02", "這場活動目前缺什麼", "activity_management", (), (),
+         tools=("get_activity_status",), tags=("深度優化", "活動管理")),
+    Case("act-03", "這場活動誰負責什麼", "activity_management", (), (),
+         tools=("get_activity_status",), tags=("深度優化", "活動管理")),
+    Case("act-04", "這場活動哪些工作逾期", "activity_management", (), (),
+         tools=("get_activity_status",), tags=("深度優化", "活動管理")),
+    Case("act-05", "列出活動", "activity_management", (), (),
+         tools=("list_activities",), tags=("深度優化", "活動管理")),
     # ── 複合任務與延續 ────────────────────────────────────
     Case(
         "comp-01",

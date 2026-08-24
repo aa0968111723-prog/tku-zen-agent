@@ -75,6 +75,7 @@ class Artifact:
             "artifact_id": self.artifact_id,
             "version": self.version,
             "parent_artifact_id": self.meta.get("parent_artifact_id"),
+            "activity_id": self.meta.get("activity_id"),
             # local_path 只在伺服器內部流轉（verification、download 用），
             # main.py 送到前端之前會拿掉。
             "local_path": str(self.local_path) if self.local_path else None,
@@ -131,7 +132,12 @@ def _register(artifact: Artifact, path: Path) -> None:
     from ..services.session_store import get_store
 
     try:
-        record = get_store().record_artifact(
+        store = get_store()
+        if ctx.project_id and not artifact.meta.get("activity_id"):
+            active = store.recall(ctx.project_id).get("__active_activity_id__")
+            if active and active.get("value"):
+                artifact.meta["activity_id"] = active["value"]
+        record = store.record_artifact(
             user_id=ctx.user_id,
             session_id=ctx.session_id,
             project_id=ctx.project_id,

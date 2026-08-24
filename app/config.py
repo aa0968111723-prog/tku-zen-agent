@@ -29,6 +29,11 @@ def _path(name: str, default: str) -> Path:
 NVIDIA_API_KEY = (os.getenv("NVIDIA_API_KEY") or "").strip()
 NVIDIA_BASE_URL = (os.getenv("NVIDIA_BASE_URL") or "https://integrate.api.nvidia.com/v1").rstrip("/")
 NVIDIA_MODEL = (os.getenv("NVIDIA_MODEL") or "meta/llama-3.1-70b-instruct").strip()
+NVIDIA_FAST_MODEL = (os.getenv("NVIDIA_FAST_MODEL") or "meta/llama-3.1-8b-instruct").strip()
+NVIDIA_STRONG_MODEL = (os.getenv("NVIDIA_STRONG_MODEL") or NVIDIA_MODEL).strip()
+# NVIDIA Build 目前通常以額度計費而非美元；需要自架或付費端點時可填實際單價。
+NVIDIA_INPUT_COST_PER_MILLION = float(os.getenv("NVIDIA_INPUT_COST_PER_MILLION") or 0)
+NVIDIA_OUTPUT_COST_PER_MILLION = float(os.getenv("NVIDIA_OUTPUT_COST_PER_MILLION") or 0)
 
 # 給介面下拉選單用：已知支援 function calling 的免費模型
 KNOWN_TOOL_MODELS = [
@@ -93,6 +98,7 @@ def auth_mode() -> str:
 HOST = (os.getenv("HOST") or "127.0.0.1").strip()
 PORT = int(os.getenv("PORT") or 8848)
 TOOL_TIMEOUT_SECONDS = float(os.getenv("TOOL_TIMEOUT_SECONDS") or 120)
+TOOL_MAX_ATTEMPTS = max(1, int(os.getenv("TOOL_MAX_ATTEMPTS") or 2))
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 (ROOT / "data").mkdir(parents=True, exist_ok=True)

@@ -59,6 +59,22 @@ class Skill:
 
 SKILLS: tuple[Skill, ...] = (
     Skill(
+        name="activity_management",
+        label="活動進度與分工",
+        deliverables=("待辦", "逾期", "時程狀態"),
+        keywords=(
+            "活動進度", "缺什麼", "誰負責什麼", "還剩哪些", "未完成", "截止", "期限",
+            "組別",
+        ),
+        weak=("活動", "工作"),
+        tools=(
+            "update_activity", "add_activity_task", "update_activity_task", "get_activity_status", "list_activities",
+        ),
+        task_type="event_planning",
+        playbook_hints=("活動籌備與分工",),
+        extra_guidance="活動狀態要以活動資料與待辦為準；缺欄位、未指派與逾期工作要分開列出。",
+    ),
+    Skill(
         name="event_planning",
         label="活動籌備",
         deliverables=("細流", "流程表", "教案", "主持稿", "行前通知", "分工表"),
@@ -67,12 +83,17 @@ SKILLS: tuple[Skill, ...] = (
             "期初", "期中", "期末", "破冰", "場佈", "籌備", "行前", "凝聚",
         ),
         weak=("活動", "企劃", "企畫", "流程"),
-        tools=("search_previous_examples", "create_document", "create_spreadsheet", "create_slides"),
+        tools=(
+            "create_activity", "get_activity_status", "create_document", "create_spreadsheet", "create_slides",
+        ),
         task_type="event_planning",
         artifacts_expected=("document",),
         required_facts=("academic_year", "semester"),
         playbook_hints=("社課排程與籌備", "營隊籌備"),
-        extra_guidance="活動類產出通常要「企劃書（文件）＋細流（試算表）」成對，不要只給一半。",
+        extra_guidance=(
+            "先建立或更新活動資料，再用同一筆活動產出；未知日期、地點、負責人必須待填。"
+            "活動類產出通常要「企劃書（文件）＋細流（試算表）」成對，不要只給一半。"
+        ),
     ),
     Skill(
         name="social_research",
@@ -173,7 +194,9 @@ SKILLS: tuple[Skill, ...] = (
         deliverables=(),
         keywords=("簡報", "投影片", "ppt", "邀請函", "公文"),
         weak=("文件", "報告", "word", "excel", "表格", "清單", "排程"),
-        tools=("search_previous_examples", "create_document", "create_spreadsheet", "create_slides"),
+        tools=(
+            "get_activity_status", "create_document", "create_spreadsheet", "create_slides",
+        ),
         task_type="documents",
         artifacts_expected=("document",),
     ),
@@ -212,6 +235,11 @@ _IDENTITY_QUESTION = re.compile(
 )
 
 _QUERY_INTENT = re.compile(r"(查詢|查一下|查查看|列出|目前有|有哪些|請問)")
+
+_ACTIVITY_OPERATION_QUERY = re.compile(
+    r"(活動.*(?:缺什麼|進度|待辦|分工|負責|逾期|還剩|未完成)|"
+    r"誰負責什麼|哪些工作逾期|還剩哪些事項|新增待辦|更新待辦|建立活動|列出活動)"
+)
 
 _CONTINUATION_ONLY = re.compile(r"^\s*(接續(?:剛才|上一個)?|繼續(?:剛才)?|接著做|沿用上一個活動資料)\s*[。！!]*$", re.I)
 
@@ -307,6 +335,20 @@ def route(message: str) -> Routing:
             preferred_artifact=preferred_artifact,
         )
 
+    # 活動營運查詢直接使用正式活動／待辦資料，不讓「目前」落到一般知識查詢。
+    if _ACTIVITY_OPERATION_QUERY.search(message):
+        activity_tool = _preferred_activity_tool(message)
+        skill = SKILL_BY_NAME["event_planning" if activity_tool == "create_activity" else "activity_management"]
+        return Routing(
+            skill=skill,
+            score=scores[skill.name],
+            produce_artifact=False,
+            scores=scores,
+            continuation=continuation,
+            reuse_previous=continuation,
+            preferred_tool=activity_tool,
+        )
+
     # 純查詢：路由到 knowledge，連產檔工具都不暴露。
     # 這比「路由到領域 skill 但標記不產檔」更保險 —— 模型看不到 create_*
     # 就不可能手滑生出一個沒人要的檔案。
@@ -367,3 +409,17 @@ def _preferred_output(message: str) -> tuple[str, str]:
     if re.search(r"(貼文|文案)", message):
         return "create_social_post", "document"
     return "", ""
+
+
+def _preferred_activity_tool(message: str) -> str:
+    if re.search(r"(列出活動|有哪些活動)", message):
+        return "list_activities"
+    if re.search(r"(新增|建立|加入).*(待辦|工作|分工)", message):
+        return "add_activity_task"
+    if re.search(r"(更新|修改|完成).*(待辦|工作|分工)", message):
+        return "update_activity_task"
+    if re.search(r"(建立|新增).*(活動)", message):
+        return "create_activity"
+    if re.search(r"(更新|修改).*(活動)", message):
+        return "update_activity"
+    return "get_activity_status"

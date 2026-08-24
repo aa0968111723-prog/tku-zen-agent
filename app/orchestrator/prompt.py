@@ -78,6 +78,7 @@ def build_system_prompt(
     project_facts: dict[str, str] | None = None,
     previous_artifacts: list[dict] | None = None,
     research_sources: list[dict] | None = None,
+    activity_context: str = "",
 ) -> str:
     parts = [BASE, "## 資料優先序\n\n" + RAG_PRIORITY]
 
@@ -138,6 +139,13 @@ def build_system_prompt(
                 f"{source.get('verification', 'needs_verification')}"
             )
         parts.append("\n".join(lines))
+
+    if activity_context.strip():
+        parts.append(
+            "## 目前活動的正式資料\n\n"
+            "以下資料來自活動與待辦紀錄。產出企劃書、簡報、網宣或會議紀錄時直接沿用；"
+            "標示待填的欄位不可自行補值。\n\n" + activity_context
+        )
 
     # 4. 檢索到的內容
     if context_block.strip():

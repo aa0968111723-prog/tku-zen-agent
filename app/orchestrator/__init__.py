@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from .. import config, retrieval, tools, verification
-from ..llm import LLMError, NvidiaClient, Reply
+from ..llm import LLMError, NvidiaClient, Reply, estimate_cost, select_model
+from ..services import activities as activity_service
 from ..services import context as ctx_mod
 from ..services import current_term as term_service
 from ..services import memory as memory_service
@@ -44,6 +45,15 @@ ARTIFACT_TOOLS = {
     "create_social_content_calendar", "create_social_ab_test", "create_social_image_prompt",
     "create_social_video_prompt",
 }
+ACTIVITY_TOOLS = {
+    "create_activity", "update_activity", "add_activity_task", "update_activity_task",
+    "get_activity_status", "list_activities",
+}
+READ_ONLY_CACHEABLE_TOOLS = {
+    "search_knowledge", "search_previous_examples", "get_current_term",
+    "search_social_references", "compare_social_strategies", "analyze_social_positioning",
+    "get_activity_status", "list_activities",
+}
 
 
 def _preview(args: dict[str, Any]) -> str:
@@ -56,6 +66,8 @@ def _preview(args: dict[str, Any]) -> str:
 def _step_index_for_tool(state: OrchestrationState, name: str) -> int | None:
     if name in {"search_social_references", "compare_social_strategies", "analyze_social_positioning"}:
         wanted = ("research", "研究")
+    elif name in ACTIVITY_TOOLS:
+        wanted = ("activity", "活動")
     elif name in ARTIFACT_TOOLS:
         wanted = ("artifact", "建立", "產出")
     else:
@@ -75,16 +87,47 @@ def _verification_index(state: OrchestrationState) -> int | None:
     return None
 
 
-def _record_usage(state: OrchestrationState, reply: Reply) -> None:
+def _record_usage(state: OrchestrationState, reply: Reply, model_name: str) -> None:
     metrics = state.metrics
     metrics["model_calls"] = int(metrics.get("model_calls", 0)) + 1
     metrics.setdefault("estimated_cost_usd", 0.0)
-    metrics.setdefault("cost_basis", "NVIDIA Build 免費模型；若回應含 token usage 則保存用量")
+    by_model = metrics.setdefault("model_calls_by_model", {})
+    by_model[model_name] = int(by_model.get(model_name, 0)) + 1
+    metrics["cost_basis"] = (
+        "依環境設定的每百萬 token 單價估算"
+        if config.NVIDIA_INPUT_COST_PER_MILLION or config.NVIDIA_OUTPUT_COST_PER_MILLION
+        else "NVIDIA Build 額度模式；美元單價未設定，成本顯示 0"
+    )
     usage = reply.raw.get("usage") if isinstance(reply.raw, dict) else None
     if isinstance(usage, dict):
         for key, target in (("prompt_tokens", "input_tokens"), ("completion_tokens", "output_tokens"), ("total_tokens", "total_tokens")):
             if usage.get(key) is not None:
                 metrics[target] = int(metrics.get(target, 0)) + int(usage[key])
+        metrics["estimated_cost_usd"] = estimate_cost(
+            int(metrics.get("input_tokens", 0)), int(metrics.get("output_tokens", 0)),
+        )
+
+
+def _tool_cache_key(name: str, arguments: dict[str, Any]) -> str:
+    return name + ":" + json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _tool_result_for_model(result: dict[str, Any]) -> dict[str, Any]:
+    payload = {"ok": result.get("ok", True), "message": result.get("message", "")}
+    for key in ("activity_brief", "readiness", "activities", "task", "alternative", "code"):
+        if result.get(key) is not None:
+            payload[key] = result[key]
+    return payload
+
+
+def _tool_alternative(name: str, code: str) -> str:
+    if code in {"activity_not_found", "activity_task_not_found"}:
+        return "可先建立或列出活動，再接續原本操作；需要先出草稿時，未知欄位一律標示待填。"
+    if code == "unknown_tool":
+        return "目前沒有連上這項能力；可改用已連線的知識庫、活動資料或文件工具完成可行部分。"
+    if code == "tool_timeout":
+        return "已保存其他步驟，可稍後只重試這一步，或縮小查詢範圍。"
+    return "可重試失敗步驟；若仍失敗，先保留已完成內容並改用人工補充資料。"
 
 
 def _control_state(store, project_id: str) -> OrchestrationState | None:
@@ -181,12 +224,23 @@ async def _run(
             state = memory_service.reconcile_progress(state, previous)
     project_id = memory_service.ensure_project(store, ctx, state)
     ctx = ctx_mod.RequestContext(user_id=ctx.user_id, session_id=session_id, project_id=project_id)
+    ctx_mod.replace_current(ctx)
     state.workflow_status = WorkflowStatus.IN_PROGRESS
     state.completion_status = "in_progress"
     state.metrics.setdefault("tool_calls", 0)
     state.metrics.setdefault("failure_count", 0)
     state.metrics.setdefault("retry_count", 0)
     state.metrics.setdefault("estimated_cost_usd", 0.0)
+    decision = select_model(
+        message=user_message,
+        task_type=state.task_type.value,
+        needs_artifact=state.needs_artifacts(),
+        composite=bool(routing.task_sequence),
+        explicit=model,
+    )
+    state.metrics["selected_model"] = decision["model"]
+    state.metrics["model_tier"] = decision["tier"]
+    state.metrics["model_reason"] = decision["reason"]
     memory_service.save_state(store, project_id, state)
 
     yield {
@@ -196,6 +250,7 @@ async def _run(
         "produces": [planner.ARTIFACT_LABEL.get(a, a) for a in state.artifacts_expected],
         "task_sequence": list(routing.task_sequence),
         "workflow_status": state.workflow_status.value,
+        "model_tier": decision["tier"],
     }
 
     # ── Plan ─────────────────────────────────────────────
@@ -278,8 +333,9 @@ async def _run(
     # ── Execute ──────────────────────────────────────────
     state.stage = Stage.EXECUTE
     memory_service.save_state(store, project_id, state)
-    client = _client(model)
+    client = _client(decision["model"])
     tool_schemas = tools.schemas_for(routing.tool_names())
+    activity_context = activity_service.project_activity_context(store, ctx.user_id, project_id)
 
     messages = memory_service.build_messages(
         store,
@@ -293,6 +349,7 @@ async def _run(
             project_facts=memory_service.recall_facts(store, project_id),
             previous_artifacts=memory_service.recent_artifacts(store, ctx.user_id, project_id),
             research_sources=store.list_research_sources(project_id),
+            activity_context=activity_context,
         ),
         user_message=user_message,
     )
@@ -301,6 +358,8 @@ async def _run(
     produced: list[dict[str, Any]] = []
     repairs = 0
     final_text = ""
+    tool_cache: dict[str, dict[str, Any]] = {}
+    successful_tools: set[str] = set()
 
     while state.tool_rounds < MAX_TOOL_ROUNDS:
         controlled = _control_state(store, project_id)
@@ -312,7 +371,7 @@ async def _run(
         state.tool_rounds += 1
         try:
             reply: Reply = await client.chat(messages, tool_schemas)
-            _record_usage(state, reply)
+            _record_usage(state, reply, decision["model"])
             memory_service.save_state(store, project_id, state)
         except LLMError:
             state.metrics["failure_count"] = int(state.metrics.get("failure_count", 0)) + 1
@@ -376,26 +435,62 @@ async def _run(
                 "preview": _preview(tc.arguments),
             }
 
-            state.metrics["tool_calls"] = int(state.metrics.get("tool_calls", 0)) + 1
-            try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(tools.dispatch, tc.name, tc.arguments),
-                    timeout=config.TOOL_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                result = {"ok": False, "code": "tool_timeout", "message": "工具執行逾時，這一步可以單獨重試"}
-            except Exception:  # noqa: BLE001
-                logger.exception("tool dispatch failed: %s", tc.name)
-                result = {"ok": False, "code": "tool_failed", "message": "工具執行失敗，這一步可以單獨重試"}
+            state.metrics["tool_requests"] = int(state.metrics.get("tool_requests", 0)) + 1
+            cache_key = _tool_cache_key(tc.name, tc.arguments)
+            cached_tool_result = tc.name in READ_ONLY_CACHEABLE_TOOLS and cache_key in tool_cache
+            attempts = 0
+            if cached_tool_result:
+                result = dict(tool_cache[cache_key])
+                state.metrics["tool_cache_hits"] = int(state.metrics.get("tool_cache_hits", 0)) + 1
+            else:
+                while True:
+                    attempts += 1
+                    state.metrics["tool_calls"] = int(state.metrics.get("tool_calls", 0)) + 1
+                    try:
+                        result = await asyncio.wait_for(
+                            asyncio.to_thread(tools.dispatch, tc.name, tc.arguments),
+                            timeout=config.TOOL_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        result = {
+                            "ok": False, "code": "tool_timeout",
+                            "message": "工具執行逾時，這一步可以單獨重試",
+                        }
+                    except Exception:  # noqa: BLE001
+                        logger.exception("tool dispatch failed: %s", tc.name)
+                        result = {
+                            "ok": False, "code": "tool_failed",
+                            "message": "工具執行失敗，這一步可以單獨重試",
+                        }
+                    retryable = (
+                        tc.name in READ_ONLY_CACHEABLE_TOOLS
+                        and result.get("code") == "tool_failed"
+                        and attempts < config.TOOL_MAX_ATTEMPTS
+                    )
+                    if not retryable:
+                        break
+                    state.metrics["tool_retries"] = int(state.metrics.get("tool_retries", 0)) + 1
+                    yield {
+                        "type": "tool_retrying", "name": tc.name,
+                        "label": tools.LABELS.get(tc.name, tc.name), "attempt": attempts + 1,
+                        "error_code": result.get("code", "tool_failed"),
+                    }
+                if result.get("ok") and tc.name in READ_ONLY_CACHEABLE_TOOLS:
+                    tool_cache[cache_key] = dict(result)
+
+            if not result.get("ok"):
+                code = str(result.get("code") or "tool_failed")
+                result.setdefault("alternative", _tool_alternative(tc.name, code))
+                failures = state.metrics.setdefault("tool_failures_by_code", {})
+                failures[code] = int(failures.get(code, 0)) + 1
+            else:
+                successful_tools.add(tc.name)
 
             tool_msg = {
                 "role": "tool",
                 "tool_call_id": tc.id,
                 "name": tc.name,
-                "content": json.dumps(
-                    {"ok": result.get("ok", True), "message": result.get("message", "")},
-                    ensure_ascii=False,
-                ),
+                "content": json.dumps(_tool_result_for_model(result), ensure_ascii=False),
             }
             messages.append(tool_msg)
             memory_service.persist(store, session_id, tool_msg)
@@ -406,6 +501,10 @@ async def _run(
                 "label": tools.LABELS.get(tc.name, tc.name),
                 "ok": bool(result.get("ok", True)),
                 "detail": _tool_detail(tc.name, result),
+                "cached": cached_tool_result,
+                "attempts": attempts,
+                "error_code": result.get("code", "") if not result.get("ok") else "",
+                "alternative": result.get("alternative", ""),
             }
             yield event
 
@@ -423,6 +522,10 @@ async def _run(
                         "text": result.get("message", "工具執行失敗"),
                     }
                 continue
+
+            if tc.name in ACTIVITY_TOOLS and step_index is not None:
+                state.mark_step(step_index, result.get("message", "活動資料已更新")[:160])
+                memory_service.save_state(store, project_id, state)
 
             if tc.name in {"search_social_references", "compare_social_strategies", "analyze_social_positioning"}:
                 source_ids = memory_service.record_research_sources(store, project_id, session_id, result)
@@ -514,6 +617,20 @@ async def _run(
         memory_service.save_state(store, project_id, state)
         return
 
+    if routing.skill.name == "activity_management" and not activity_context and not (successful_tools & ACTIVITY_TOOLS):
+        activity_index = _step_index_for_tool(state, "get_activity_status")
+        if activity_index is not None:
+            state.fail_step(activity_index, "尚未讀取或建立活動資料", code="activity_data_required")
+        state.workflow_status = WorkflowStatus.BLOCKED
+        state.completion_status = "blocked"
+        state.next_action = "提供活動名稱，或先建立活動資料"
+        memory_service.save_state(store, project_id, state)
+        yield {
+            "type": "task_failed", "summary": state.public_summary(),
+            "text": "目前沒有可確認的活動資料。請提供活動名稱，或先建立這場活動。",
+        }
+        return
+
     if any(step.status == "failed" for step in state.plan_steps):
         state.workflow_status = WorkflowStatus.FAILED
         state.completion_status = "failed"
@@ -574,6 +691,7 @@ def _artifact_payload(result: dict[str, Any], report: verification.Report) -> di
         "filename": result.get("filename"),
         "version": result.get("version", 1),
         "parent_artifact_id": result.get("parent_artifact_id"),
+        "activity_id": result.get("activity_id"),
         "drive_url": result.get("drive_url"),
         "verified": report.ok,
         "warnings": [i.message for i in report.warnings],
@@ -604,6 +722,7 @@ def health(*, slim: bool = False) -> dict[str, Any]:
         return {
             "model": config.NVIDIA_MODEL,
             "models": config.KNOWN_TOOL_MODELS,
+            "model_policy": {"fast": config.NVIDIA_FAST_MODEL, "standard": config.NVIDIA_MODEL, "strong": config.NVIDIA_STRONG_MODEL},
             "destination": config.DEFAULT_DESTINATION,
             "auth_mode": config.auth_mode(),
         }
@@ -612,6 +731,7 @@ def health(*, slim: bool = False) -> dict[str, Any]:
         "model": config.NVIDIA_MODEL,
         "models": config.KNOWN_TOOL_MODELS,
         "model_routes": MODEL_ROUTES,
+        "model_policy": {"fast": config.NVIDIA_FAST_MODEL, "standard": config.NVIDIA_MODEL, "strong": config.NVIDIA_STRONG_MODEL},
         "destination": config.DEFAULT_DESTINATION,
         "auth_mode": config.auth_mode(),
         "knowledge": idx.stats(),

@@ -6,7 +6,7 @@ import inspect
 import logging
 from typing import Any, Callable
 
-from . import document, examples, gform, knowledge, slides, social, spreadsheet, term
+from . import activity, document, examples, gform, knowledge, slides, social, spreadsheet, term
 
 logger = logging.getLogger(__name__)
 Permission = str  # general | admin_confirm
@@ -30,6 +30,12 @@ _REGISTRY: dict[str, tuple[Callable[..., dict], dict, Permission]] = {
     "create_social_ab_test": (social.create_social_ab_test, social.AB_TEST_SCHEMA, "general"),
     "create_social_image_prompt": (social.create_social_image_prompt, social.IMAGE_SCHEMA, "general"),
     "create_social_video_prompt": (social.create_social_video_prompt, social.VIDEO_SCHEMA, "general"),
+    "create_activity": (activity.create_activity, activity.CREATE_SCHEMA, "general"),
+    "update_activity": (activity.update_activity, activity.UPDATE_SCHEMA, "general"),
+    "add_activity_task": (activity.add_activity_task, activity.ADD_TASK_SCHEMA, "general"),
+    "update_activity_task": (activity.update_activity_task, activity.UPDATE_TASK_SCHEMA, "general"),
+    "get_activity_status": (activity.get_activity_status, activity.STATUS_SCHEMA, "general"),
+    "list_activities": (activity.list_activities, activity.LIST_SCHEMA, "general"),
 }
 
 SCHEMAS: list[dict] = [schema for _, schema, _ in _REGISTRY.values()]
@@ -43,6 +49,12 @@ LABELS.update(
         "create_document": "建立文件",
         "create_slides": "建立簡報",
         "create_google_form": "建立 Google 表單",
+        "create_activity": "建立活動資料",
+        "update_activity": "更新活動資料",
+        "add_activity_task": "新增活動待辦",
+        "update_activity_task": "更新活動待辦",
+        "get_activity_status": "檢查活動進度",
+        "list_activities": "列出活動",
     }
 )
 

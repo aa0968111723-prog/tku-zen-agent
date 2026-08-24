@@ -25,7 +25,7 @@ from typing import Any
 
 from .. import config
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _now() -> str:
@@ -140,6 +140,44 @@ CREATE TABLE IF NOT EXISTS research_sources (
     created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_research_sources_project ON research_sources(project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS activities (
+    id             TEXT PRIMARY KEY,
+    user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id     TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    name           TEXT NOT NULL,
+    activity_type  TEXT NOT NULL DEFAULT '',
+    academic_year  TEXT NOT NULL DEFAULT '',
+    semester       TEXT NOT NULL DEFAULT '',
+    status         TEXT NOT NULL DEFAULT 'planning',
+    start_at       TEXT NOT NULL DEFAULT '',
+    end_at         TEXT NOT NULL DEFAULT '',
+    location       TEXT NOT NULL DEFAULT '',
+    goal           TEXT NOT NULL DEFAULT '',
+    audience       TEXT NOT NULL DEFAULT '',
+    signup_url     TEXT NOT NULL DEFAULT '',
+    owner          TEXT NOT NULL DEFAULT '',
+    notes          TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_activities_user ON activities(user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_activities_project ON activities(project_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS activity_tasks (
+    id          TEXT PRIMARY KEY,
+    activity_id TEXT NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+    title       TEXT NOT NULL,
+    group_name  TEXT NOT NULL DEFAULT '',
+    assignee    TEXT NOT NULL DEFAULT '',
+    due_at      TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'pending',
+    priority    TEXT NOT NULL DEFAULT 'normal',
+    notes       TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_activity_tasks_activity ON activity_tasks(activity_id, status, due_at);
 """
 
 
@@ -166,6 +204,7 @@ class Artifact:
             "version": self.version,
             "created_at": self.created_at,
             "parent_artifact_id": self.parent_id,
+            "activity_id": (self.meta or {}).get("activity_id"),
         }
 
 
@@ -526,6 +565,175 @@ class SessionStore:
                 (project_id, limit),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # ── activities / assignments ─────────────────────────
+
+    def create_activity(
+        self,
+        user_id: str,
+        name: str,
+        *,
+        project_id: str | None = None,
+        activity_type: str = "",
+        academic_year: str = "",
+        semester: str = "",
+        status: str = "planning",
+        start_at: str = "",
+        end_at: str = "",
+        location: str = "",
+        goal: str = "",
+        audience: str = "",
+        signup_url: str = "",
+        owner: str = "",
+        notes: str = "",
+    ) -> dict[str, Any]:
+        """建立一場活動；project 若存在，必須屬於同一位使用者。"""
+        if project_id and not self.get_project(project_id, user_id):
+            raise ValueError("project 不屬於目前使用者")
+        activity_id = new_id("act")
+        now = _now()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO activities(id, user_id, project_id, name, activity_type, academic_year, semester,"
+                " status, start_at, end_at, location, goal, audience, signup_url, owner, notes, created_at, updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    activity_id, user_id, project_id, name[:160], activity_type[:80], academic_year[:20],
+                    semester[:40], status[:40], start_at[:80], end_at[:80], location[:200], goal[:2000],
+                    audience[:500], signup_url[:1000], owner[:120], notes[:4000], now, now,
+                ),
+            )
+            self._conn.commit()
+        return self.get_activity(activity_id, user_id) or {}
+
+    def get_activity(self, activity_id: str, user_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM activities WHERE id=? AND user_id=?", (activity_id, user_id)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_activities(
+        self,
+        user_id: str,
+        *,
+        project_id: str | None = None,
+        status: str = "",
+        semester: str = "",
+        activity_type: str = "",
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        clauses = ["user_id=?"]
+        params: list[Any] = [user_id]
+        for column, value in (
+            ("project_id", project_id or ""),
+            ("status", status),
+            ("semester", semester),
+            ("activity_type", activity_type),
+        ):
+            if value:
+                clauses.append(f"{column}=?")
+                params.append(value)
+        params.append(max(1, min(int(limit), 200)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM activities WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_activity(self, activity_id: str, user_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        allowed = {
+            "name", "project_id", "activity_type", "academic_year", "semester", "status", "start_at",
+            "end_at", "location", "goal", "audience", "signup_url", "owner", "notes",
+        }
+        updates = {key: str(value) for key, value in fields.items() if key in allowed and value is not None}
+        if "project_id" in updates and updates["project_id"] and not self.get_project(updates["project_id"], user_id):
+            raise ValueError("project 不屬於目前使用者")
+        if not updates:
+            return self.get_activity(activity_id, user_id)
+        updates["updated_at"] = _now()
+        assignments = ", ".join(f"{key}=?" for key in updates)
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE activities SET {assignments} WHERE id=? AND user_id=?",
+                (*updates.values(), activity_id, user_id),
+            )
+            self._conn.commit()
+        return self.get_activity(activity_id, user_id) if cur.rowcount else None
+
+    def create_activity_task(
+        self,
+        user_id: str,
+        activity_id: str,
+        title: str,
+        *,
+        group_name: str = "",
+        assignee: str = "",
+        due_at: str = "",
+        status: str = "pending",
+        priority: str = "normal",
+        notes: str = "",
+    ) -> dict[str, Any]:
+        if not self.get_activity(activity_id, user_id):
+            raise ValueError("找不到這場活動")
+        task_id = new_id("at")
+        now = _now()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO activity_tasks(id, activity_id, title, group_name, assignee, due_at, status, priority,"
+                " notes, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    task_id, activity_id, title[:300], group_name[:120], assignee[:120], due_at[:80],
+                    status[:40], priority[:40], notes[:2000], now, now,
+                ),
+            )
+            self._conn.execute("UPDATE activities SET updated_at=? WHERE id=?", (now, activity_id))
+            self._conn.commit()
+        return self.get_activity_task(task_id, user_id) or {}
+
+    def get_activity_task(self, task_id: str, user_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT t.* FROM activity_tasks t JOIN activities a ON a.id=t.activity_id"
+                " WHERE t.id=? AND a.user_id=?",
+                (task_id, user_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_activity_tasks(self, activity_id: str, user_id: str) -> list[dict[str, Any]]:
+        if not self.get_activity(activity_id, user_id):
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM activity_tasks WHERE activity_id=?"
+                " ORDER BY CASE status WHEN 'completed' THEN 1 WHEN 'cancelled' THEN 2 ELSE 0 END,"
+                " CASE WHEN due_at='' THEN 1 ELSE 0 END, due_at, created_at",
+                (activity_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_activity_task(self, task_id: str, user_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        current = self.get_activity_task(task_id, user_id)
+        if not current:
+            return None
+        allowed = {"title", "group_name", "assignee", "due_at", "status", "priority", "notes"}
+        updates = {key: str(value) for key, value in fields.items() if key in allowed and value is not None}
+        if not updates:
+            return current
+        updates["updated_at"] = _now()
+        assignments = ", ".join(f"{key}=?" for key in updates)
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE activity_tasks SET {assignments} WHERE id=?",
+                (*updates.values(), task_id),
+            )
+            self._conn.execute(
+                "UPDATE activities SET updated_at=? WHERE id=?",
+                (_now(), current["activity_id"]),
+            )
+            self._conn.commit()
+        return self.get_activity_task(task_id, user_id)
 
     # ── working memory ───────────────────────────────────────
 

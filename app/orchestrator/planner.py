@@ -102,16 +102,34 @@ def plan_for(routing: Routing, needs_artifact: bool) -> list[PlanStep]:
         steps[1].depends_on = [steps[0].step_id]
         steps[2].depends_on = [steps[0].step_id]
         return steps
-    steps = [PlanStep("查社團知識庫與歷年範例")]
+    steps = [PlanStep("查社團知識庫與歷年範例", kind="retrieval")]
+
+    if skill.name == "activity_management":
+        steps.append(PlanStep("讀取或更新活動、分工與待辦", kind="activity"))
+        steps.append(PlanStep("整理活動缺口、逾期與下一步", kind="deliver"))
+        return steps
+
+    if skill.name == "event_planning" and routing.preferred_tool == "create_activity" and not needs_artifact:
+        steps.append(PlanStep("建立這場活動的正式資料", kind="activity"))
+        steps.append(PlanStep("回報活動資料與待填事項", kind="deliver"))
+        return steps
 
     if not needs_artifact:
         steps.append(PlanStep("依知識庫內容回答"))
         return steps
 
+    activity_step: PlanStep | None = None
+    if skill.name == "event_planning":
+        activity_step = PlanStep("建立或更新這場活動的正式資料", kind="activity")
+        steps.append(activity_step)
+
     kinds = [routing.preferred_artifact] if routing.preferred_artifact else list(skill.artifacts_expected)
     kinds = kinds or ["document"]
     for kind in kinds:
-        steps.append(PlanStep(f"建立{ARTIFACT_LABEL.get(kind, kind)}"))
+        artifact_step = PlanStep(f"建立{ARTIFACT_LABEL.get(kind, kind)}", kind="artifact")
+        if activity_step:
+            artifact_step.depends_on = [activity_step.step_id]
+        steps.append(artifact_step)
     steps.append(PlanStep("檢查產出是否符合社團規範"))
     steps.append(PlanStep("交付並說明後續步驟"))
     return steps
@@ -173,6 +191,8 @@ def continue_previous(
     state.stage = Stage.EXECUTE
     state.workflow_status = WorkflowStatus.IN_PROGRESS
     state.completion_status = "in_progress"
+    # tool_rounds 是單次請求的安全上限，不可跨續接累加，否則長任務幾輪後會被誤判成無限迴圈。
+    state.tool_rounds = 0
     state.next_action = state.next_step().description if state.next_step() else ""
     return state, routing
 

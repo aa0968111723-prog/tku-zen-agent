@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from . import config, orchestrator, retrieval
 from .services import auth, context as ctx_mod
+from .services import activities as activity_service
 from .services import current_term as term_service
 from .services import memory as memory_service
 from .services.session_store import get_store
@@ -45,6 +46,60 @@ class LoginRequest(BaseModel):
 
 class TermRequest(BaseModel):
     fields: dict[str, Any]
+
+
+class ActivityCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    project_id: str | None = None
+    activity_type: str = ""
+    academic_year: str = ""
+    semester: str = ""
+    status: str = "planning"
+    start_at: str = ""
+    end_at: str = ""
+    location: str = ""
+    goal: str = ""
+    audience: str = ""
+    signup_url: str = ""
+    owner: str = ""
+    notes: str = ""
+
+
+class ActivityUpdateRequest(BaseModel):
+    name: str | None = None
+    project_id: str | None = None
+    activity_type: str | None = None
+    academic_year: str | None = None
+    semester: str | None = None
+    status: str | None = None
+    start_at: str | None = None
+    end_at: str | None = None
+    location: str | None = None
+    goal: str | None = None
+    audience: str | None = None
+    signup_url: str | None = None
+    owner: str | None = None
+    notes: str | None = None
+
+
+class ActivityTaskCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+    group_name: str = ""
+    assignee: str = ""
+    due_at: str = ""
+    status: str = "pending"
+    priority: str = "normal"
+    notes: str = ""
+
+
+class ActivityTaskUpdateRequest(BaseModel):
+    title: str | None = None
+    group_name: str | None = None
+    assignee: str | None = None
+    due_at: str | None = None
+    status: str | None = None
+    priority: str | None = None
+    notes: str | None = None
 
 
 general_router = APIRouter(prefix="/api", dependencies=[Depends(auth.require_user)])
@@ -168,6 +223,130 @@ async def list_artifacts(
 ) -> dict[str, Any]:
     items = get_store().list_artifacts(user_id, project_id=project_id, limit=min(limit, 100))
     return {"artifacts": [a.public() for a in items]}
+
+
+def _activity_payload(store, user_id: str, activity: dict[str, Any], output_type: str = "status") -> dict[str, Any]:
+    tasks = store.list_activity_tasks(activity["id"], user_id)
+    report = activity_service.readiness_report(activity, tasks, output_type=output_type)
+    return {
+        **activity_service.public_activity(activity),
+        "tasks": tasks,
+        "readiness": {key: value for key, value in report.items() if key != "activity"},
+    }
+
+
+@general_router.get("/activities")
+async def list_activities(
+    status: str = "", semester: str = "", activity_type: str = "", limit: int = 50,
+    user_id: str = Depends(current_user),
+) -> dict[str, Any]:
+    try:
+        normalized = activity_service.normalize_activity_status(status) if status else ""
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    records = get_store().list_activities(
+        user_id, status=normalized, semester=semester, activity_type=activity_type, limit=limit,
+    )
+    return {"activities": [activity_service.public_activity(item) for item in records]}
+
+
+@general_router.post("/activities")
+async def create_activity(req: ActivityCreateRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
+    try:
+        values = req.model_dump()
+        values["status"] = activity_service.normalize_activity_status(values["status"])
+        values["start_at"] = activity_service.validate_temporal(values["start_at"], "活動開始時間")
+        values["end_at"] = activity_service.validate_temporal(values["end_at"], "活動結束時間")
+        name = values.pop("name")
+        project_id = values.pop("project_id")
+        term = term_service.load().known()
+        values["academic_year"] = values["academic_year"] or term.get("academic_year", "")
+        values["semester"] = values["semester"] or term.get("semester", "")
+        activity = get_store().create_activity(user_id, name, project_id=project_id, **values)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _activity_payload(get_store(), user_id, activity)
+
+
+@general_router.get("/activities/{activity_id}")
+async def get_activity(
+    activity_id: str, output_type: str = "status", user_id: str = Depends(current_user),
+) -> dict[str, Any]:
+    store = get_store()
+    activity = store.get_activity(activity_id, user_id)
+    if not activity:
+        raise HTTPException(status_code=404, detail="找不到這場活動")
+    return _activity_payload(store, user_id, activity, output_type=output_type)
+
+
+@general_router.patch("/activities/{activity_id}")
+async def update_activity(
+    activity_id: str, req: ActivityUpdateRequest, user_id: str = Depends(current_user),
+) -> dict[str, Any]:
+    fields = req.model_dump(exclude_unset=True)
+    try:
+        if "status" in fields:
+            fields["status"] = activity_service.normalize_activity_status(fields["status"] or "")
+        if "start_at" in fields:
+            fields["start_at"] = activity_service.validate_temporal(fields["start_at"] or "", "活動開始時間")
+        if "end_at" in fields:
+            fields["end_at"] = activity_service.validate_temporal(fields["end_at"] or "", "活動結束時間")
+        activity = get_store().update_activity(activity_id, user_id, fields)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not activity:
+        raise HTTPException(status_code=404, detail="找不到這場活動")
+    return _activity_payload(get_store(), user_id, activity)
+
+
+@general_router.post("/activities/{activity_id}/tasks")
+async def create_activity_task(
+    activity_id: str, req: ActivityTaskCreateRequest, user_id: str = Depends(current_user),
+) -> dict[str, Any]:
+    try:
+        values = req.model_dump()
+        values["due_at"] = activity_service.validate_temporal(values["due_at"], "工作期限")
+        values["status"] = activity_service.normalize_task_status(values["status"])
+        values["priority"] = activity_service.normalize_priority(values["priority"])
+        title = values.pop("title")
+        task = get_store().create_activity_task(user_id, activity_id, title, **values)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return task
+
+
+@general_router.patch("/activities/{activity_id}/tasks/{task_id}")
+async def update_activity_task(
+    activity_id: str, task_id: str, req: ActivityTaskUpdateRequest,
+    user_id: str = Depends(current_user),
+) -> dict[str, Any]:
+    store = get_store()
+    current = store.get_activity_task(task_id, user_id)
+    if not current or current["activity_id"] != activity_id:
+        raise HTTPException(status_code=404, detail="找不到這項工作")
+    fields = req.model_dump(exclude_unset=True)
+    try:
+        if "due_at" in fields:
+            fields["due_at"] = activity_service.validate_temporal(fields["due_at"] or "", "工作期限")
+        if "status" in fields:
+            fields["status"] = activity_service.normalize_task_status(fields["status"] or "")
+        if "priority" in fields:
+            fields["priority"] = activity_service.normalize_priority(fields["priority"] or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return store.update_activity_task(task_id, user_id, fields) or current
+
+
+@general_router.get("/activities/{activity_id}/artifacts")
+async def activity_artifacts(activity_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+    store = get_store()
+    if not store.get_activity(activity_id, user_id):
+        raise HTTPException(status_code=404, detail="找不到這場活動")
+    artifacts = [
+        item.public() for item in store.list_artifacts(user_id, limit=100)
+        if (item.meta or {}).get("activity_id") == activity_id
+    ]
+    return {"artifacts": artifacts}
 
 
 def _task_state(user_id: str, project_id: str):
