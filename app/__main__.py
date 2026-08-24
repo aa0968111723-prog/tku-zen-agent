@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import sys
 import webbrowser
 
@@ -29,6 +30,38 @@ def _fix_windows_console() -> None:
             pass
 
 
+def _abort_missing_access_token() -> None:
+    """部署環境沒設授權碼就不啟動——沒有它等於把整個代理公開給任何人。
+
+    這是刻意的 fail-fast，但容器平台會一直重啟，訊息很容易被 BackOff 洗掉，
+    所以把「該做什麼」整段印在 stdout（Zeabur 之類的平台 runtime log 常常
+    只收得到 stdout），stderr 只留一行摘要，避免同一份記錄裡出現兩次。
+    """
+    summary = "[錯誤] 部署或 token 認證模式必須設定 APP_ACCESS_TOKEN，服務已停止。"
+    suggestion = secrets.token_urlsafe(18)
+    lines = [
+        "─" * 62,
+        summary,
+        "",
+        "  沒有授權碼的話，任何拿到網址的人都能用這個代理、消耗 NVIDIA 額度，",
+        "  還看得到彼此的對話與檔案，所以這裡直接拒絕啟動。",
+        "",
+        "  解法（以 Zeabur 為例，其他平台同理）：",
+        "    1. 服務頁面 → Variables／環境變數",
+        "    2. 新增 APP_ACCESS_TOKEN，值填一組只有幹部知道的授權碼",
+        f"       例如可以直接用這組隨機產生的：{suggestion}",
+        "    3. 順手加 ADMIN_ACCESS_TOKEN（管理端另一組，別跟上面一樣）",
+        "    4. Redeploy／重啟服務",
+        "",
+        "  設定值請勿包含前後引號，貼上時只要授權碼本身。",
+        "  只在自己電腦單人使用、不對外開放時，才可以留空（本機模式）。",
+        "─" * 62,
+    ]
+    print("\n".join(lines), flush=True)
+    print(summary, file=sys.stderr, flush=True)
+    sys.exit(1)
+
+
 def main() -> None:
     _fix_windows_console()
     # 部署到 Zeabur / Railway 之類的平台時，平台會用 PORT 環境變數指定連接埠
@@ -41,8 +74,7 @@ def main() -> None:
         or host == "0.0.0.0"
     )
     if (on_server or config.AUTH_MODE == "token") and not config.APP_ACCESS_TOKEN:
-        print("[錯誤] 部署或 token 認證模式必須設定 APP_ACCESS_TOKEN，服務已停止。", file=sys.stderr)
-        sys.exit(1)
+        _abort_missing_access_token()
     if on_server:
         host = "0.0.0.0"  # noqa: S104 —— 部署環境必須綁所有介面
 
