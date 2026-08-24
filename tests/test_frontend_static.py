@@ -136,7 +136,14 @@ def test_accessibility_contract_for_new_sheets_and_composer():
 def test_attachment_entry_supports_images_without_persisting_them_in_ui_state():
     assert "image/jpeg" in HTML and "image/png" in HTML and "image/webp" in HTML
     assert "只會傳給這次任務，不會保存" in JS
+    assert "fal.ai 視覺服務" in JS
     assert "attachments" in JS
+
+
+def test_visual_output_uses_fal_endpoint_with_a_download_action():
+    assert "/api/visual/generate" in JS
+    assert "生成視覺稿" in JS
+    assert "開啟並下載" in JS
 
 
 def test_auth_errors_use_backend_detail():

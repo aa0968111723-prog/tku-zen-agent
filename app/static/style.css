@@ -699,6 +699,26 @@ a:focus-visible {
 
 .next-actions { margin: 10px 0; border-top: 1px solid var(--line); padding-top: 10px; }
 .next-actions h3 { font-size: 14px; margin: 0 0 8px; }
+
+.visual-result {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface-2);
+}
+.visual-result h4 { margin: 0 0 8px; font-size: 14px; }
+.visual-result img {
+  display: block;
+  width: 100%;
+  max-height: min(68svh, 620px);
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+.visual-result .muted { margin: 8px 0 0; }
+.visual-result > .ghost { margin-top: 8px; }
 .source-list { display: grid; gap: 7px; margin: 10px 0; }
 .source-card { display: block; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); text-decoration: none; background: var(--surface-2); font-size: 13px; overflow-wrap: anywhere; }
 .source-card span { display: block; color: var(--ink-3); font-size: 12px; }

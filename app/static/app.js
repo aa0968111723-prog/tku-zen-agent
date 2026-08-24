@@ -206,6 +206,65 @@ function startFollowUp(instruction) {
   openPreflight(instruction);
 }
 
+function visualPrompt(raw) {
+  return (
+    "請根據以下繁體中文社群內容，產生一張適合淡江大學社團使用的社群視覺草稿。"
+    + "風格現代、安靜、溫暖、專業；使用淡江藍、米白與柔和灰，保留足夠留白。"
+    + "圖片中的文字必須少且清楚；沒有明確日期、地點或網址時，不要自行捏造。\n\n"
+    + String(raw || "").slice(0, 6000)
+  );
+}
+
+async function generateVisual(raw, host, button) {
+  button.disabled = true;
+  button.textContent = "正在生成視覺稿…";
+  const result = el("section", "visual-result");
+  result.setAttribute("aria-live", "polite");
+  result.appendChild(el("p", "muted", "正在以 fal.ai 生成視覺草稿，完成後可直接下載。"));
+  host.appendChild(result);
+  try {
+    const resp = await api("/api/visual/generate", {
+      method: "POST",
+      body: JSON.stringify({ prompt: visualPrompt(raw) }),
+    });
+    if (!resp.ok) {
+      const detail = await readDetail(resp);
+      throw new Error(detail || "視覺服務暫時無法使用，請稍後重試。");
+    }
+    const data = await resp.json();
+    const image = (data.images || [])[0];
+    if (!image || !image.url) throw new Error("視覺稿沒有取得可用圖片，請調整內容後再試。");
+    result.replaceChildren();
+    result.appendChild(el("h4", null, "視覺草稿"));
+    const preview = document.createElement("img");
+    preview.src = image.url;
+    preview.alt = "由 AI 生成的社群視覺草稿";
+    preview.loading = "lazy";
+    result.appendChild(preview);
+    result.appendChild(el("p", "muted", "已由 fal.ai 生成；請檢查文字與資訊正確後再使用。"));
+    const actions = el("div", "card-actions");
+    const open = el("a", null, "開啟並下載");
+    open.href = image.url;
+    open.target = "_blank";
+    open.rel = "noopener";
+    open.download = "社群視覺草稿.jpg";
+    actions.appendChild(open);
+    result.appendChild(actions);
+    announce("視覺稿已完成");
+  } catch (err) {
+    result.replaceChildren();
+    result.appendChild(el("strong", null, "視覺稿尚未完成"));
+    result.appendChild(el("p", "muted", friendlyError(err.message)));
+    const retry = el("button", "ghost", "重試生成視覺稿");
+    retry.type = "button";
+    retry.addEventListener("click", () => generateVisual(raw, host, retry));
+    result.appendChild(retry);
+  } finally {
+    button.disabled = false;
+    button.textContent = "生成視覺稿";
+  }
+}
+
 function followUpBar(raw, kind) {
   const wrap = el("section", "next-actions");
   wrap.appendChild(el("h3", null, "接下來可以怎麼做？"));
@@ -219,6 +278,12 @@ function followUpBar(raw, kind) {
     btn.addEventListener("click", () => startFollowUp(prompt));
     actions.appendChild(btn);
   });
+  if (kind === "social") {
+    const visual = el("button", null, "生成視覺稿");
+    visual.type = "button";
+    visual.addEventListener("click", () => generateVisual(raw, wrap, visual));
+    actions.appendChild(visual);
+  }
   wrap.appendChild(actions);
   return wrap;
 }
@@ -518,6 +583,7 @@ function addUser(text) {
 function classifyError(text, code) {
   const raw = String(code || "") + " " + String(text || "");
   if (/401|403|權限|授權/.test(raw)) return ["權限不足", "請確認授權狀態後再試。", "permission"];
+  if (/vision|visual|圖片理解|視覺服務/i.test(raw)) return ["AI 視覺服務暫時無法使用", "可改用文字描述圖片內容，或稍後重試。", "visual"];
   if (/缺少|待填|必填/.test(raw)) return ["缺少資料", "補上關鍵資料，或先改成草稿。", "missing"];
   if (/研究|來源|搜尋/.test(raw)) return ["外部研究失敗", "可以重試，或改用已知資料完成草稿。", "research"];
   if (/文件|下載|產出/.test(raw)) return ["文件產出失敗", "可以只重做失敗步驟。", "document"];
@@ -544,11 +610,16 @@ function addError(turn, text, retryFn, code) {
     retryStep.addEventListener("click", () => controlTask("retry", turn));
     actions.appendChild(retryStep);
   }
-  if (["missing", "busy", "research"].includes(kind)) {
-    const simple = el("button", "ghost", kind === "missing" ? "返回補資料" : "改用簡單模式");
+  if (["missing", "busy", "research", "visual"].includes(kind)) {
+    const simple = el("button", "ghost", kind === "missing" ? "返回補資料" : kind === "visual" ? "改用文字描述" : "改用簡單模式");
     simple.type = "button";
     simple.addEventListener("click", () => {
-      $("input").value = kind === "missing" ? "" : (turn.dataset.prompt || state.lastPrompt) + "\n請先產出最簡單、可修改的草稿；未知資料請標示待填。";
+      if (kind === "visual") {
+        clearAttachments();
+        $("input").value = (turn.dataset.prompt || state.lastPrompt) + "\n請先依我的文字描述完成；我會再補充圖片中的內容。";
+      } else {
+        $("input").value = kind === "missing" ? "" : (turn.dataset.prompt || state.lastPrompt) + "\n請先產出最簡單、可修改的草稿；未知資料請標示待填。";
+      }
       showPanel("home");
       $("input").focus();
     });
@@ -1142,6 +1213,14 @@ function handleEvent(turn, ev, retry) {
       break;
     }
 
+    case "visual_analysis_started":
+      setFlowStep(turn, "facts", "running", "理解圖片內容", "正在整理 " + (ev.count || 0) + " 張圖片中的可見資訊。");
+      break;
+
+    case "visual_analysis_completed":
+      setFlowStep(turn, "facts", "complete", "理解圖片內容", "已整理圖片可見資訊，只用於這次任務。" );
+      break;
+
     case "plan_created": {
       state.taskSummary = { steps: ev.step_details || (ev.steps || []).map((description) => ({ description, status: "pending" })), workflow_status: "in_progress", next_action: "等待必要資料確認後繼續" };
       updateTaskDock(state.taskSummary);
@@ -1248,7 +1327,7 @@ function handleEvent(turn, ev, retry) {
       break;
 
     case "error":
-      addError(turn, friendlyError(ev.text), retry);
+      addError(turn, friendlyError(ev.text), retry, ev.error_code);
       announce(friendlyError(ev.text));
       break;
   }
@@ -1732,7 +1811,7 @@ function renderAttachmentStatus() {
   const status = $("attachment-status");
   const names = state.attachments.map((item) => item.name);
   status.hidden = !names.length;
-  status.textContent = names.length ? "已加入圖片：" + names.join("、") + "（只供這次任務理解，不會保存）" : "";
+  status.textContent = names.length ? "已加入圖片：" + names.join("、") + "（將交由 fal.ai 視覺服務僅供這次任務理解，不會保存）" : "";
 }
 
 function clearAttachments() {

@@ -34,8 +34,12 @@ NVIDIA_STRONG_MODEL = (os.getenv("NVIDIA_STRONG_MODEL") or NVIDIA_MODEL).strip()
 # NVIDIA Build 目前通常以額度計費而非美元；需要自架或付費端點時可填實際單價。
 NVIDIA_INPUT_COST_PER_MILLION = float(os.getenv("NVIDIA_INPUT_COST_PER_MILLION") or 0)
 NVIDIA_OUTPUT_COST_PER_MILLION = float(os.getenv("NVIDIA_OUTPUT_COST_PER_MILLION") or 0)
-# 圖片附件優先使用可理解影像的模型；留空時沿用 NVIDIA_MODEL，維持既有部署相容。
-NVIDIA_VISION_MODEL = (os.getenv("NVIDIA_VISION_MODEL") or "").strip()
+# ── fal.ai 視覺服務（選用）────────────────────────────────────
+# 文字代理仍使用上方的 NVIDIA 模型。只有圖片理解與使用者主動生成的
+# 視覺稿會送往 fal.ai；未設定時，文字工作台仍可正常使用。
+FAL_KEY = (os.getenv("FAL_KEY") or "").strip()
+FAL_VISION_MODEL = (os.getenv("FAL_VISION_MODEL") or "google/gemini-2.5-flash").strip()
+FAL_IMAGE_MODEL = (os.getenv("FAL_IMAGE_MODEL") or "fal-ai/flux/schnell").strip()
 
 # 給介面下拉選單用：已知支援 function calling 的免費模型
 KNOWN_TOOL_MODELS = [

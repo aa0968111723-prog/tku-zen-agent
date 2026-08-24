@@ -19,6 +19,7 @@ from . import config, orchestrator, retrieval
 from .services import auth, context as ctx_mod
 from .services import activities as activity_service
 from .services import current_term as term_service
+from .services import fal as fal_service
 from .services import memory as memory_service
 from .services.session_store import get_store
 from .orchestrator.state import Stage, WorkflowStatus
@@ -42,6 +43,12 @@ class ChatRequest(BaseModel):
     destination: str = config.DEFAULT_DESTINATION
     model: str | None = None
     attachments: list[ImageAttachment] = Field(default_factory=list, max_length=2)
+
+
+class VisualGenerateRequest(BaseModel):
+    """使用者從產出卡片主動要求的 fal 視覺稿。"""
+
+    prompt: str = Field(min_length=4, max_length=7000)
 
 
 class SessionRequest(BaseModel):
@@ -457,6 +464,17 @@ async def download(artifact_id: str, user_id: str = Depends(current_user)) -> Fi
     if not target.is_relative_to(root) or not target.is_file():
         raise HTTPException(status_code=404, detail="這份產出的檔案已不存在")
     return FileResponse(target, filename=record.filename)
+
+
+@general_router.post("/visual/generate")
+async def generate_visual(req: VisualGenerateRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
+    """產生一次性視覺稿，不保存提示詞或 fal 回應到任務資料庫。"""
+    del user_id  # router 的授權依賴已確認身分；此端點沒有持久化資料。
+    try:
+        images = await fal_service.generate_image(req.prompt)
+    except fal_service.FalError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    return {"images": images}
 
 
 @general_router.post("/chat")
