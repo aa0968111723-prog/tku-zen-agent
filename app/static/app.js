@@ -41,10 +41,36 @@ const FLOW_STEPS = [
   ["verify", "最後檢查", "檢查待填資訊與內容品質"],
 ];
 const TOOL_LABELS = {
-  create_social_post: "建立社群貼文",
-  create_social_carousel: "建立 IG 輪播",
-  create_social_story: "建立 IG 限時動態",
+  // 後端 app/tools/__init__.py LABELS 的完整對照（照抄同名中文；
+  // tests/test_phase5_frontend.py 會逐鍵比對）。
+  // 注意順序：humanLabel 會做子字串取代，長鍵名（update_activity_task）
+  // 必須排在其前綴（update_activity）之前，否則會被切壞。
+  search_knowledge: "搜尋社團知識庫",
+  search_previous_examples: "搜尋歷年範例",
+  get_current_term: "查本學期資料",
+  create_spreadsheet: "建立試算表",
+  create_document: "建立文件",
+  create_slides: "建立簡報",
+  create_google_form: "建立 Google 表單",
+  add_activity_task: "新增活動待辦",
+  update_activity_task: "更新活動待辦",
+  update_activity: "更新活動資料",
+  create_activity: "建立活動資料",
+  get_activity_status: "檢查活動進度",
+  list_activities: "列出活動",
+  read_artifact: "讀取上一份產出",
+  search_social_references: "搜尋外校公開參考",
+  compare_social_strategies: "比較外校社群策略",
+  analyze_social_positioning: "分析社群定位",
+  create_social_post: "建立貼文草稿",
+  create_social_carousel: "建立輪播草稿",
+  create_social_story: "建立限動草稿",
   create_reels_script: "建立 Reels 腳本",
+  create_social_content_calendar: "建立內容月曆",
+  create_social_ab_test: "建立 A/B 測試草稿",
+  create_social_image_prompt: "建立圖像提示詞",
+  create_social_video_prompt: "建立影片提示詞",
+  // 前端流程階段標籤（非後端工具）
   retrieval: "查找社團資料",
   verification: "檢查內容",
   repair: "自動修正",
@@ -141,6 +167,9 @@ function humanLabel(value, fallback = "處理任務") {
   if (TOOL_LABELS[raw]) return TOOL_LABELS[raw];
   let text = raw;
   Object.entries(TOOL_LABELS).forEach(([internal, label]) => { text = text.replaceAll(internal, label); });
+  // 查不到中文對照時不得把底線轉空格直接顯示英文內部名——
+  // 沒有任何中文字就一律顯示通用中文（稽核：內部名外洩）。
+  if (!/[\u3400-\u9fff]/.test(text)) return "執行工具";
   return text.replace(/[_-]+/g, " ");
 }
 
@@ -264,7 +293,7 @@ async function generateVisual(raw, host, button) {
   button.textContent = "正在生成視覺稿…";
   const result = el("section", "visual-result");
   result.setAttribute("aria-live", "polite");
-  result.appendChild(el("p", "muted", "正在以 fal.ai 生成視覺草稿，完成後可直接下載。"));
+  result.appendChild(el("p", "muted", "正在以 AI 視覺稿服務生成視覺草稿，完成後可直接下載。"));
   host.appendChild(result);
   try {
     const resp = await api("/api/visual/generate", {
@@ -285,7 +314,7 @@ async function generateVisual(raw, host, button) {
     preview.alt = "由 AI 生成的社群視覺草稿";
     preview.loading = "lazy";
     result.appendChild(preview);
-    result.appendChild(el("p", "muted", "已由 fal.ai 生成；請檢查文字與資訊正確後再使用。"));
+    result.appendChild(el("p", "muted", "已由 AI 視覺稿服務生成；請檢查文字與資訊正確後再使用。"));
     const actions = el("div", "card-actions");
     const open = el("a", null, "開啟並下載");
     open.href = image.url;
@@ -385,8 +414,10 @@ function bindCardActions(card, turn, raw) {
 function splitCarousel(text) {
   const dashed = text.split(/\n-{3,}\n/);
   if (dashed.length > 1) return dashed.map((s) => s.trim()).filter(Boolean);
-  const numbered = text.split(/(?:^|\n)\s*\d+\s*[.\、\.\:：]\s+/).map((s) => s.trim()).filter(Boolean);
-  if (numbered.length > 1) return numbered;
+  // 只認明確的輪播分頁標記（「第 N 頁」「Page N」「【N】」或上面的分隔線）；
+  // 一般編號清單（1. 2. 3.）不是分頁依據，切了會把貼文炸成過多頁（稽核：切分過貪）。
+  const paged = text.split(/(?:^|\n)\s*(?:第\s*\d+\s*頁|Page\s*\d+|【\s*\d+\s*】)\s*[:：]?\s*/gi).map((s) => s.trim()).filter(Boolean);
+  if (paged.length > 1) return paged;
   const headed = text.split(/(?:^|\n)#{1,3}\s+/).map((s) => s.trim()).filter(Boolean);
   if (headed.length > 1) return headed;
   return [text.trim()].filter(Boolean);
@@ -1123,6 +1154,9 @@ function updateTaskDock(summary) {
   if (summary.current_step) content.appendChild(el("p", null, "目前：" + summary.current_step));
   if (summary.next_action) content.appendChild(el("p", "muted", "下一步：" + summary.next_action));
   dock.hidden = false;
+  // 手機（<960px）沒有側欄——同步顯示右下角的任務浮動按鈕
+  const fab = $("task-fab");
+  if (fab) fab.hidden = false;
 }
 
 function openTaskSummary() {
@@ -1513,7 +1547,6 @@ function renderQuestionControl(question) {
       const selected = question.type === "multi" ? Array.isArray(question.answer) && question.answer.includes(option) : question.answer === option;
       btn.setAttribute("role", question.type === "multi" ? "checkbox" : "radio");
       btn.setAttribute("aria-checked", String(selected));
-      btn.setAttribute("aria-pressed", String(selected));
       btn.addEventListener("click", () => {
         question.skipped = false;
         if (question.type === "multi") {
@@ -1525,6 +1558,16 @@ function renderQuestionControl(question) {
         renderPreflight();
       });
       opts.appendChild(btn);
+    });
+    // 方向鍵在選項間移動焦點（radio／checkbox 群組的鍵盤慣例）
+    opts.addEventListener("keydown", (e) => {
+      if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
+      const items = [...opts.querySelectorAll("button")];
+      const current = items.indexOf(document.activeElement);
+      if (current < 0) return;
+      e.preventDefault();
+      const delta = e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 1;
+      items[(current + delta + items.length) % items.length].focus();
     });
     wrap.appendChild(opts);
   } else {
@@ -1695,7 +1738,9 @@ function setBusyUI(busy) {
   // 不必展開工作進度也能停（進度卡裡的停止鈕仍在）。
   $("send").hidden = busy;
   $("send").disabled = busy;
-  $("stop").hidden = !busy;
+  // #stop 可能不存在（例如舊版頁面快取）——防 TypeError
+  const stopBtn = $("stop");
+  if (stopBtn) stopBtn.hidden = !busy;
 }
 
 // 串流閒置逾時：超過這段時間沒收到任何資料就視為連線逾時
@@ -2420,7 +2465,9 @@ $("research-form").addEventListener("submit", (e) => {
 
 /* ── 焦點陷阱 ──────────────────────────────────────── */
 
-let trapCleanup = null;
+// 堆疊式焦點陷阱：支援巢狀 modal（例：設定抽屜上再開「本學期設定」）。
+// 開內層時暫停外層的鍵盤處理，關閉內層時恢復外層；Escape 只關最上層。
+const trapStack = [];
 
 function isVisible(n) {
   return !!(n.offsetWidth || n.offsetHeight || n.getClientRects().length);
@@ -2433,7 +2480,8 @@ function focusables(root) {
 }
 
 function trapFocus(root, onClose) {
-  releaseTrap();
+  const outer = trapStack[trapStack.length - 1];
+  if (outer) document.removeEventListener("keydown", outer.onKey);
   const nodes = focusables(root);
   (nodes[0] || root).focus();
   const onKey = (e) => {
@@ -2456,12 +2504,18 @@ function trapFocus(root, onClose) {
     }
   };
   document.addEventListener("keydown", onKey);
-  trapCleanup = () => document.removeEventListener("keydown", onKey);
+  trapStack.push({ root, onKey });
 }
 
 function releaseTrap() {
-  if (trapCleanup) trapCleanup();
-  trapCleanup = null;
+  const top = trapStack.pop();
+  if (top) document.removeEventListener("keydown", top.onKey);
+  const outer = trapStack[trapStack.length - 1];
+  if (outer) {
+    document.addEventListener("keydown", outer.onKey);
+    const nodes = focusables(outer.root);
+    (nodes[0] || outer.root).focus();
+  }
 }
 
 /* ── 設定抽屜 ──────────────────────────────────────── */
@@ -2660,6 +2714,8 @@ async function newChat() {
     state.projectId = null;
     state.taskSummary = null;
     $("task-dock").hidden = true;
+    const fab = $("task-fab");
+    if (fab) fab.hidden = true;
     $("chat").replaceChildren();
     $("input").value = "";
     $("input").style.height = "auto";
@@ -2684,12 +2740,13 @@ async function newChat() {
 $("reset").addEventListener("click", newChat);
 
 $("send").addEventListener("click", () => send());
-$("stop").addEventListener("click", () => controlTask("cancel", state.activeTurn || $("chat").lastElementChild));
+const stopBtn = $("stop");
+if (stopBtn) stopBtn.addEventListener("click", () => controlTask("cancel", state.activeTurn || $("chat").lastElementChild));
 function renderAttachmentStatus() {
   const status = $("attachment-status");
   const names = state.attachments.map((item) => item.name);
   status.hidden = !names.length;
-  status.textContent = names.length ? "已加入圖片：" + names.join("、") + "（將交由 fal.ai 視覺服務僅供這次任務理解，不會保存）" : "";
+  status.textContent = names.length ? "已加入圖片：" + names.join("、") + "（將交由 AI 視覺服務僅供這次任務理解，不會保存）" : "";
 }
 
 function clearAttachments() {
@@ -2752,12 +2809,21 @@ $("voice-input").addEventListener("click", () => {
   recognition.lang = "zh-TW";
   recognition.interimResults = true;
   recognition.continuous = false;
-  const base = $("input").value;
+  let lastVoiceChunk = "";
   $("voice-input").textContent = "停止";
   recognition.onresult = (event) => {
-    const words = [...event.results].map((result) => result[0].transcript).join("");
-    $("input").value = base + words;
-    $("input").dispatchEvent(new Event("input"));
+    const words = [...event.results].map((result) => result[0].transcript).join("").trim();
+    // 語音結果附加在既有內容之後（中間補空格），不覆蓋手動輸入；
+    // 辨識進行中只替換上一次語音附加的片段。
+    const field = $("input");
+    let current = field.value;
+    if (lastVoiceChunk && current.endsWith(lastVoiceChunk)) {
+      current = current.slice(0, current.length - lastVoiceChunk.length);
+    }
+    const glue = current && !/\s$/.test(current) ? " " : "";
+    lastVoiceChunk = words ? glue + words : "";
+    field.value = current + lastVoiceChunk;
+    field.dispatchEvent(new Event("input"));
   };
   recognition.onerror = () => announce("語音輸入沒有完成，請改用文字補充。");
   recognition.onend = () => { state.voice = null; $("voice-input").textContent = "語音"; $("input").focus(); };
@@ -2785,9 +2851,13 @@ $("preflight-sheet").addEventListener("click", (e) => { if (e.target.id === "pre
 $("task-summary-close").addEventListener("click", closeTaskSummary);
 $("task-summary-sheet").addEventListener("click", (e) => { if (e.target.id === "task-summary-sheet") closeTaskSummary(); });
 $("task-dock-summary").addEventListener("click", openTaskSummary);
+const taskFab = $("task-fab");
+if (taskFab) taskFab.addEventListener("click", openTaskSummary);
 
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
+  // 焦點陷阱堆疊會自行處理 Escape（只關最上層）——避免一次關掉多層
+  if (trapStack.length) return;
   if (!$("preflight-sheet").hidden) closePreflight();
   else if (!$("task-summary-sheet").hidden) closeTaskSummary();
   else if (!$("term-modal").hidden) closeTerm();
@@ -2810,19 +2880,41 @@ async function loadIgStatus() {
   }
 }
 
+// 模型下拉不顯示原始供應商 ID——顯示中文描述＋簡短名。
+// 送到後端的 option value 維持原始 ID 不變；原名放在 title 供進階使用者查看。
+const MODEL_DISPLAY = [
+  // nemotron 要排在 llama 之前：其 ID 常內含 llama-3.3（如 llama-3.3-nemotron-super-49b）
+  [/nemotron/i, "推理強化（Nemotron 49B）"],
+  [/kimi/i, "長文（Kimi K2）"],
+  [/qwen/i, "通用（Qwen 2.5 72B）"],
+  [/mixtral/i, "多語（Mixtral 8x22B）"],
+  [/llama[-_.]?3\.1/i, "標準（Llama 3.1 70B）"],
+  [/llama[-_.]?3\.3/i, "標準（Llama 3.3 70B）"],
+];
+
+function modelDisplayName(id) {
+  const raw = String(id || "");
+  for (const [pattern, label] of MODEL_DISPLAY) {
+    if (pattern.test(raw)) return label;
+  }
+  return "自訂模型";
+}
+
 function fillModels(h) {
   const sel = $("model");
   sel.replaceChildren();
   const models = h.models || [];
   for (const m of models) {
-    const o = el("option", null, String(m).split("/").pop());
+    const o = el("option", null, modelDisplayName(m));
     o.value = m;
+    o.title = String(m);
     if (m === h.model) o.selected = true;
     sel.appendChild(o);
   }
   if (h.model && !models.includes(h.model)) {
-    const o = el("option", null, String(h.model).split("/").pop());
+    const o = el("option", null, modelDisplayName(h.model));
     o.value = h.model;
+    o.title = String(h.model);
     o.selected = true;
     sel.insertBefore(o, sel.firstChild);
   }

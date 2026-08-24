@@ -138,7 +138,7 @@
 支援：
 
 - 本輪產出
-- 最近產出（利用 `/api/outputs`）
+- 最近產出（利用 `/api/artifacts`）
 - 依類型 filter
 
 快捷 follow-up：

@@ -85,7 +85,8 @@ def register(
     if permission not in {"general", "admin_confirm"}:
         raise ValueError("permission must be general or admin_confirm")
     _REGISTRY[name] = (fn, schema, permission)
-    LABELS[name] = label or name
+    # fallback 不用英文內部名——那會原封不動出現在前端進度列（稽核不可靠 #42）
+    LABELS[name] = label or "執行工具"
     SCHEMAS.clear()
     SCHEMAS.extend(s for _, s, _ in _REGISTRY.values())
 

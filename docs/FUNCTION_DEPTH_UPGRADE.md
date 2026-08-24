@@ -7,16 +7,16 @@
 | 能力 | 目前狀態 | 主要實作位置 | 本次判定 |
 |---|---|---|---|
 | 對話與 SSE | 已可用；`/api/chat` 送出結構化事件 | `app/main.py`, `app/orchestrator/` | 保持相容，增加工作流事件 |
-| 規則式路由 | 已有 9 個 skill，可限制工具 schema | `app/skills/__init__.py` | 半完成；單輪路由，無複合任務圖 |
-| 工作流狀態 | 有 stage、plan steps、working memory | `app/orchestrator/state.py`, `app/services/memory.py` | 半完成；沒有控制命令與失敗步驟 checkpoint |
-| Session／Project | SQLite 持久化、同 session 綁 project | `app/services/session_store.py` | 已可用；缺少可操作的 resume／retry／cancel API |
-| 知識庫 | BM25 + LSA + metadata rerank；本學期資料優先 | `app/retrieval.py`, `app/rag/` | 半完成；來源欄位與衝突報告不足 |
-| 外部研究 | 可查 `knowledge/社群/`，回傳四段分析 | `app/tools/social.py` | 半完成；來源沒有完整 provenance record，無可信度／驗證狀態 |
-| 文件與 artifact | 可產 Word／Excel／PPT／表單／網宣草稿，產後驗證 | `app/tools/`, `app/verification/` | 已可用；版本鏈已有 parent_id，主要清單仍會列所有版本 |
-| 多模型與容錯 | 有模型路由、HTTP retry、全域 telemetry | `app/llm.py` | 半完成；任務成本與工作流失敗沒有綁在 project |
+| 規則式路由 | 已有 9 個 skill，可限制工具 schema | `app/skills/__init__.py` | 半完成；單輪路由，無複合任務圖（已於 2026-08 完成：planner 已建立複合任務依賴計畫，skill 現為 11 個） |
+| 工作流狀態 | 有 stage、plan steps、working memory | `app/orchestrator/state.py`, `app/services/memory.py` | 半完成；沒有控制命令與失敗步驟 checkpoint（已於 2026-08 完成：/api/tasks 控制命令與失敗步驟 checkpoint） |
+| Session／Project | SQLite 持久化、同 session 綁 project | `app/services/session_store.py` | 已可用；缺少可操作的 resume／retry／cancel API（已於 2026-08 完成：/api/tasks/{project_id} 的 pause／resume／retry／cancel） |
+| 知識庫 | BM25 + LSA + metadata rerank；本學期資料優先 | `app/retrieval.py`, `app/rag/` | 半完成；來源欄位與衝突報告不足（已於 2026-08 完成：rag/conflicts.py 衝突與過期偵測、來源標註） |
+| 外部研究 | 可查 `knowledge/社群/`，回傳四段分析 | `app/tools/social.py` | 半完成；來源沒有完整 provenance record，無可信度／驗證狀態（已於 2026-08 完成：research/claims.py 證據模型與 research/verifier.py 回答閘門） |
+| 文件與 artifact | 可產 Word／Excel／PPT／表單／網宣草稿，產後驗證 | `app/tools/`, `app/verification/` | 已可用；版本鏈已有 parent_id，主要清單仍會列所有版本（已於 2026-08 完成：主要清單改為只列各檔名的最新版本） |
+| 多模型與容錯 | 有模型路由、HTTP retry、全域 telemetry | `app/llm.py` | 半完成；任務成本與工作流失敗沒有綁在 project（已於 2026-08 完成：metrics 綁 project，含模型呼叫、token、估算成本與失敗分類） |
 | 前端工作台 | 手機優先、設定頁、產出清單 | `app/static/` | 本次不做大型 UI 改版 |
 
-目前沒有真正完成的項目包括：多步驟任務的可恢復執行、複合任務的明確依賴關係、外部研究的來源級追溯與衝突處理。這三項會直接影響「研究後產出」、「沿用上一份」與長任務可靠性，因此列為第一批升級。
+目前沒有真正完成的項目包括：多步驟任務的可恢復執行、複合任務的明確依賴關係、外部研究的來源級追溯與衝突處理。這三項會直接影響「研究後產出」、「沿用上一份」與長任務可靠性，因此列為第一批升級。（註：本段為撰寫當時的現況；這三項均已於 2026-08 的深度硬化階段完成，對照 `docs/AUDIT_2026-08-24.md` 第七節。）
 
 ## 第一批三項升級與驗收標準
 
