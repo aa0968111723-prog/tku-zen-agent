@@ -83,7 +83,9 @@ async def test_llm_failure_becomes_readable_error(monkeypatch, ctx):
     monkeypatch.setattr(orch, "NvidiaClient", lambda **_: fake)
     events = [ev async for ev in orch.run_turn(ctx, "你好", destination="local")]
     errs = [e for e in events if e["type"] == "error"]
-    assert errs and "模擬失敗" in errs[0]["text"]
+    # 新契約：技術細節只進伺服器 log，前端一律統一文案
+    assert errs and errs[0]["text"] == "系統忙碌中，請稍後再試"
+    assert "模擬失敗" not in errs[0]["text"]
 
 
 @pytest.mark.asyncio

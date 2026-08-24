@@ -34,7 +34,15 @@ def main() -> None:
     # 部署到 Zeabur / Railway 之類的平台時，平台會用 PORT 環境變數指定連接埠
     port = int(os.getenv("PORT") or config.PORT)
     host = os.getenv("HOST") or config.HOST
-    on_server = bool(os.getenv("ZEABUR") or os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("PORT"))
+    on_server = bool(
+        os.getenv("ZEABUR")
+        or os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("PORT")
+        or host == "0.0.0.0"
+    )
+    if (on_server or config.AUTH_MODE == "token") and not config.APP_ACCESS_TOKEN:
+        print("[錯誤] 部署或 token 認證模式必須設定 APP_ACCESS_TOKEN，服務已停止。", file=sys.stderr)
+        sys.exit(1)
     if on_server:
         host = "0.0.0.0"  # noqa: S104 —— 部署環境必須綁所有介面
 

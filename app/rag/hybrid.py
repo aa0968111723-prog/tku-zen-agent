@@ -91,6 +91,7 @@ def hybrid_search(
     current_year: str | None = None,
     min_curated: int = 2,
     min_archive: int = 1,
+    include_external: bool = False,
 ) -> list[Scored]:
     """跑完整條 hybrid pipeline，回傳重排後的結果。"""
     from ..retrieval import TIER_CURATED, tokenize
@@ -98,9 +99,14 @@ def hybrid_search(
     q = parsed or parse(query)
 
     # ── BM25 ──────────────────────────────────────────────
-    bm25_hits = index.search(q.describe() or query, k=BM25_POOL, min_curated=0)
+    bm25_hits = index.search(
+        q.describe() or query,
+        k=BM25_POOL,
+        min_curated=0,
+        include_external=include_external,
+    )
     if not bm25_hits:
-        bm25_hits = index.search(query, k=BM25_POOL, min_curated=0)
+        bm25_hits = index.search(query, k=BM25_POOL, min_curated=0, include_external=include_external)
 
     fused: dict[int, Scored] = {}
     for rank, (_score, chunk) in enumerate(bm25_hits):
@@ -120,6 +126,8 @@ def hybrid_search(
                 if sims[idx] <= 0.02:      # 幾乎無關就不要硬塞進候選
                     continue
                 chunk = index.chunks[int(idx)]
+                if not include_external and getattr(chunk.meta, "source_type", "") == "external_reference":
+                    continue
                 key = id(chunk)
                 if key in fused:
                     fused[key].score += _rrf(rank)

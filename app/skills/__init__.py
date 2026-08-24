@@ -75,9 +75,38 @@ SKILLS: tuple[Skill, ...] = (
         extra_guidance="活動類產出通常要「企劃書（文件）＋細流（試算表）」成對，不要只給一半。",
     ),
     Skill(
+        name="social_research",
+        label="外校社群研究",
+        deliverables=("研究", "比較", "分析", "定位"),
+        keywords=(
+            "其他學校", "外校", "北科", "北藝", "禪心社", "領袖社", "禪學社", "策略比較", "社群研究",
+        ),
+        tools=("search_social_references", "compare_social_strategies", "analyze_social_positioning"),
+        task_type="social_research",
+        playbook_hints=("外校社群比較", "社群研究"),
+        extra_guidance="外校資料只能當公開參考；研究結果必須附學校名與來源檔名，禁止照抄或當作淡江事實。",
+    ),
+    Skill(
+        name="social_publicity",
+        label="社群網宣",
+        deliverables=("網宣", "社群文宣", "貼文", "輪播", "限動", "Reels", "社群內容"),
+        keywords=(
+            "網宣", "IG", "ig", "貼文", "限動", "輪播", "Reels", "社群", "招生文宣", "文宣",
+        ),
+        tools=(
+            "create_social_post", "create_social_carousel", "create_social_story",
+            "create_reels_script", "create_social_content_calendar",
+        ),
+        task_type="social_publicity",
+        artifacts_expected=("document",),
+        required_facts=("academic_year", "semester"),
+        playbook_hints=("文宣與社群貼文", "社群內容規劃"),
+        extra_guidance="產出前可參考外校公開資料，但文案必須是淡江原創，不得含外校專名、連結、講師或未確認日期。",
+    ),
+    Skill(
         name="recruitment",
         label="招生",
-        deliverables=("招生", "路宣", "個接", "接引", "文宣", "貼文", "限動", "招新", "班宣", "海報"),
+        deliverables=("招生", "路宣", "個接", "接引", "文宣", "招新", "班宣", "海報"),
         keywords=("新生", "入社", "ig", "instagram", "臉書", "社群", "宣傳", "擺攤"),
         weak=("fb",),
         tools=(

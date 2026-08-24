@@ -18,7 +18,7 @@ ROUTING_CASES = [
     ("挑戰營的細流要怎麼做", "event_planning"),
     ("幫我寫期末社大的流程", "event_planning"),
     ("這學期招生要怎麼規劃", "recruitment"),
-    ("幫我寫三則招生 IG 貼文", "recruitment"),
+    ("幫我寫三則招生 IG 貼文", "social_publicity"),  # v3 起 IG 貼文歸網宣工作台
     ("路宣排班表", "recruitment"),
     ("做一份社團評鑑的年度績效報告", "evaluation"),
     ("課外組要的成果報告", "evaluation"),
@@ -83,8 +83,8 @@ def test_schemas_for_ignores_unknown_names():
     assert {s["function"]["name"] for s in subset} == {"search_knowledge"}
 
 
-def test_schemas_for_empty_falls_back_to_all():
-    assert tools.schemas_for([]) == tools.SCHEMAS
+def test_schemas_for_empty_returns_empty():
+    assert tools.schemas_for([]) == []
 
 
 # ── 20 個 mock tools 不能拖垮路由 ─────────────────────────────
@@ -124,7 +124,7 @@ def test_routing_unaffected_by_extra_tools(twenty_mock_tools, message, expected)
 
 
 def test_exposed_tool_count_stays_small_with_27_tools(twenty_mock_tools):
-    assert len(tools.all_names()) == 27, "應該真的有 27 個工具註冊著"
+    assert len(tools.all_names()) == 38, "應該包含既有 7 個、新增 11 個與 20 個 mock 工具"
     for s in skills.SKILLS:
         exposed = tools.schemas_for(s.tool_names())
         assert len(exposed) <= 7, f"{s.name} 暴露了 {len(exposed)} 個工具，太多"

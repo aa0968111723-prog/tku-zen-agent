@@ -20,6 +20,7 @@ SOURCE_LABEL = {
     "playbook": "任務劇本",
     "archive": "歷年範例",
     "conversation": "歷史對話",
+    "external_reference": "外校公開參考",
 }
 
 
@@ -29,6 +30,7 @@ class ContextBundle:
     queries: list[str] = field(default_factory=list)
     curated_count: int = 0
     archive_count: int = 0
+    external_count: int = 0
     truncated: bool = False
 
     def source_labels(self) -> list[str]:
@@ -75,6 +77,8 @@ class ContextBundle:
             kind = SOURCE_LABEL.get(meta.source_type if meta else "archive", "資料")
             detail = meta.label() if meta else ""
             header = f"### 【{kind}】{chunk.source}"
+            if meta and meta.source_type == "external_reference":
+                header = "### 【外校公開參考——僅供比較分析，禁止照抄，不是淡江資料】 " + chunk.source
             if detail:
                 header += f"（{detail}）"
 
@@ -129,6 +133,7 @@ def build_context(
             # 第一個查詢負責保證規範與範例都在，後續查詢純粹補充
             min_curated=2 if i == 0 else 0,
             min_archive=1 if i == 0 else 0,
+            include_external=task_type in {"social_research", "social_publicity"},
         )
         for h in hits:
             key = id(h.chunk)
@@ -143,5 +148,10 @@ def build_context(
     from ..retrieval import TIER_CURATED
 
     bundle.curated_count = sum(1 for s in bundle.hits if s.chunk.tier >= TIER_CURATED)
-    bundle.archive_count = len(bundle.hits) - bundle.curated_count
+    bundle.external_count = sum(
+        1
+        for s in bundle.hits
+        if getattr(getattr(s.chunk, "meta", None), "source_type", "") == "external_reference"
+    )
+    bundle.archive_count = len(bundle.hits) - bundle.curated_count - bundle.external_count
     return bundle

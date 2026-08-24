@@ -153,7 +153,9 @@ def test_tool_exception_is_returned_not_raised(tmp_output_dir, monkeypatch):
     def boom(filename, sheets, destination=None, summary=""):
         raise RuntimeError("模擬爆炸")
 
-    monkeypatch.setitem(tools._REGISTRY, "create_spreadsheet", (boom, spreadsheet.SCHEMA))
+    monkeypatch.setitem(tools._REGISTRY, "create_spreadsheet", (boom, spreadsheet.SCHEMA, "general"))
     r = tools.dispatch("create_spreadsheet", {"filename": "x", "sheets": "a,b\n1,2"})
     assert not r["ok"]
-    assert "模擬爆炸" in r["message"]
+    # 新契約：例外細節只進伺服器 log，回給模型的訊息不得帶 traceback／原始例外
+    assert "模擬爆炸" not in r["message"]
+    assert r["message"] == "工具執行失敗，請稍後再試"
