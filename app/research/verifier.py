@@ -201,7 +201,9 @@ def review_answer(
     if scope.mode == ResearchMode.INTERNAL:
         review.research_status = RESEARCH_INTERNAL
         _check_internal_answer(body, review, sources)
-        if INTERNAL_ATTRIBUTION not in body:
+        # 只有使用者明確要求「只用淡江內部資料」時才強制附資料歸屬說明，
+        # 一般任務不加，避免每一句回覆都掛尾註。
+        if scope.internal_only_requested and INTERNAL_ATTRIBUTION not in body:
             review.notices.append(INTERNAL_ATTRIBUTION)
         if review.errors:
             review.verdict = "block"
@@ -255,7 +257,8 @@ def review_answer(
     source_spans = _source_section_spans(body)
     for sent in sentences:
         pos = body.find(sent, pos)
-        in_speculation = _in_spans(max(pos, 0), spec_spans)
+        # 句子本身以【可能推測】開頭時，起點在標籤前，也算在推測區內
+        in_speculation = _in_spans(max(pos, 0), spec_spans) or bool(_SPECULATION_HEAD.match(sent))
         label = _LABEL_LINE.match(sent)
         if label and label.group(1) in {"研究對象", "來源整理", "尚待確認"}:
             continue   # 標籤行：點名對象、列來源、列未確認項，不是對外校的事實主張

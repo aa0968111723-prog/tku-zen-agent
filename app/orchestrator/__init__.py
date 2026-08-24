@@ -347,10 +347,13 @@ async def _run(
     state.research_status = review.research_status
     state.claim_records = [c.to_dict() for c in review.claims]
 
+    # 一般內部任務不需要研究儀表；只有研究模式（或閘門真的抓到問題）才顯示
+    research_relevant = research_active or scope.internal_only_requested or bool(review.findings)
+
     cards = _dedupe_cards([r.to_card() for r in turn_sources])
     # 持久化時去掉摘錄本文，控制 working_memory 的體積
     state.source_cards = [{k: v for k, v in c.items() if k != "excerpt"} for c in cards]
-    if cards or research_active:
+    if research_relevant:
         yield {"type": "source_cards", "cards": cards}
     if review.claims or review.findings:
         yield review.to_event()
@@ -383,21 +386,23 @@ async def _run(
     memory_service.save_state(store, project_id, state)
     memory_service.maybe_compress(store, session_id, project_id)
 
-    yield {
-        "type": "research_status",
-        "status": review.research_status,
-        "label": research_verifier.RESEARCH_STATUS_LABELS.get(review.research_status, review.research_status),
-    }
-    yield {
+    done_event: dict[str, Any] = {
         "type": "task_completed",
         "summary": state.public_summary(),
-        "research_status": review.research_status,
-        "research_status_label": research_verifier.RESEARCH_STATUS_LABELS.get(
-            review.research_status, review.research_status
-        ),
         "verdict": review.verdict,
         "artifacts": [{k: v for k, v in a.items() if k != "local_path"} for a in produced],
     }
+    if research_relevant:
+        yield {
+            "type": "research_status",
+            "status": review.research_status,
+            "label": research_verifier.RESEARCH_STATUS_LABELS.get(review.research_status, review.research_status),
+        }
+        done_event["research_status"] = review.research_status
+        done_event["research_status_label"] = research_verifier.RESEARCH_STATUS_LABELS.get(
+            review.research_status, review.research_status
+        )
+    yield done_event
 
 
 # ── 研究驗證輔助 ─────────────────────────────────────────────

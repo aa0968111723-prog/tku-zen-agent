@@ -406,6 +406,201 @@ function renderMessage(turn, text) {
   scrollChat();
 }
 
+/* ── 研究驗證卡片（反問／來源卡／污染警示） ─────────── */
+
+const SRC_STATUS = {
+  verified: { cls: "st-verified", label: "已驗證" },
+  partially_verified: { cls: "st-partial", label: "部分驗證" },
+  inferred: { cls: "st-inferred", label: "AI 推測" },
+  stale: { cls: "st-stale", label: "資料過期" },
+  conflicted: { cls: "st-conflict", label: "來源衝突" },
+  wrong_entity: { cls: "st-conflict", label: "研究對象錯誤" },
+  insufficient_evidence: { cls: "st-stale", label: "證據不足" },
+};
+
+const RESEARCH_CHIP = {
+  complete: "st-verified",
+  partially_verified: "st-partial",
+  unverified: "st-partial",
+  no_reliable_source: "st-stale",
+  needs_clarification: "st-inferred",
+  blocked: "st-conflict",
+  internal: "st-inferred",
+};
+
+function sendOption(text) {
+  if (!text) return;
+  if (text.endsWith("@") || text.endsWith("：") || text.endsWith(":")) {
+    // 需要使用者補資料（例如 IG 帳號）——放進輸入框讓他接著打
+    $("input").value = text;
+    $("input").focus();
+    $("input").dispatchEvent(new Event("input"));
+    return;
+  }
+  send(text);
+}
+
+function renderClarification(turn, ev) {
+  const card = el("article", "clarify-card");
+  card.appendChild(el("h3", null, ev.school ? "【你指的是哪個社團？】" : "【請確認研究對象】"));
+  card.appendChild(el("p", "clarify-q", ev.question || ""));
+
+  let topic = "";
+  const opts = el("div", "clarify-options");
+  (ev.options || []).forEach((o) => {
+    const b = el("button", null, o.label);
+    b.type = "button";
+    b.addEventListener("click", () => {
+      let text = o.send_text || o.label;
+      if (topic && !text.endsWith("@")) text += "想了解的主題是：" + topic + "。";
+      sendOption(text);
+    });
+    opts.appendChild(b);
+  });
+
+  if (ev.topic_question && (ev.topic_options || []).length) {
+    card.appendChild(el("p", "clarify-q sub", "【" + ev.topic_question + "】（可先選，再點上面的對象）"));
+    const chips = el("div", "topic-chips");
+    (ev.topic_options || []).forEach((t) => {
+      const c = el("button", "chip", t);
+      c.type = "button";
+      c.addEventListener("click", () => {
+        topic = topic === t ? "" : t;
+        chips.querySelectorAll(".chip").forEach((n) => n.classList.toggle("on", n.textContent === topic));
+      });
+      chips.appendChild(c);
+    });
+    card.appendChild(chips);
+  }
+  card.appendChild(opts);
+  turn.appendChild(card);
+  scrollChat();
+}
+
+function renderSourceCards(turn, ev) {
+  const cards = ev.cards || [];
+  const old = turn.querySelector(".sources-wrap");
+  if (old) old.remove();
+  const wrap = el("details", "sources-wrap");
+  wrap.open = cards.length > 0;
+  wrap.appendChild(el("summary", "timeline-sum", cards.length ? "來源卡（" + cards.length + "）" : "來源卡（無可驗證來源）"));
+
+  const bar = el("div", "src-filter");
+  const filters = [
+    ["all", "全部"],
+    ["verified", "只看已驗證"],
+    ["inferred", "查看推測內容"],
+  ];
+  let active = "all";
+  const apply = () => {
+    wrap.querySelectorAll(".source-card").forEach((c) => {
+      const st = c.dataset.status || "";
+      c.hidden =
+        (active === "verified" && st !== "verified") ||
+        (active === "inferred" && st !== "inferred" && st !== "partially_verified");
+    });
+    bar.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.f === active));
+  };
+  filters.forEach(([f, label]) => {
+    const b = el("button", "chip", label);
+    b.type = "button";
+    b.dataset.f = f;
+    b.addEventListener("click", () => {
+      active = f;
+      apply();
+    });
+    bar.appendChild(b);
+  });
+  wrap.appendChild(bar);
+
+  if (!cards.length) {
+    wrap.appendChild(el("p", "empty", "這次研究沒有任何可驗證來源，因此不提供確定結論。"));
+  }
+
+  cards.forEach((c) => {
+    const st = SRC_STATUS[c.status] || SRC_STATUS.insufficient_evidence;
+    const card = el("article", "source-card");
+    card.dataset.status = c.status || "";
+    const head = el("div", "src-head");
+    head.appendChild(el("span", "src-badge " + st.cls, c.status_label || st.label));
+    const who = c.source_scope === "external"
+      ? (c.organization || c.school || "外校來源")
+      : "淡江內部" + (c.academic_term ? "（" + c.academic_term + "）" : "");
+    head.appendChild(el("b", null, who));
+    card.appendChild(head);
+    card.appendChild(el("div", "src-title", c.title || ""));
+    const bits = [];
+    if (c.school && c.source_scope === "external") bits.push("學校：" + c.school);
+    if (c.captured_at) bits.push("來源日期：" + c.captured_at);
+    else if (c.published_at) bits.push("來源日期：" + c.published_at);
+    if (c.source_scope === "internal" && !c.is_current) bits.push("歷史資料，非本學期事實");
+    if (bits.length) card.appendChild(el("div", "src-meta", bits.join("　·　")));
+    if (c.excerpt) {
+      const d = el("details", "src-excerpt");
+      d.appendChild(el("summary", null, "查看原文"));
+      d.appendChild(el("div", "body", c.excerpt));
+      card.appendChild(d);
+    }
+    const actions = el("div", "card-actions");
+    if (c.url) {
+      const a = el("a", null, "開啟來源");
+      a.href = c.url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      actions.appendChild(a);
+    }
+    const report = el("button", null, "回報來源不正確");
+    report.type = "button";
+    report.addEventListener("click", () =>
+      send("來源卡「" + (c.title || c.source_id) + "」的內容或歸屬有誤，請重新查證並更正。")
+    );
+    actions.appendChild(report);
+    if (c.source_scope === "external" && (c.school || c.organization)) {
+      const re = el("button", null, "重新查詢官方來源");
+      re.type = "button";
+      re.addEventListener("click", () =>
+        send("請只用官方公開來源，重新查詢" + (c.organization || c.school) + "的最新公開資料。")
+      );
+      actions.appendChild(re);
+    }
+    card.appendChild(actions);
+    wrap.appendChild(card);
+  });
+  turn.appendChild(wrap);
+  scrollChat();
+}
+
+function renderContamination(turn, ev) {
+  const card = el("article", "contamination");
+  card.appendChild(el("h3", null, "【疑似資料歸屬錯誤】"));
+  card.appendChild(el("p", null, ev.message || "目前內容可能混入淡江內部資料，不能視為外校公開資料。"));
+  (ev.items || []).slice(0, 4).forEach((i) => {
+    const msg = (i.message || "").replace(/[。．]\s*$/, "");
+    card.appendChild(el("div", "cont-item", msg + (i.sentence ? "——「" + i.sentence + "」" : "")));
+  });
+  const actions = el("div", "card-actions");
+  (ev.actions || []).forEach((a) => {
+    const b = el("button", null, a.label);
+    b.type = "button";
+    b.addEventListener("click", () => sendOption(a.send_text));
+    actions.appendChild(b);
+  });
+  card.appendChild(actions);
+  turn.appendChild(card);
+  scrollChat();
+}
+
+function renderResearchStatus(turn, ev) {
+  let chip = turn.querySelector(".research-chip");
+  if (!chip) {
+    chip = el("div", "research-chip");
+    turn.appendChild(chip);
+  }
+  chip.className = "research-chip " + (RESEARCH_CHIP[ev.status] || "st-stale");
+  chip.textContent = "研究狀態：" + (ev.label || ev.status || "");
+  scrollChat();
+}
+
 /* ── 訊息區塊 ──────────────────────────────────────── */
 
 function showPanel(name) {
@@ -813,11 +1008,53 @@ function handleEvent(turn, ev, retry) {
       if (ev.text) renderMessage(turn, ev.text);
       break;
 
-    case "task_completed":
-      progressLine(turn, "done", "●", "完成");
-      finishStep(turn, "done", true);
-      announce("完成");
+    case "clarification_needed":
+      progressLine(turn, "clarify", "?", "需要確認研究對象");
+      finishStep(turn, "clarify", false);
+      renderClarification(turn, ev);
+      announce("需要確認研究對象");
       break;
+
+    case "source_cards":
+      renderSourceCards(turn, ev);
+      break;
+
+    case "answer_review": {
+      const n = (ev.claims || []).length;
+      const ok = (ev.claims || []).filter((c) => c.status === "verified").length;
+      progressLine(
+        turn,
+        "review",
+        "✓",
+        "來源驗證：" + (n ? ok + "/" + n + " 項結論已驗證" : "無外校結論需驗證"),
+        (ev.notices || []).join("；")
+      );
+      finishStep(turn, "review", ev.verdict !== "block");
+      break;
+    }
+
+    case "contamination_warning":
+      progressLine(turn, "review", "✕", "資料歸屬錯誤，已暫停輸出");
+      finishStep(turn, "review", false);
+      renderContamination(turn, ev);
+      announce("資料歸屬錯誤");
+      break;
+
+    case "research_status":
+      renderResearchStatus(turn, ev);
+      break;
+
+    case "task_completed": {
+      const label = ev.research_status_label;
+      const okDone = !ev.research_status || ["complete", "internal", "partially_verified"].includes(ev.research_status);
+      progressLine(turn, "done", "●", label ? label : "完成");
+      finishStep(turn, "done", okDone);
+      if (ev.research_status) {
+        renderResearchStatus(turn, { status: ev.research_status, label: label });
+      }
+      announce(label || "完成");
+      break;
+    }
 
     case "done":
       turn.querySelectorAll(".step.running").forEach((n) => n.classList.remove("running"));
