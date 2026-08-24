@@ -110,6 +110,11 @@ class ChunkMeta:
     def label(self) -> str:
         """給 context builder 顯示的來源標籤。"""
         bits: list[str] = []
+        if self.is_external:
+            # 外校段落一定要亮出歸屬——沒有這個，段落混進 context 之後
+            # 就沒有任何視覺線索提醒「這不是淡江的資料」。
+            owner = self.organization or self.school
+            bits.append(f"外校參考{'：' + owner if owner else '（多校彙整，不屬於單一學校）'}")
         if self.academic_year:
             bits.append(f"{self.academic_year}學年度" + (f"第{self.semester}學期" if self.semester else ""))
         if self.activity:
@@ -188,8 +193,25 @@ def _attribute(meta: ChunkMeta, path: Path, label: str, text: str) -> None:
         meta.is_external = True
         meta.authority_level = "official"
         meta.captured_at = _file_captured_at(path)
-        # 先看段落標題（label 內含 heading 路徑），再看內文；標題最可靠
-        entity = research_entities.match_entity(label) or research_entities.match_entity(text[:400])
+        # 先看段落標題（label 內含 heading 路徑），再看內文；標題最可靠。
+        # 內文改用全段掃描（原本只看前 400 字，實體出現在後半的段落會
+        # 靜默流失歸屬）；且不論標題或內文，同段點名多個外校、或外校與
+        # 淡江同段（比較段落）時，一律視為「多校彙整」——不得整段歸給
+        # 其中一校（稽核漏洞 21、27；對抗審查抓到標題點名兩校仍取最長
+        # 別名歸給單一校的漏洞）。
+        def _sole_external(section_text: str) -> tuple["research_entities.Entity | None", bool]:
+            """回傳 (唯一外校實體或 None, 這一層有沒有命中任何實體)。"""
+            matched = research_entities.match_entities(section_text)
+            externals = [e for e in matched if e.entity_id != research_entities.HOME_ENTITY_ID]
+            if not matched:
+                return None, False
+            if len(externals) == 1 and len(matched) == 1:
+                return externals[0], True
+            return None, True    # 多校或含淡江的比較段 → 彙整
+
+        entity, decided = _sole_external(label)
+        if not decided:
+            entity, _decided = _sole_external(text[:6000])
         if entity is not None and entity.entity_id != research_entities.HOME_ENTITY_ID:
             meta.entity_id = entity.entity_id
             meta.school = entity.school

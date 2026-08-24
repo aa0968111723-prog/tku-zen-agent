@@ -130,8 +130,84 @@ _SCHOOL_BY_ENTITY = {e.school: e for e in EXTERNAL_ENTITIES if e.school}
 _IG_HANDLE = re.compile(r"@([A-Za-z0-9._]{2,40})")
 _URL = re.compile(r"https?://[^\s，。、）)]+")
 
-# 反問後使用者的選項回覆（前端反問卡送出的句型，也接受手打）
-_CLARIFIED_MARKERS = ("正式社團", "學生自辦", "自辦活動", "不確定", "請協助辨識", "幫我辨識")
+# ── 別名詞界防護 ─────────────────────────────────────────────
+# 中文沒有空白詞界，兩字簡稱很容易被前一個字「吞掉」變成別的詞：
+# 「完成大合照」≠ 成大、「老師大概」≠ 師大、「行政大樓」≠ 政大。
+# 對每個容易誤判的簡稱列出「前一個字是這些就不算」的黑名單。
+# 寧可列少不列多——漏擋只是多一次反問，錯擋會讓真正的外校查詢靜默變內部模式。
+_FALSE_PREV: dict[str, str] = {
+    "成大": "完達變組造促養構贊集落改組",
+    "師大": "老講律醫禪導工程牧藥廚設計技分",
+    "政大": "行財家郵憲民內施",
+    "台大": "平舞陽燈檯",
+    "臺大": "平舞陽燈檯",
+    "清大": "澄釐",
+}
+
+# 也會被「後一個字」接走：「成大事」≠ 成大、「台北醫院」≠ 北醫、
+# 「台北藝術節」≠ 北藝、「跨世新聞」≠ 世新、「台北科技大樓」≠ 北科
+# （grok 與對抗審查抓到的反例——致詞裡的「成大事」很常見）。
+# 正式全名（台北科技大學、世新大學）自有較長別名可命中，封短別名不會漏抓。
+_FALSE_NEXT: dict[str, str] = {
+    "成大": "事器業功",
+    "北醫": "院",
+    "北藝": "術",
+    "世新": "聞",
+    "北科": "技",
+}
+
+# 前字黑名單的「救援」：黑名單字其實屬於再前面的動詞時，別名仍是獨立稱呼。
+# 「進行＋政大研究」的「行」屬於「進行」，不是「行政大樓」的「行」
+# （對抗審查抓到的反例：「我想進行政大禪學社社課的研究」曾靜默變內部模式）。
+_PREV_RESCUE: dict[str, str] = {
+    "行": "進執舉履施例推自另先須需再",
+}
+
+
+def alias_mentioned(text: str, alias: str) -> bool:
+    """別名是否真的以「獨立稱呼」出現在文字裡（至少一次未被前後字吞掉）。"""
+    if not alias or alias not in text:
+        return False
+    if len(alias) > 2:
+        return True
+    bad_prev = _FALSE_PREV.get(alias, "")
+    bad_next = _FALSE_NEXT.get(alias, "")
+    if not bad_prev and not bad_next:
+        return True
+    start = 0
+    while True:
+        i = text.find(alias, start)
+        if i == -1:
+            return False
+        prev = text[i - 1] if i > 0 else ""
+        after = text[i + len(alias)] if i + len(alias) < len(text) else ""
+        # 句首／句尾（prev/after 為空）一定算獨立稱呼；
+        # 注意 "" in "…" 恆為 True，不能直接用 in
+        prev_bad = bool(prev and prev in bad_prev)
+        if prev_bad and i >= 2:
+            rescuers = _PREV_RESCUE.get(prev, "")
+            if rescuers and text[i - 2] in rescuers:
+                prev_bad = False    # 「進行政大…」：行 屬於 進行
+        swallowed = prev_bad or (after and after in bad_next)
+        if not swallowed:
+            return True
+        start = i + 1
+
+
+# 反問後使用者的回覆句型（前端反問卡的 send_text 模板，也接受相同語意的手打）。
+# 兩層限制（對抗審查抓到「不確定」子字串誤觸）：
+#   1. 只有上一輪真的發過反問才比對（狀態式）。
+#   2. 比對的是「在回覆社團辨識問題」的句型，不是子字串——
+#      awaiting 期間講「我還不確定活動日期」不算澄清回覆。
+_CLARIFIED_PATTERNS = (
+    re.compile(r"我?指的是.{0,14}(正式社團|學生自辦|自辦活動|Instagram|IG|帳號)"),
+    re.compile(r"不確定.{0,8}(是)?(哪個|哪一個|哪些)?(社團|帳號|學校)"),
+    re.compile(r"(請協助辨識|幫我辨識)"),
+)
+
+
+def _is_clarified_reply(text: str) -> bool:
+    return any(p.search(text) for p in _CLARIFIED_PATTERNS)
 
 
 class ResearchMode(str, Enum):
@@ -226,11 +302,106 @@ def _short_school(school: str) -> str:
     return school or "該校"
 
 
+def clarification_for_school(school: str) -> ClarificationRequest:
+    """依學校名直接組反問卡。
+
+    給「跨輪繼承」用：上一輪反問了政大、這一輪使用者只說「那他們的茶會呢」
+    ——這句話本身解析不出任何 unresolved，反問卡要從繼承的 scope 生出來。
+    """
+    res = EntityResolution()
+    res.unresolved.append(
+        UnresolvedMention(mention=_short_school(school), school=school, reason="no_registered_club")
+    )
+    clarification = res.clarification()
+    assert clarification is not None
+    return clarification
+
+
+def generic_clarification() -> ClarificationRequest:
+    """完全不知道研究對象時的反問卡（外部研究模式但沒點名學校）。"""
+    return ClarificationRequest(
+        school="",
+        question="你想研究哪個對象？請告訴我學校名稱、正式社團名稱、Instagram 帳號或網址。",
+        options=[
+            {"label": "已收錄的外校社團",
+             "send_text": "請列出目前已收錄公開資料的外校社團，我再從裡面選。"},
+            {"label": "我提供 IG 帳號",
+             "send_text": "我要研究的帳號是：@"},
+            {"label": "我不確定，請協助辨識",
+             "send_text": "我不確定要研究哪個社團，請協助辨識，先告訴我有哪些查得到的公開帳號。"},
+        ],
+        topic_question="你想查哪一類？",
+        topic_options=["茶會內容", "招生文案", "活動流程", "Instagram 經營", "社團定位", "其他"],
+    )
+
+
+def mode_conflict_clarification(school: str) -> ClarificationRequest:
+    """模式選了「淡江內部」但訊息點名外校時的確認卡。
+
+    不能靜默清掉外校對象（那會拿淡江資料回答政大問題——事故重演），
+    也不能無視使用者選的模式，所以先問清楚。
+    """
+    short = _short_school(school)
+    return ClarificationRequest(
+        school=school,
+        question=(
+            f"你目前選擇「只用淡江內部資料」，但這句話提到了{short}。"
+            "內部資料庫沒有其他學校的資料，要怎麼處理？"
+        ),
+        options=[
+            {"label": f"改成研究{short}",
+             "send_text": f"改用外校研究模式，研究{short}，請只使用可驗證的官方公開來源。"},
+            {"label": "維持內部模式",
+             "send_text": "維持只用淡江內部資料回答，內容不要提到其他學校。"},
+        ],
+    )
+
+
+def apply_requested(
+    resolution: EntityResolution,
+    *,
+    school: str = "",
+    entity_id: str = "",
+) -> EntityResolution:
+    """把前端結構化欄位（研究對象下拉、entity_id）併入解析結果。
+
+    結構化欄位比從句子裡猜可靠，所以直接補進 resolution；
+    但仍走同一套 registry 規則——沒有已驗證來源的學校一樣要反問。
+    """
+    if entity_id:
+        entity = entity_by_id(entity_id)
+        if entity is not None and entity.entity_id != HOME_ENTITY_ID:
+            if entity.has_sources and entity not in resolution.external:
+                resolution.external.append(entity)
+            elif not entity.has_sources and entity not in resolution.no_source_entities:
+                resolution.no_source_entities.append(entity)
+    if school:
+        full = SCHOOL_ALIASES.get(school.strip(), school.strip())
+        if full and full != HOME_SCHOOL:
+            already = {e.school for e in resolution.external_targets()}
+            already |= {u.school for u in resolution.unresolved}
+            if full not in already:
+                entity = _SCHOOL_BY_ENTITY.get(full)
+                if entity is not None:
+                    resolution.external.append(entity)
+                else:
+                    no_source = next(
+                        (e for e in EXTERNAL_ENTITIES if e.school == full and not e.has_sources), None,
+                    )
+                    if no_source is not None:
+                        resolution.no_source_entities.append(no_source)
+                    else:
+                        resolution.unresolved.append(
+                            UnresolvedMention(mention=school.strip(), school=full, reason="no_registered_club")
+                        )
+    return resolution
+
+
 def _find_aliases(message: str) -> list[tuple[str, Entity]]:
     hits: list[tuple[str, Entity]] = []
     for entity in ALL_ENTITIES:
         for alias in sorted(entity.aliases, key=len, reverse=True):
-            if alias in message:
+            if alias_mentioned(message, alias):
                 hits.append((alias, entity))
                 break
     return hits
@@ -245,19 +416,58 @@ def match_entity(text: str) -> Entity | None:
     best: tuple[int, Entity] | None = None
     for entity in ALL_ENTITIES:
         for alias in (entity.name, *entity.aliases):
-            if alias in text and (best is None or len(alias) > best[0]):
+            if alias_mentioned(text, alias) and (best is None or len(alias) > best[0]):
                 best = (len(alias), entity)
     return best[1] if best else None
 
 
-def resolve(message: str) -> EntityResolution:
-    """解析一句話裡的研究對象。規則式、確定性。"""
+def match_entities(text: str) -> list[Entity]:
+    """一段文字裡出現的**所有**實體（去重）。
+
+    給 chunk 歸屬用：同一段落點名多個外校時，不能整段歸給其中一校
+    ——那是「多校彙整」，不屬於任何單一實體的證據。
+    """
+    found: list[Entity] = []
+    for entity in ALL_ENTITIES:
+        for alias in (entity.name, *entity.aliases):
+            if alias_mentioned(text, alias):
+                if entity not in found:
+                    found.append(entity)
+                break
+    return found
+
+
+def mentions_external_school(text: str) -> bool:
+    """文字是否明確提到非淡江的學校、社團或組織（詞界防護後）。
+
+    skill 路由的外校意圖閘門與 working memory 的事實隔離都用這個，
+    確保「學校清單」只有一份（本 registry），不會兩邊漂移。
+    """
+    if not text:
+        return False
+    for alias, full in SCHOOL_ALIASES.items():
+        if full != HOME_SCHOOL and alias_mentioned(text, alias):
+            return True
+    for entity in EXTERNAL_ENTITIES:
+        for alias in (entity.name, *entity.aliases):
+            if alias_mentioned(text, alias):
+                return True
+    return False
+
+
+def resolve(message: str, *, awaiting_clarification: bool = False) -> EntityResolution:
+    """解析一句話裡的研究對象。規則式、確定性。
+
+    ``awaiting_clarification``：上一輪是否真的發出過反問。
+    只有在等待反問回覆時，「正式社團」「不確定」這些字樣才算澄清回覆；
+    平常出現（「我不確定政大的社課時間」）不能拿來跳過反問。
+    """
     res = EntityResolution()
     text = message.strip()
     if not text:
         return res
 
-    res.clarified = any(m in text for m in _CLARIFIED_MARKERS)
+    res.clarified = awaiting_clarification and _is_clarified_reply(text)
 
     matched_schools: set[str] = set()
 
@@ -298,7 +508,7 @@ def resolve(message: str) -> EntityResolution:
     # 3. 學校名稱。對到學校但沒對到社團 → 看 registry 有沒有該校唯一條目；
     #    沒有（政大就是這種）→ unresolved，必須反問。
     for alias in sorted(SCHOOL_ALIASES, key=len, reverse=True):
-        if alias not in text:
+        if not alias_mentioned(text, alias):
             continue
         school = SCHOOL_ALIASES[alias]
         if school in matched_schools:
@@ -328,7 +538,18 @@ def resolve(message: str) -> EntityResolution:
 
 _INTERNAL_ONLY = re.compile(r"(只用|僅用|只使用|僅使用|只看|只查).{0,6}(淡江|淡大|本社|內部)|內部資料(就好|即可)")
 _COMPARE_HINTS = re.compile(r"(比較|對比|差異|參考|借鏡|學習|淡江可以|我們可以|怎麼改良)")
-_EXTERNAL_HINTS = re.compile(r"(其他學校|外校|別的學校|他校|各校|公開資料|官方IG|官方 IG|官方帳號)")
+# 泛稱外校研究的詞彙——skill 路由閘門與 decide_scope 共用同一份，
+# 兩邊清單漂移會讓「研究其他大學」路由到研究工具、scope 卻停在內部，
+# dispatch 閘門再把工具全擋掉（對抗審查抓到的回歸）。
+_EXTERNAL_HINTS = re.compile(
+    r"(其他學校|其他大學|外校|他校|別的學校|別校|跨校|各校|大專院校|"
+    r"公開\s*IG|公開\s*ig|公開帳號|官方IG|官方 IG|官方帳號)"
+)
+
+
+def has_generic_external_hint(text: str) -> bool:
+    """是否出現「研究別的學校」的泛稱訊號（沒點名哪一所）。"""
+    return bool(_EXTERNAL_HINTS.search(text or ""))
 
 
 @dataclass

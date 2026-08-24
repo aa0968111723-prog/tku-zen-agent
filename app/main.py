@@ -6,6 +6,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import contextvars
 import json
 import logging
 import threading
@@ -153,6 +154,11 @@ class ChatRequest(BaseModel):
     destination: str = config.DEFAULT_DESTINATION
     model: str | None = None
     attachments: list[ImageAttachment] = Field(default_factory=list, max_length=2)
+    # 結構化研究欄位（政大事故後新增）：前端表單明確指定研究模式與對象時，
+    # 不再只靠一句 prose 讓後端猜。全部可選，舊前端不帶也完全相容。
+    research_mode: str | None = Field(default=None, pattern=r"^(internal|external|comparative)$")
+    research_school: str | None = Field(default=None, max_length=40)
+    research_entity_id: str | None = Field(default=None, max_length=80)
 
 
 class VisualGenerateRequest(BaseModel):
@@ -793,17 +799,34 @@ async def chat(req: ChatRequest, user_id: str = Depends(current_user)) -> Stream
 
     async def stream():
         yield _sse({"type": "session", "session_id": session_id})
+        requested = {
+            k: v
+            for k, v in {
+                "mode": req.research_mode,
+                "school": req.research_school,
+                "entity_id": req.research_entity_id,
+            }.items()
+            if v
+        }
         agen = orchestrator.run_turn(
             ctx_mod.RequestContext(user_id=user_id, session_id=session_id),
             req.message,
             destination=req.destination,
             model=req.model,
             attachments=attachments,
+            requested=requested or None,
         )
         cancel_wait = asyncio.create_task(cancel_event.wait())
+        # 整條串流的所有 __anext__ 都要跑在**同一個** Context：
+        # 每個事件各開新 task 會讓 contextvars（RequestContext、研究範圍）
+        # 只活在第一個 task 的複本裡——後續工具執行拿不到身分與 scope，
+        # 產生器收尾時 use() 的 token reset 還會因 context 不同拋 ValueError，
+        # 讓每一輪結尾都多出一個假的「系統忙碌中」錯誤事件。
+        # 同一時間只有一個 __anext__ 在跑，共用 Context 是安全的。
+        stream_ctx = contextvars.copy_context()
         try:
             while True:
-                next_event = asyncio.create_task(agen.__anext__())
+                next_event = asyncio.create_task(agen.__anext__(), context=stream_ctx)
                 done, _pending = await asyncio.wait(
                     {next_event, cancel_wait}, return_when=asyncio.FIRST_COMPLETED
                 )

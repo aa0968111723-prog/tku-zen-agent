@@ -1,0 +1,8 @@
+compare followup: internal [] inherited: None skill: knowledge
+clarify reply: external ['國立政治大學'] pending: False
+台大領袖社: ['ntu-lead'] []
+apply 政大: [UnresolvedMention(mention='政大', school='國立政治大學', reason='no_registered_club')]
+apply 北醫: ['tmu-zen']
+apply home entity: [] []
+prev3 skill: event_planning internal
+restart w/ school: external ['tmu-zen'] skill: event_planning artifacts: ['document'] plan: ['查社團知識庫與歷年範例', '建立或更新這場活動的正式資料', '建立文件', '檢查產出是否符合社團規範', '交付並說明後續步驟']

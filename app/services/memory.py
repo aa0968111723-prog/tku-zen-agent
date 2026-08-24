@@ -132,15 +132,41 @@ def reconcile_progress(current: OrchestrationState, previous: OrchestrationState
 
 # ── 事實 ─────────────────────────────────────────────────────
 
+def _clause_around(text: str, pos: int) -> str:
+    """取出包住 pos 的子句。
+
+    以句號**與逗號**切——「我們社長是林小華，北科的社長是王小明」是兩個
+    子句，不能因為後半句有外校名就把前半句的淡江事實一起丟掉
+    （grok 審查抓到的反例）。
+    """
+    seps = "。！？!?；;\n，,、"
+    start = max((text.rfind(ch, 0, pos) for ch in seps), default=-1)
+    ends = [i for i in (text.find(ch, pos) for ch in seps) if i != -1]
+    end = min(ends) if ends else len(text)
+    return text[start + 1 : end]
+
+
 def extract_facts(text: str) -> dict[str, str]:
-    """從使用者訊息裡抓出已確認的事實。"""
+    """從使用者訊息裡抓出已確認的事實。
+
+    子句裡提到其他學校的不收——「北科的社長是王小明」寫進
+    working_memory 後，每一輪都會以「可以直接採用」注入 prompt，
+    變成無人把關的跨校事實污染（稽核漏洞 32）。
+    同一欄位在一句話裡出現多次時，逐一檢查每個命中，
+    取第一個「乾淨子句」的值。
+    """
+    from ..research import entities as research_entities
+
     found: dict[str, str] = {}
     for label, pattern in FACT_PATTERNS:
-        m = pattern.search(text)
-        if m:
+        for m in pattern.finditer(text):
             value = m.group(1).strip()
-            if value and value not in {"什麼", "多少", "誰", "哪裡"}:
-                found[label] = value[:120]
+            if not value or value in {"什麼", "多少", "誰", "哪裡"}:
+                continue
+            if research_entities.mentions_external_school(_clause_around(text, m.start())):
+                continue
+            found[label] = value[:120]
+            break
     return found
 
 
@@ -179,21 +205,30 @@ def recent_artifacts(store: SessionStore, user_id: str, project_id: str, limit: 
     return [a.public() for a in store.list_artifacts(user_id, project_id=project_id, limit=limit)]
 
 
-def retrieval_cache_key(queries: list[str], task_type: str) -> str:
-    value = json.dumps({"queries": queries, "task_type": task_type}, ensure_ascii=False, sort_keys=True)
+def retrieval_cache_key(queries: list[str], task_type: str, scope: dict[str, Any] | None = None) -> str:
+    """快取鍵一定要含研究範圍——沒有它，換了研究對象仍會命中舊 context
+    （拿淡江 context 回外校問題），這是政大事故的助長因素之一。"""
+    value = json.dumps(
+        {"queries": queries, "task_type": task_type, "scope": scope or {}},
+        ensure_ascii=False, sort_keys=True,
+    )
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def get_cached_context(store: SessionStore, project_id: str, queries: list[str], task_type: str, fingerprint: str) -> dict[str, Any] | None:
-    return store.get_retrieval_cache(project_id, retrieval_cache_key(queries, task_type), fingerprint)
+def get_cached_context(
+    store: SessionStore, project_id: str, queries: list[str], task_type: str, fingerprint: str,
+    scope: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    return store.get_retrieval_cache(project_id, retrieval_cache_key(queries, task_type, scope), fingerprint)
 
 
 def save_cached_context(
     store: SessionStore, project_id: str, queries: list[str], task_type: str, fingerprint: str,
     context_text: str, meta: dict[str, Any],
+    scope: dict[str, Any] | None = None,
 ) -> None:
     store.cache_retrieval(
-        project_id, retrieval_cache_key(queries, task_type), fingerprint,
+        project_id, retrieval_cache_key(queries, task_type, scope), fingerprint,
         "\n".join(queries), context_text, meta,
     )
 

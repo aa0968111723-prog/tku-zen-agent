@@ -26,9 +26,24 @@ class RequestContext:
 
 _ctx: ContextVar[RequestContext | None] = ContextVar("tku_request_context", default=None)
 
+# 本輪的研究範圍（ResearchScope.to_dict()）。
+# 工具（search_knowledge、search_previous_examples）要靠它判斷：
+# 外部研究模式下，淡江內部資料不得作為外校證據。
+# 存 dict 而不是 dataclass，避免 services 層反向依賴 research 層。
+_research_scope: ContextVar[dict | None] = ContextVar("tku_research_scope", default=None)
+
 
 def current() -> RequestContext | None:
     return _ctx.get()
+
+
+def set_research_scope(scope: dict | None) -> None:
+    """orchestrator 在檢索與工具執行前設定本輪研究範圍。"""
+    _research_scope.set(scope)
+
+
+def research_scope() -> dict | None:
+    return _research_scope.get()
 
 
 def require_user() -> str:
@@ -53,4 +68,11 @@ def use(ctx: RequestContext) -> Iterator[RequestContext]:
     try:
         yield ctx
     finally:
-        _ctx.reset(token)
+        try:
+            _ctx.reset(token)
+        except ValueError:
+            # async generator 的收尾（aclose）可能發生在跟啟動時不同的
+            # asyncio task／Context——token 不屬於目前 context 時直接清空。
+            # 各 task 的 context 是複本，清空不會影響其他請求。
+            _ctx.set(None)
+            _research_scope.set(None)

@@ -15,7 +15,7 @@ import re
 from ..research import entities as research_entities
 from ..research.entities import EntityResolution, ResearchMode, ResearchScope
 from ..services import current_term as term_service
-from ..skills import SKILL_BY_NAME, Routing, is_continuation_only, route
+from ..skills import SKILL_BY_NAME, Routing, is_continuation_only, is_lookup, route, wants_artifact
 from .state import OrchestrationState, PlanStep, Stage, TaskType, WorkflowStatus
 
 # 這些問題問的是「今年的事實」，一定要先查當期狀態
@@ -77,11 +77,19 @@ def build_retrieval_queries(
 
     # 外部研究對象的專屬查詢放最前面
     if scope is not None and scope.mode in {ResearchMode.EXTERNAL, ResearchMode.COMPARATIVE}:
+        covered_schools: set[str] = set()
         for eid in scope.target_entities:
             entity = research_entities.entity_by_id(eid)
             if entity is not None:
                 queries.append(f"{entity.name} {cleaned[:40]}".strip())
                 queries.append(entity.name)
+                if entity.school:
+                    covered_schools.add(entity.school)
+        # 只解析到學校、還沒對到正式社團（政大就是這種）：用學校名下查詢，
+        # 讓外部參考庫有機會命中，也讓「查不到」的結論對準正確對象。
+        for school in scope.target_schools:
+            if school not in covered_schools:
+                queries.append(f"{school} {cleaned[:40]}".strip())
         if scope.generic_external:
             queries.append(f"外校 社群 {cleaned[:40]}".strip())
 
@@ -187,37 +195,180 @@ def verification_rules_for(routing: Routing) -> list[str]:
     return rules
 
 
-def understand(message: str) -> tuple[OrchestrationState, Routing]:
+# 代名詞／延續語 follow-up：這句話沒有點名任何對象，但明顯在講「剛才那個」。
+# 「政大呢」事故的殘餘路徑之一：反問政大之後使用者接「那他們的茶會呢」，
+# 若這句被當成全新的內部任務，檢索就會拿淡江資料回答政大的問題。
+#
+# 收緊規則（grok 審查與對抗審查抓到的反例）：
+#   · 明確指代（他們／該校／對方／那個學校）才是強訊號——但「幹部他們」
+#     的「他們」指的是本社幹部，要先剝掉「內部先行詞＋他們」再判斷。
+#   · 句尾「呢」只是弱訊號：只有在**上一輪反問還沒被回答**（awaiting）時
+#     才算延續；外校研究做完之後，「今年社費多少呢」是全新的內部問題。
+#     產檔請求（「幫我寫一份社課企劃書呢」）與事實查詢（「社費多少呢」）
+#     都不能因為一個語尾詞被鎖回外校研究。
+#   · 「我們／本社」出現只否決弱訊號——「比較他們跟本社的差異」帶明確
+#     指代，是比較分析，不是純內部問題。
+_FOLLOWUP_STRONG = re.compile(
+    r"(他們|她們|它們|該校|對方|那(?:個|間|所)?(?:學校|社團|帳號))"
+)
+_INTERNAL_ANTECEDENT = re.compile(
+    r"(幹部|社員|組員|學員|新生|同學|講師|組輔|家族長|總召|夥伴)們?(的)?(他們|她們|它們)"
+)
+_FOLLOWUP_WEAK_NE = re.compile(r"呢[?？]?\s*$")
+_HOME_SELF = re.compile(r"(我們|本社|咱們)")
+
+
+def _is_scope_followup(message: str, resolution: EntityResolution, awaiting: bool) -> bool:
+    """訊息沒有出現任何新對象，且帶有指向上一輪研究對象的語氣。"""
+    if resolution.external_targets() or resolution.unresolved or resolution.user_provided_accounts:
+        return False
+    text = message.strip()
+    # 「幹部他們的分工」：他們指本社幹部，剝掉後再看剩不剩指代詞
+    stripped = _INTERNAL_ANTECEDENT.sub("", text)
+    if _FOLLOWUP_STRONG.search(stripped):
+        return True
+    if resolution.home_mentioned or _HOME_SELF.search(text):
+        return False
+    # 句尾「呢」（弱訊號）：只在反問未回答期間、且不是產檔請求或
+    # 內部事實查詢（「今年社費多少呢」要的是內部答案）時才算延續。
+    if not awaiting:
+        return False
+    return (
+        bool(_FOLLOWUP_WEAK_NE.search(text))
+        and not wants_artifact(text)
+        and not is_lookup(text)
+    )
+
+
+def understand(
+    message: str,
+    previous: OrchestrationState | None = None,
+    requested: dict | None = None,
+) -> tuple[OrchestrationState, Routing]:
     """Understand → Plan。回傳初始化好的狀態。
 
     政大事故後：這裡先做**實體解析**再做其他事。研究對象是誰、
     用哪種研究模式，在任何檢索發生之前就定案，並寫進 state 讓
     檢索與回答閘門共用同一份範圍。
+
+    ``previous``：同一 session 上一輪的任務狀態。用來：
+      · 判斷「這句是不是反問的回覆」（狀態式，不再靠子字串猜）
+      · 代名詞 follow-up（「那他們的茶會呢」）繼承上一輪的研究範圍
+    ``requested``：前端傳來的結構化欄位（mode / school / entity_id），
+    比從句子裡猜可靠，優先採用。
     """
     routing = route(message)
+    requested = requested or {}
 
     # ── 實體解析與研究模式 ────────────────────────────────
-    resolution = research_entities.resolve(message)
+    awaiting = bool(previous is not None and previous.completion_status == "needs_clarification")
+    resolution = research_entities.resolve(message, awaiting_clarification=awaiting)
+    if requested.get("school") or requested.get("entity_id"):
+        resolution = research_entities.apply_requested(
+            resolution,
+            school=str(requested.get("school") or ""),
+            entity_id=str(requested.get("entity_id") or ""),
+        )
     scope = research_entities.decide_scope(message, resolution, routing.skill.task_type)
+
+    # 前端明確選了模式 → 蓋過語句推斷
+    requested_mode = str(requested.get("mode") or "").strip()
+    mode_conflict_school = ""
+    if requested_mode == "internal":
+        # 選了內部模式但訊息點名外校 → **不靜默清空**（那會拿淡江資料
+        # 回答政大問題——事故重演），改為記下衝突、稍後反問確認。
+        conflict_targets = resolution.external_targets()
+        if conflict_targets:
+            mode_conflict_school = conflict_targets[0].school or conflict_targets[0].name
+        elif resolution.unresolved:
+            mode_conflict_school = resolution.unresolved[0].school
+        scope = ResearchScope(mode=ResearchMode.INTERNAL, internal_only_requested=True)
+        resolution.external = []
+        resolution.no_source_entities = []
+        resolution.unresolved = []
+    elif requested_mode in {"external", "comparative"} and (
+        scope.target_entities or scope.target_schools or resolution.unresolved
+    ):
+        scope.mode = ResearchMode(requested_mode)
+
+    # ── 跨輪繼承：代名詞 follow-up 沿用上一輪研究範圍 ────
+    # 「政大呢」反問後接「那他們的茶會呢」：這句解析不出對象，
+    # 但研究對象仍是政大——不繼承就會靜默退回內部模式拿淡江資料作答。
+    # requested_mode=external/comparative 不阻止繼承（前端表單選了外校
+    # 研究但沒選學校時，代名詞句更需要繼承——對抗審查發現 8）。
+    inherited = False
+    if (
+        previous is not None
+        and requested_mode != "internal"
+        and scope.mode == ResearchMode.INTERNAL
+        and not scope.internal_only_requested
+        and previous.research_mode in {"external", "comparative"}
+        and (previous.target_entities or previous.target_schools)
+        and (_is_scope_followup(message, resolution, awaiting) or (awaiting and resolution.clarified))
+    ):
+        scope = ResearchScope.from_dict(previous.research_scope or {})
+        if scope.mode == ResearchMode.INTERNAL:
+            scope.mode = ResearchMode(previous.research_mode)
+        scope.target_entities = list(previous.target_entities)
+        scope.target_schools = list(previous.target_schools)
+        inherited = True
+        if requested_mode in {"external", "comparative"}:
+            scope.mode = ResearchMode(requested_mode)
+        if resolution.home_mentioned and scope.mode == ResearchMode.EXTERNAL:
+            # 「比較他們跟本社的差異」：同時指涉外校與本社 → 比較分析
+            scope.mode = ResearchMode.COMPARATIVE
+        if wants_artifact(message) and scope.mode == ResearchMode.EXTERNAL:
+            # 「幫我寫給對方的邀請函」：明確要產出檔案、外校只是語境
+            # → 比較分析模式，保留產檔工具；防冒名由驗證層把關。
+            # 注意用 wants_artifact（明確產檔動詞）而不是 routing.produce_artifact
+            # ——後者對「那他們的茶會呢」也是 True（skill 預設會產檔）。
+            scope.mode = ResearchMode.COMPARATIVE
+
+    # 前端選了外校研究、但句子與繼承都給不出任何研究對象
+    # → 一定要反問，不得靜默退回內部模式（對抗審查發現 8 的 backstop）。
+    force_clarification = bool(
+        requested_mode in {"external", "comparative"}
+        and not scope.target_entities
+        and not scope.target_schools
+        and not resolution.unresolved
+        and not resolution.user_provided_accounts
+        and not scope.generic_external
+    )
+    if force_clarification:
+        scope.mode = ResearchMode(requested_mode)
+
     # 複合任務（外校研究 → 淡江網宣）一定是比較分析：網宣步驟需要淡江內部資料
     if routing.task_sequence and scope.mode == ResearchMode.EXTERNAL:
         scope.mode = ResearchMode.COMPARATIVE
 
-    # 訊息點名了外校，但路由落在一般查詢／文件 → 改走外校社群研究，
-    # 讓後面的檢索與驗證都按外部研究的規矩來。
-    if (
-        scope.mode in {ResearchMode.EXTERNAL, ResearchMode.COMPARATIVE}
-        and routing.skill.name in {"knowledge", "documents"}
-        and not routing.task_sequence
-    ):
+    # 涉及外校的請求，一律改按外部研究的規矩檢索與驗證：
+    #   · EXTERNAL（純研究外校）→ 不論原路由落在哪個 skill，都不得使用
+    #     淡江產檔／活動工具去「做出」外校的東西——「北醫禪學社的茶會怎麼做」
+    #     若留在 event_planning，就會拿淡江範本假裝北醫做法。
+    #   · COMPARATIVE → 只把一般查詢／文件改走研究；帶產出的比較任務
+    #     （「參考北醫做法寫淡江貼文」）保留原 skill，由防冒名驗證把關。
+    if not routing.task_sequence:
         import dataclasses
 
-        routing = dataclasses.replace(
-            routing,
-            skill=SKILL_BY_NAME["social_research"],
-            runner_up=routing.skill.name,
-            produce_artifact=False,
-        )
+        if scope.mode == ResearchMode.EXTERNAL and routing.skill.name != "social_research":
+            routing = dataclasses.replace(
+                routing,
+                skill=SKILL_BY_NAME["social_research"],
+                runner_up=routing.skill.name,
+                produce_artifact=False,
+                task_sequence=(),
+            )
+        elif (
+            scope.mode == ResearchMode.COMPARATIVE
+            and routing.skill.name in {"knowledge", "documents"}
+            and not routing.produce_artifact
+        ):
+            routing = dataclasses.replace(
+                routing,
+                skill=SKILL_BY_NAME["social_research"],
+                runner_up=routing.skill.name,
+                produce_artifact=False,
+            )
 
     needs_artifact = routing.produce_artifact and bool(routing.skill.artifacts_expected)
 
@@ -232,10 +383,27 @@ def understand(message: str) -> tuple[OrchestrationState, Routing]:
     state.research_scope = scope.to_dict()
     state.target_entities = list(scope.target_entities)
     state.target_schools = list(scope.target_schools)
-    state.clarification_pending = (
+    pending = (
         scope.mode in {ResearchMode.EXTERNAL, ResearchMode.COMPARATIVE}
         and resolution.needs_clarification
     )
+    if (
+        inherited
+        and awaiting
+        and not resolution.clarified
+        and not scope.target_entities
+    ):
+        # 上一輪的反問還沒被回答，follow-up 換了問法也一樣要先確認對象
+        pending = True
+    if force_clarification:
+        pending = True
+    if mode_conflict_school:
+        # 內部模式 vs 訊息點名外校的衝突：先確認再回答
+        pending = True
+        state.metrics["mode_conflict_school"] = mode_conflict_school
+    state.clarification_pending = pending
+    if inherited:
+        state.metrics["scope_inherited"] = True
     state.required_facts = detect_required_facts(message, routing.skill.required_facts)
     state.retrieval_queries = build_retrieval_queries(message, routing, scope, resolution)
     expected = [routing.preferred_artifact] if routing.preferred_artifact else list(routing.skill.artifacts_expected)
@@ -261,12 +429,40 @@ def continue_previous(
     """還原上一個未完成任務，不建立新的任務圖，也不丟掉已完成步驟。"""
     routing = route(previous.intent)
     state = OrchestrationState.from_dict(previous.to_dict())
-    state.intent = message.strip()[:300] or previous.intent
+    # intent 保留原任務描述——續接語（「接著做」）沒有路由訊號，
+    # 拿它覆寫 intent 會讓下一次續接 route("接著做") 得分全 0（稽核漏洞 10）。
+    state.intent = previous.intent or message.strip()[:300]
     state.stage = Stage.EXECUTE
     state.workflow_status = WorkflowStatus.IN_PROGRESS
     state.completion_status = "in_progress"
     # tool_rounds 是單次請求的安全上限，不可跨續接累加，否則長任務幾輪後會被誤判成無限迴圈。
     state.tool_rounds = 0
+
+    # 續接時重新解析這句話——「接續剛才，改研究北醫」要更新研究對象，
+    # 不能默默沿用舊 scope（稽核殘餘路徑 E）。
+    resolution = research_entities.resolve(message)
+    new_targets = resolution.external_targets()
+    if new_targets or resolution.unresolved:
+        scope = research_entities.decide_scope(message, resolution, routing.skill.task_type)
+        mode_changed = scope.mode.value != previous.research_mode
+        targets_changed = (
+            set(scope.target_entities) != set(previous.target_entities)
+            or set(scope.target_schools) != set(previous.target_schools)
+        )
+        if mode_changed or targets_changed:
+            # 研究對象或模式變了 → 舊任務圖（產檔步驟、驗證規則、檢索查詢）
+            # 全部不能沿用，整個重建——只換 scope 會讓淡江產檔管線
+            # 繼續做「北醫茶會」文件（對抗審查發現 2）。
+            return understand(message, previous=previous)
+        state.research_mode = scope.mode.value
+        state.research_scope = scope.to_dict()
+        state.target_entities = list(scope.target_entities)
+        state.target_schools = list(scope.target_schools)
+        state.clarification_pending = (
+            scope.mode in {ResearchMode.EXTERNAL, ResearchMode.COMPARATIVE}
+            and resolution.needs_clarification
+        )
+
     state.next_action = state.next_step().description if state.next_step() else ""
     return state, routing
 

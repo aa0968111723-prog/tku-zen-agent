@@ -10,6 +10,7 @@ from .. import retrieval
 from ..rag import parse
 from ..rag.hybrid import hybrid_search
 from ..services import current_term as term_service
+from .knowledge import _attribution_notes, internal_data_guard
 
 MAX_SNIPPET = 1400
 
@@ -18,6 +19,10 @@ def search_previous_examples(query: str, document_type: str = "", top_k: int = 4
     query = (query or "").strip()
     if not query:
         return {"ok": False, "message": "query 是空的。請說明你要找什麼歷年檔案。"}
+
+    blocked = internal_data_guard("歷年檔案")
+    if blocked is not None:
+        return blocked
 
     top_k = max(1, min(int(top_k or 4), 8))
     combined = f"{query} {document_type}".strip()
@@ -57,17 +62,21 @@ def search_previous_examples(query: str, document_type: str = "", top_k: int = 4
         text = h.chunk.text.strip()
         if len(text) > MAX_SNIPPET:
             text = text[:MAX_SNIPPET] + "…（略）"
-        header = f"【歷年檔案】{h.chunk.source}"
+        header = f"【歷年檔案｜淡江內部資料】{h.chunk.source}"
         if label:
             header += f"（{label}）"
         blocks.append(f"{header}\n{text}")
 
+    scope_header, mismatch = _attribution_notes(query)
     return {
         "ok": True,
         "hit_count": len(archive),
         "message": (
-            "以下是往年的真實檔案，**格式、章節、寫法可以照抄，"
-            "但裡面的日期、人名、金額、人數都是當年的，不可以當成今年的事實**：\n\n"
+            scope_header
+            + mismatch
+            + "以下是淡江大學領袖禪學社往年的真實檔案，**格式、章節、寫法可以照抄，"
+            "但裡面的日期、人名、金額、人數都是當年的，不可以當成今年的事實，"
+            "也不得寫成其他學校的資料**：\n\n"
             + "\n\n───────────\n\n".join(blocks)
             + "\n\n───────────\n"
             "今年的資料一律以 get_current_term 為準；那裡沒有的就填「待填」。"

@@ -34,9 +34,34 @@ def test_zhengda_zen_club_is_still_unresolved():
 
 
 def test_clarified_reply_is_not_asked_again():
-    res = E.resolve("我指的是政大的正式社團，請只使用可驗證的官方公開來源研究。")
+    """反問回覆只有在「上一輪真的發過反問」時才算數（狀態式）。"""
+    res = E.resolve(
+        "我指的是政大的正式社團，請只使用可驗證的官方公開來源研究。",
+        awaiting_clarification=True,
+    )
     assert res.clarified
     assert not res.needs_clarification     # 不再反問，改走「查無來源」誠實回覆
+
+
+def test_clarified_markers_do_not_bypass_on_first_message():
+    """稽核漏洞 D：首句剛好含「不確定」不得跳過反問。"""
+    res = E.resolve("我不確定政大的社課時間，可以查一下嗎")
+    assert not res.clarified
+    assert res.needs_clarification
+
+
+def test_short_alias_swallowed_by_previous_char_is_not_a_school():
+    """詞界防護：「完成大合照」≠ 成大、「老師大概」≠ 師大、「行政大樓」≠ 政大。"""
+    for text in ("挑戰營最後要完成大合照", "老師大概會晚十分鐘到", "在行政大樓集合"):
+        res = E.resolve(text)
+        assert not res.external and not res.unresolved and not res.no_source_entities, text
+        assert not E.mentions_external_school(text), text
+
+
+def test_full_school_name_still_resolves():
+    """全名「政治大學」也要能觸發實體解析（不再只認簡稱）。"""
+    res = E.resolve("研究政治大學的禪學社")
+    assert [u.school for u in res.unresolved] == ["國立政治大學"]
 
 
 def test_registered_external_club_resolves():

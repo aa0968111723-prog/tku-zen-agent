@@ -65,6 +65,40 @@ RESEARCH_TOOLS = {
     "search_social_references", "compare_social_strategies", "analyze_social_positioning",
 }
 
+# 只有淡江內部資料的檢索工具 —— 外部研究模式下不得使用（不能拿淡江資料當外校證據）。
+# get_current_term 也在列：淡江本學期的社長／社課時間一旦在外校研究回合流進
+# context，「北醫現在的社長是誰」就可能被答成淡江社長（grok 審查抓到的通道）。
+INTERNAL_RETRIEVAL_TOOLS = {"search_knowledge", "search_previous_examples", "get_current_term"}
+
+
+def _scope_tool_guard(scope: ResearchScope, name: str) -> dict[str, Any] | None:
+    """研究範圍與工具的硬邊界。
+
+    工具 schema 已經按範圍縮限，但 dispatch 會執行任何註冊過的工具，
+    模型手滑呼叫沒暴露的工具時，這裡是最後一道閘門（稽核殘餘路徑 B）。
+    """
+    if scope.mode == ResearchMode.EXTERNAL and name in INTERNAL_RETRIEVAL_TOOLS:
+        return {
+            "ok": False,
+            "code": "scope_blocked",
+            "message": (
+                "目前是外校研究模式。知識庫、歷年檔案與本學期資料都只屬於"
+                "淡江大學領袖禪學社，不能作為研究對象的證據，也不得寫成研究對象的"
+                "社長、時間或活動。請改用外校研究工具查公開參考資料；"
+                "查不到就誠實說找不到可靠來源。"
+            ),
+        }
+    if scope.mode == ResearchMode.INTERNAL and name in RESEARCH_TOOLS:
+        return {
+            "ok": False,
+            "code": "scope_blocked",
+            "message": (
+                "目前是淡江內部模式，不查外部參考資料。"
+                "要研究其他學校，請明確說出研究對象（學校與正式社團或公開帳號）。"
+            ),
+        }
+    return None
+
 
 def _preview(args: dict[str, Any]) -> str:
     for key in ("query", "filename", "form_title", "title", "keys"):
@@ -187,10 +221,17 @@ async def run_turn(
     destination: str,
     model: str | None = None,
     attachments: list[dict[str, str]] | None = None,
+    requested: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """跑完一輪。事件會即時 yield 出去給前端。"""
+    """跑完一輪。事件會即時 yield 出去給前端。
+
+    ``requested``：前端傳來的結構化研究欄位（mode / school / entity_id）。
+    """
     with ctx_mod.use(ctx):
-        async for event in _run(ctx, user_message, destination=destination, model=model, attachments=attachments):
+        async for event in _run(
+            ctx, user_message, destination=destination, model=model,
+            attachments=attachments, requested=requested,
+        ):
             yield event
 
 
@@ -201,6 +242,7 @@ async def _run(
     destination: str,
     model: str | None,
     attachments: list[dict[str, str]] | None,
+    requested: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     store = get_store()
     session_id = ctx.session_id or ""
@@ -251,7 +293,7 @@ async def _run(
     elif previous and planner.is_continuation_only(user_message):
         state, routing = planner.continue_previous(user_message, previous)
     else:
-        state, routing = planner.understand(user_message)
+        state, routing = planner.understand(user_message, previous=previous, requested=requested)
         if previous and routing.reuse_previous:
             state = memory_service.reconcile_progress(state, previous)
     project_id = memory_service.ensure_project(store, ctx, state)
@@ -276,7 +318,13 @@ async def _run(
     memory_service.save_state(store, project_id, state)
 
     scope = ResearchScope.from_dict(state.research_scope) if state.research_scope else ResearchScope()
-    resolution = research_entities.resolve(user_message)
+    resolution = research_entities.resolve(
+        user_message,
+        awaiting_clarification=bool(previous is not None and previous.completion_status == "needs_clarification"),
+    )
+    # 讓工具層（search_knowledge 等）知道本輪研究範圍：
+    # 外部研究模式下，淡江內部資料不得作為外校證據。
+    ctx_mod.set_research_scope(scope.to_dict())
 
     yield {
         "type": "task_understood",
@@ -293,6 +341,18 @@ async def _run(
     # ── 對象不明，不要猜：先反問，不做任何檢索與生成 ──────
     if state.clarification_pending:
         clarification = resolution.clarification()
+        if clarification is None and state.metrics.get("mode_conflict_school"):
+            # 內部模式 vs 訊息點名外校：用衝突確認卡，不是研究對象卡
+            clarification = research_entities.mode_conflict_clarification(
+                str(state.metrics["mode_conflict_school"])
+            )
+        if clarification is None and state.target_schools:
+            # 代名詞 follow-up（「那他們的茶會呢」）：這句話本身解析不出對象，
+            # 反問卡要從繼承的研究範圍生出來，不能因為解析不到就靜默放行。
+            clarification = research_entities.clarification_for_school(state.target_schools[0])
+        if clarification is None:
+            # 外校研究模式但完全沒有對象可對（前端只選了模式）→ 通用反問卡
+            clarification = research_entities.generic_clarification()
         if clarification is not None:
             state.completion_status = "needs_clarification"
             state.research_status = research_verifier.RESEARCH_NEEDS_USER
@@ -361,7 +421,8 @@ async def _run(
     cached = None
     if scope_for_retrieval is None:
         cached = memory_service.get_cached_context(
-            store, project_id, state.retrieval_queries, state.task_type.value, context_fingerprint
+            store, project_id, state.retrieval_queries, state.task_type.value, context_fingerprint,
+            scope=scope.to_dict(),
         )
     bundle = None
     if cached:
@@ -391,7 +452,7 @@ async def _run(
             memory_service.save_cached_context(
                 store, project_id, state.retrieval_queries, state.task_type.value, context_fingerprint,
                 context_block,
-                {
+                meta={
                     "count": len(bundle.hits),
                     "source_labels": bundle.source_labels(),
                     "display_sources": bundle.display_sources(),
@@ -400,6 +461,7 @@ async def _run(
                     "external_reference": getattr(bundle, "external_count", 0),
                     "conflicts": getattr(bundle, "conflicts", []),
                 },
+                scope=scope.to_dict(),
             )
         retrieval_event = {
             "type": "retrieval_result",
@@ -437,7 +499,15 @@ async def _run(
     # 文字模型的選擇與是否加入圖片無關；圖片已在上方由 fal.ai 轉成暫時摘要。
     selected_model = model or decision["model"]
     client = _client(selected_model)
-    tool_schemas = tools.schemas_for(routing.tool_names())
+    exposed_tools = list(routing.tool_names())
+    if scope.mode == ResearchMode.EXTERNAL:
+        # 純外校研究：連 schema 都不給內部檢索工具——模型看不到就不會拿
+        # 淡江資料當外校證據（比較模式要查淡江內部資料，所以保留）。
+        # 產檔與活動工具也一律拿掉：外校研究絕不能用淡江範本「做出」
+        # 北醫的企劃書（對抗審查發現 2 的防禦層）。
+        banned = INTERNAL_RETRIEVAL_TOOLS | ARTIFACT_TOOLS | ACTIVITY_TOOLS
+        exposed_tools = [n for n in exposed_tools if n not in banned]
+    tool_schemas = tools.schemas_for(exposed_tools)
     activity_context = activity_service.project_activity_context(store, ctx.user_id, project_id)
 
     messages = memory_service.build_messages(
@@ -579,7 +649,11 @@ async def _run(
             cache_key = _tool_cache_key(tc.name, tc.arguments)
             cached_tool_result = tc.name in READ_ONLY_CACHEABLE_TOOLS and cache_key in tool_cache
             attempts = 0
-            if cached_tool_result:
+            scope_blocked = _scope_tool_guard(scope, tc.name)
+            if scope_blocked is not None:
+                result = dict(scope_blocked)
+                cached_tool_result = False
+            elif cached_tool_result:
                 result = dict(tool_cache[cache_key])
                 state.metrics["tool_cache_hits"] = int(state.metrics.get("tool_cache_hits", 0)) + 1
             else:
