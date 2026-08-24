@@ -227,3 +227,26 @@ def test_frontend_stop_calls_server_cancel():
     assert '"/api/chat/cancel"' in js
     assert "requestStreamCancel" in js
     assert 'controlTask("cancel"' in js
+
+
+# ── Context 跨事件存續（政大反問輪的假錯誤事件迴歸）─────────────
+
+def test_clarification_stream_has_no_stray_error(client):
+    """整條 SSE 串流必須共用同一個 Context。
+
+    每個事件各開新 task 時，use() 的 token reset 會在收尾拋 ValueError，
+    讓「政大呢」這種反問輪的結尾多出一個假的「系統忙碌中」錯誤事件；
+    RequestContext 與研究範圍也會在後續工具執行時遺失。
+    """
+    import json as _json
+
+    sid = client.post("/api/session", json={}).json()["session_id"]
+    body = client.post("/api/chat", json={"session_id": sid, "message": "政大呢"}).text
+    types = [
+        _json.loads(line[5:])["type"]
+        for line in body.splitlines()
+        if line.startswith("data:")
+    ]
+    assert "clarification_needed" in types
+    assert "error" not in types, types
+    assert types[-1] == "done"

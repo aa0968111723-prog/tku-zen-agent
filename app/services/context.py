@@ -68,4 +68,11 @@ def use(ctx: RequestContext) -> Iterator[RequestContext]:
     try:
         yield ctx
     finally:
-        _ctx.reset(token)
+        try:
+            _ctx.reset(token)
+        except ValueError:
+            # async generator 的收尾（aclose）可能發生在跟啟動時不同的
+            # asyncio task／Context——token 不屬於目前 context 時直接清空。
+            # 各 task 的 context 是複本，清空不會影響其他請求。
+            _ctx.set(None)
+            _research_scope.set(None)
