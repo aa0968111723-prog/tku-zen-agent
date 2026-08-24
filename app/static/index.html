@@ -30,7 +30,11 @@
       <span class="mark" aria-hidden="true"></span>
       <div class="brand-text">
         <strong>領袖禪學社</strong>
-        <span id="term-label">工作台</span>
+        <span id="term-label">視覺化 AI 任務工作台</span>
+      </div>
+      <div id="ai-orb" class="ai-orb is-idle" role="status" aria-live="polite" aria-label="禪光 AI：等待中">
+        <span class="ai-orb-core" aria-hidden="true"></span>
+        <span id="ai-orb-label" class="ai-orb-label">等待中</span>
       </div>
     </div>
     <div class="top-actions">
@@ -170,11 +174,13 @@
       </div>
       <button class="icon-btn" id="preflight-close" type="button" aria-label="返回修改需求">×</button>
     </header>
-    <div id="preflight-body" class="preflight-body"></div>
+    <div id="preflight-body" class="preflight-body" aria-live="polite"></div>
     <footer class="modal-foot preflight-foot">
+      <button class="ghost" id="preflight-cancel" type="button" hidden>取消任務</button>
       <button class="ghost" id="preflight-back" type="button">返回修改</button>
-      <button class="ghost" id="preflight-skip" type="button">先跳過</button>
-      <button class="primary" id="preflight-confirm" type="button">確認開始</button>
+      <button class="ghost" id="preflight-skip" type="button" aria-label="先跳過此題">跳過此題</button>
+      <button class="ghost" id="preflight-defaults" type="button" hidden>直接用預設值</button>
+      <button class="primary" id="preflight-confirm" type="button">下一步</button>
     </footer>
   </section>
 </div>

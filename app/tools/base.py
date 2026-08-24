@@ -16,6 +16,19 @@ VALID_DESTINATIONS = {"local", "drive", "both"}
 def safe_filename(name: str, default_ext: str) -> str:
     name = (name or "").strip() or "未命名"
     name = _ILLEGAL.sub("_", name).strip(" .")
+    stem, supplied_ext = (name.rsplit(".", 1) + [""])[:2] if "." in name else (name, "")
+    # 版本由 artifact 資料表管理；使用者可見檔名永遠保持穩定，不把
+    # _2_2、final_final 或「修正版2」這類儲存層痕跡帶到下載檔名。
+    stem = re.sub(r"(?:_\d+){2,}$", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(r"(?:[_\- ]+(?:final|修正版|草稿版?))+(?:[_\- ]*\d+)*$", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(
+        r"^(\d{3})[_\- ]*(上|下)[_\- ]*",
+        lambda match: f"{match.group(1)}-{'1' if match.group(2) == '上' else '2'}-",
+        stem,
+    )
+    stem = re.sub(r"[_\s]+", "-", stem)
+    stem = re.sub(r"-+", "-", stem).strip("-") or "未命名"
+    name = f"{stem}.{supplied_ext}" if supplied_ext else stem
     if not name:
         name = "未命名"
     if not name.lower().endswith(default_ext.lower()):
@@ -33,12 +46,17 @@ def unique_path(directory: Path, filename: str) -> Path:
     p = directory / filename
     if not p.exists():
         return p
-    stem, suffix = p.stem, p.suffix
-    for i in range(2, 100):
-        cand = directory / f"{stem}_{i}{suffix}"
-        if not cand.exists():
-            return cand
-    return directory / f"{stem}_{_dt.datetime.now():%H%M%S}{suffix}"
+    # 保留舊版本，但讓每一版的 basename 都相同；真正的版本號由資料庫呈現為
+    # 草稿版／修正版／最終版，不再污染使用者看到的檔名。
+    version_root = directory / ".versions" / p.stem
+    for attempt in range(100):
+        stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        slot = version_root / (stamp if attempt == 0 else f"{stamp}-{attempt}")
+        candidate = slot / filename
+        if not candidate.exists():
+            slot.mkdir(parents=True, exist_ok=True)
+            return candidate
+    raise RuntimeError("無法建立產出版本目錄")
 
 
 @dataclass
