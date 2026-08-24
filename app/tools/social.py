@@ -111,6 +111,17 @@ def _references(
                 "credibility": round(0.8 if url and source_date else (0.55 if url else 0.3), 2),
                 "verification": "verified" if url and source_date else "needs_verification",
                 "verified": bool(url and source_date),
+                # 結構化來源的標準欄位名（研究輸出規格）：
+                # source_title / source_url / publisher / captured_at /
+                # source_type / supporting_excerpt / access_status
+                "source_title": title,
+                "publisher": getattr(meta, "organization", "") or school,
+                "supporting_excerpt": chunk.text[:600],
+                "access_status": (
+                    "內部參考庫節錄（整理自公開頁面），本次未即時重新驗證"
+                    if url and source_date
+                    else "內部參考庫節錄，來源資訊不完整，未通過驗證"
+                ),
             }
         )
     return out[: max(1, min(int(top_k or 5), 10))]
@@ -142,7 +153,9 @@ def _no_reference_result(query: str) -> dict[str, Any]:
         "schools": [],
         "sections": {},
         "no_verified_source": True,
+        "disclaimer": "本次無法驗證公開來源，以下僅為一般策略推測，不得視為該校現況。",
         "message": (
+            "本次無法驗證公開來源，以下僅為一般策略推測，不得視為該校現況。\n\n"
             f"外校公開資料庫裡**沒有**{subject}的已驗證來源。\n"
             "不可以推測或用淡江資料頂替該校事實。回覆使用者時請直接說明：\n"
             "「目前沒有足夠公開來源確認此資訊，因此不提供確定結論。」\n"
@@ -170,6 +183,8 @@ def _research_result(query: str, refs: list[dict[str, Any]]) -> dict[str, Any]:
         + "\n\n".join(blocks)
         + "\n\n───────────\n描述外校做法時，只能引用上面摘錄的內容並標注學校名稱；"
           "摘錄裡沒有的細節不可以自行補寫。"
+          "以上來源出自社團內部整理的公開帳號參考庫（非本次即時網路搜尋），"
+          "不可以寫成「剛搜尋到」或「即時現況」。"
     )
     unverified = [r["source_id"] for r in refs if not r.get("verified")]
     if unverified:

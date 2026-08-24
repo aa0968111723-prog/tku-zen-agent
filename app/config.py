@@ -101,6 +101,17 @@ INSTAGRAM_ACCESS_TOKEN = _secret("INSTAGRAM_ACCESS_TOKEN")
 INSTAGRAM_BUSINESS_ACCOUNT_ID = (os.getenv("INSTAGRAM_BUSINESS_ACCOUNT_ID") or "").strip()
 INSTAGRAM_APP_ID = (os.getenv("INSTAGRAM_APP_ID") or "").strip()
 
+# 對外發佈總開關。預設關閉：不設定就永遠是草稿模式，
+# 任何人（含管理者）都拿不到 can_approve / can_spend 權限。
+EXTERNAL_PUBLISH_ENABLED = _bool("EXTERNAL_PUBLISH_ENABLED", False)
+
+# ── API 限流 ──────────────────────────────────────────────────
+# /api/chat 會呼叫外部模型（花額度），要有獨立且較嚴的限流。
+CHAT_RATE_LIMIT = int(os.getenv("CHAT_RATE_LIMIT") or 12)          # 每視窗最多幾次
+CHAT_RATE_WINDOW = int(os.getenv("CHAT_RATE_WINDOW") or 60)        # 視窗秒數
+API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT") or 240)           # 一般 API 每視窗上限
+API_RATE_WINDOW = int(os.getenv("API_RATE_WINDOW") or 60)
+
 # ── 當期狀態（本學期的真實資料）────────────────────────────────
 CURRENT_TERM_FILE = _path("CURRENT_TERM_FILE", "data/current_term.yaml")
 EXTERNAL_REFERENCE_DIR = KNOWLEDGE_DIR / "社群"

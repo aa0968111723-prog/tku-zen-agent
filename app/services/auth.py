@@ -58,7 +58,7 @@ def _set_admin_cookie(response: Response) -> None:
         max_age=config.ADMIN_COOKIE_MAX_AGE,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="strict",  # 管理 cookie 不需要任何跨站情境，直接用最嚴格的
         path="/",
     )
 
@@ -125,9 +125,12 @@ def _invalid_token(request: Request, cookie_name: str) -> HTTPException:
 
 def login(request: Request, response: Response, token: str | None) -> None:
     _check_locked(request, COOKIE_NAME)
+    store = get_store()
+    # 空字串、純空白、null 一律視同錯誤授權碼：同樣走 401 + 失敗計數，
+    # 不提早 return —— 回應形狀一致才不會洩漏「授權碼是否存在」。
+    # 稽核在 main.py 的端點層寫入（auth.login / auth.admin_login）。
     if not check_token(token):
         raise _invalid_token(request, COOKIE_NAME)
-    store = get_store()
     current = request.cookies.get(COOKIE_NAME) or request.cookies.get(LEGACY_COOKIE_NAME)
     user_id = current if current and store.user_exists(current) else store.ensure_user()
     _set_cookie(response, user_id)

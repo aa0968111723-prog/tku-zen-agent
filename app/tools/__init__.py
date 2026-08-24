@@ -40,25 +40,39 @@ _REGISTRY: dict[str, tuple[Callable[..., dict], dict, Permission]] = {
 }
 
 SCHEMAS: list[dict] = [schema for _, schema, _ in _REGISTRY.values()]
-LABELS = {name: name for name in _REGISTRY}
-LABELS.update(
-    {
-        "search_knowledge": "搜尋社團知識庫",
-        "search_previous_examples": "搜尋歷年範例",
-        "get_current_term": "查本學期資料",
-        "create_spreadsheet": "建立試算表",
-        "create_document": "建立文件",
-        "create_slides": "建立簡報",
-        "create_google_form": "建立 Google 表單",
-        "create_activity": "建立活動資料",
-        "update_activity": "更新活動資料",
-        "add_activity_task": "新增活動待辦",
-        "update_activity_task": "更新活動待辦",
-        "get_activity_status": "檢查活動進度",
-        "list_activities": "列出活動",
-        "read_artifact": "讀取上一份產出",
-    }
-)
+
+# 使用者看得到的工具名稱一律繁體中文 —— 內部英文工具名（create_social_carousel
+# 之類）絕不能直接呈現在介面上。tests/test_ui_language.py 會掃這份表。
+LABELS = {
+    "search_knowledge": "搜尋社團知識庫",
+    "search_previous_examples": "搜尋歷年範例",
+    "get_current_term": "查本學期資料",
+    "create_spreadsheet": "建立試算表",
+    "create_document": "建立文件",
+    "create_slides": "建立簡報",
+    "create_google_form": "建立 Google 表單",
+    "create_activity": "建立活動資料",
+    "update_activity": "更新活動資料",
+    "add_activity_task": "新增活動待辦",
+    "update_activity_task": "更新活動待辦",
+    "get_activity_status": "檢查活動進度",
+    "list_activities": "列出活動",
+    "read_artifact": "讀取上一份產出",
+    "search_social_references": "搜尋外校公開參考",
+    "compare_social_strategies": "比較外校社群策略",
+    "analyze_social_positioning": "分析社群定位",
+    "create_social_post": "建立貼文草稿",
+    "create_social_carousel": "建立輪播草稿",
+    "create_social_story": "建立限動草稿",
+    "create_reels_script": "建立 Reels 腳本",
+    "create_social_content_calendar": "建立內容月曆",
+    "create_social_ab_test": "建立 A/B 測試草稿",
+    "create_social_image_prompt": "建立圖像提示詞",
+    "create_social_video_prompt": "建立影片提示詞",
+}
+# 保險：漏掛中文名的工具顯示通用中文字樣，不顯示英文內部名
+for _name in _REGISTRY:
+    LABELS.setdefault(_name, "執行工具")
 
 
 def register(

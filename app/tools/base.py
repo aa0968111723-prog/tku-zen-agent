@@ -76,7 +76,8 @@ class Artifact:
     def to_result(self) -> dict:
         # 給模型看的訊息刻意不含伺服器絕對路徑：模型用不到，
         # 而且它常常會把路徑原封不動貼進回覆裡給使用者看。
-        lines = [f"已完成：{self.filename}"]
+        # 措辭用「已產出」而不是「已完成」——這時驗證還沒跑，不能宣稱完成。
+        lines = [f"已產出：{self.filename}（尚待檢查）"]
         if self.summary:
             lines.append(self.summary)
         lines.extend(self.details)
