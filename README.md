@@ -156,7 +156,15 @@ Google 沒有可以直接呼叫的表單建立 API。代理改成產一支 Apps 
 - 猜別人的 session id 讀不到東西，別人的檔案也下載不到
 
 **部署環境（偵測到 PORT／ZEABUR／RAILWAY 或綁 0.0.0.0）沒設 `APP_ACCESS_TOKEN` 會直接拒絕啟動**，
-不再只是警告。另外：
+不再只是警告。平台上的症狀是容器一直重啟（Zeabur 記錄會看到
+`BackOff: Back-off restarting failed container`）；啟動記錄裡會印出完整的
+補救步驟，補上環境變數後重新部署即可。
+
+環境變數的值請只填授權碼本身，不要連前後引號一起貼——引號會被當成授權碼的一部分。
+（`APP_ACCESS_TOKEN`、`ADMIN_ACCESS_TOKEN`、`NVIDIA_API_KEY`、`INSTAGRAM_ACCESS_TOKEN`
+已經會自動去掉貼錯的引號。）
+
+另外：
 
 - 授權碼連錯 5 次鎖 15 分鐘（IP＋cookie 雙維度），錯誤訊息統一為「授權碼不正確」
 - 重新輸入授權碼會沿用同一個身分，歷史任務與產出不會消失
@@ -317,3 +325,4 @@ scipy 沒裝或語料太小時自動降級成純 BM25。
 | 一直說「還沒設定」 | 同上。它不會猜今年的資料 |
 | 產出內容有錯 | 先看是不是知識庫要更新，改 `knowledge/` 比改程式有效 |
 | 部署後大家共用同一份對話 | 沒設 `APP_ACCESS_TOKEN` |
+| 部署後容器一直重啟（BackOff） | 沒設 `APP_ACCESS_TOKEN`，看啟動記錄的指示補上環境變數 |

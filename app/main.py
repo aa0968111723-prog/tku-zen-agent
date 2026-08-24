@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import config, orchestrator, retrieval
+from .services import audit as audit_service
 from .services import auth, context as ctx_mod
 from .services import activities as activity_service
 from .services import current_term as term_service
@@ -128,7 +129,22 @@ def current_user(request: Request, response: Response) -> str:
 
 @app.post("/api/auth")
 async def login(req: LoginRequest, request: Request, response: Response) -> dict[str, bool]:
-    auth.login(request, response, req.token)
+    try:
+        auth.login(request, response, req.token)
+    except HTTPException as exc:
+        audit_service.write_audit(
+            action="auth.login",
+            detail={"status": exc.status_code},
+            request=request,
+            ok=False,
+        )
+        raise
+    audit_service.write_audit(
+        action="auth.login",
+        actor_user_id=auth.optional_identity(request),
+        detail={"status": 200},
+        request=request,
+    )
     return {"ok": True}
 
 
@@ -143,7 +159,22 @@ async def auth_status(request: Request) -> dict[str, Any]:
 
 @app.post("/api/admin/auth")
 async def admin_login(req: LoginRequest, request: Request, response: Response) -> dict[str, bool]:
-    auth.admin_login(request, response, req.token)
+    try:
+        auth.admin_login(request, response, req.token)
+    except HTTPException as exc:
+        audit_service.write_audit(
+            action="auth.admin_login",
+            detail={"status": exc.status_code},
+            request=request,
+            ok=False,
+        )
+        raise
+    audit_service.write_audit(
+        action="auth.admin_login",
+        actor_user_id=auth.optional_identity(request),
+        detail={"status": 200},
+        request=request,
+    )
     return {"ok": True}
 
 
@@ -217,9 +248,26 @@ async def reset(req: SessionRequest, user_id: str = Depends(current_user)) -> di
 
 
 @admin_router.post("/reindex")
-async def reindex() -> dict[str, Any]:
-    index = await asyncio.to_thread(retrieval.get_index, rebuild=True)
-    return index.stats()
+async def reindex(request: Request) -> dict[str, Any]:
+    try:
+        index = await asyncio.to_thread(retrieval.get_index, rebuild=True)
+        stats = index.stats()
+    except Exception as exc:  # noqa: BLE001
+        audit_service.write_audit(
+            action="admin.reindex",
+            actor_user_id=auth.optional_identity(request),
+            detail={"error": str(exc)},
+            request=request,
+            ok=False,
+        )
+        raise
+    audit_service.write_audit(
+        action="admin.reindex",
+        actor_user_id=auth.optional_identity(request),
+        detail=stats,
+        request=request,
+    )
+    return stats
 
 
 @general_router.get("/term")

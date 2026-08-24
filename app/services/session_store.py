@@ -178,6 +178,20 @@ CREATE TABLE IF NOT EXISTS activity_tasks (
     updated_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_activity_tasks_activity ON activity_tasks(activity_id, status, due_at);
+
+-- PR-01: append-only audit log（不記完整 token）
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_user_id TEXT NOT NULL DEFAULT '',
+    action        TEXT NOT NULL,
+    resource      TEXT NOT NULL DEFAULT '',
+    detail        TEXT NOT NULL DEFAULT '',
+    ip            TEXT NOT NULL DEFAULT '',
+    ok            INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, created_at DESC);
 """
 
 
@@ -763,6 +777,57 @@ class SessionStore:
         with self._lock:
             self._conn.execute("DELETE FROM working_memory WHERE project_id=? AND key=?", (project_id, key))
             self._conn.commit()
+
+    # ── audit logs (PR-01) ────────────────────────────────────
+
+    def append_audit(
+        self,
+        *,
+        actor_user_id: str = "",
+        action: str,
+        resource: str = "",
+        detail: str = "",
+        ip: str = "",
+        ok: bool = True,
+    ) -> None:
+        """Append-only；失敗由呼叫端（audit.write_audit）吞掉，此處只負責寫入。"""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO audit_logs(actor_user_id, action, resource, detail, ip, ok, created_at)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (
+                    actor_user_id or "",
+                    (action or "")[:120],
+                    (resource or "")[:240],
+                    (detail or "")[:2000],
+                    ip or "",
+                    1 if ok else 0,
+                    _now(),
+                ),
+            )
+            self._conn.commit()
+
+    def list_audit(self, limit: int = 50) -> list[dict[str, Any]]:
+        """最新在前。僅供管理／測試使用。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, actor_user_id, action, resource, detail, ip, ok, created_at"
+                " FROM audit_logs ORDER BY id DESC LIMIT ?",
+                (min(max(limit, 1), 500),),
+            ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "actor_user_id": r["actor_user_id"],
+                "action": r["action"],
+                "resource": r["resource"],
+                "detail": r["detail"],
+                "ip": r["ip"],
+                "ok": bool(r["ok"]),
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
 
 
 _store: SessionStore | None = None

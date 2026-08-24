@@ -19,6 +19,18 @@ def _bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on", "是"}
 
 
+def _secret(name: str) -> str:
+    """讀機密設定，並把貼錯的前後引號拿掉。
+
+    在 Zeabur／Railway 的環境變數欄位貼上 "abc" 或 'abc' 是很常見的手誤，
+    引號會變成授權碼的一部分，結果就是「明明設了卻一直說授權碼錯誤」。
+    """
+    raw = (os.getenv(name) or "").strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
+        raw = raw[1:-1].strip()
+    return raw
+
+
 def _path(name: str, default: str) -> Path:
     raw = (os.getenv(name) or default).strip()
     p = Path(raw)
@@ -26,7 +38,7 @@ def _path(name: str, default: str) -> Path:
 
 
 # ── NVIDIA Build（OpenAI 相容）─────────────────────────────────
-NVIDIA_API_KEY = (os.getenv("NVIDIA_API_KEY") or "").strip()
+NVIDIA_API_KEY = _secret("NVIDIA_API_KEY")
 NVIDIA_BASE_URL = (os.getenv("NVIDIA_BASE_URL") or "https://integrate.api.nvidia.com/v1").rstrip("/")
 NVIDIA_MODEL = (os.getenv("NVIDIA_MODEL") or "meta/llama-3.1-70b-instruct").strip()
 NVIDIA_FAST_MODEL = (os.getenv("NVIDIA_FAST_MODEL") or "meta/llama-3.1-8b-instruct").strip()
@@ -76,8 +88,8 @@ DB_PATH = _path("DB_PATH", "data/agent.sqlite3")
 # local  = 單人本機模式，不需要登入，所有請求都是同一個使用者
 # token  = 部署模式，要先用 APP_ACCESS_TOKEN 換到身分才能用
 AUTH_MODE = (os.getenv("AUTH_MODE") or "").strip().lower()
-APP_ACCESS_TOKEN = (os.getenv("APP_ACCESS_TOKEN") or "").strip()
-ADMIN_ACCESS_TOKEN = (os.getenv("ADMIN_ACCESS_TOKEN") or "").strip()
+APP_ACCESS_TOKEN = _secret("APP_ACCESS_TOKEN")
+ADMIN_ACCESS_TOKEN = _secret("ADMIN_ACCESS_TOKEN")
 ACCESS_CODE_COOKIE_NAME = (os.getenv("ACCESS_CODE_COOKIE_NAME") or "tku_zen_access").strip() or "tku_zen_access"
 ACCESS_CODE_COOKIE_MAX_AGE = int(os.getenv("ACCESS_CODE_COOKIE_MAX_AGE") or 2592000)
 ADMIN_COOKIE_MAX_AGE = int(os.getenv("ADMIN_COOKIE_MAX_AGE") or 43200)
@@ -85,7 +97,7 @@ ADMIN_COOKIE_NAME = "tku_zen_admin"
 
 # Instagram is deliberately configuration-only in this phase.  No credential is
 # ever returned to the browser or exposed to the model/tool registry.
-INSTAGRAM_ACCESS_TOKEN = (os.getenv("INSTAGRAM_ACCESS_TOKEN") or "").strip()
+INSTAGRAM_ACCESS_TOKEN = _secret("INSTAGRAM_ACCESS_TOKEN")
 INSTAGRAM_BUSINESS_ACCOUNT_ID = (os.getenv("INSTAGRAM_BUSINESS_ACCOUNT_ID") or "").strip()
 INSTAGRAM_APP_ID = (os.getenv("INSTAGRAM_APP_ID") or "").strip()
 
