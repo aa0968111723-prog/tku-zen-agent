@@ -132,6 +132,35 @@ def _step_index_for_tool(state: OrchestrationState, name: str) -> int | None:
     return None
 
 
+# 產出檔名副檔名 → artifacts_expected 的 kind（產出覆蓋檢查用）
+_EXT_KIND = {
+    ".docx": "document", ".md": "document", ".pdf": "document",
+    ".xlsx": "spreadsheet", ".csv": "spreadsheet",
+    ".pptx": "slides",
+    ".gs": "form",
+}
+
+
+def _missing_artifact_kinds(state: OrchestrationState) -> list[str]:
+    """預期要產出、但這輪（含先前輪帶入）還沒產出的檔案類型。"""
+    if not state.artifacts_expected:
+        return []
+    produced: set[str] = set()
+    for art in state.artifacts_produced:
+        ext = Path(str(art.get("filename") or "")).suffix.lower()
+        produced.add(_EXT_KIND.get(ext, "document"))
+    out: list[str] = []
+    for kind in state.artifacts_expected:
+        if kind not in produced and kind not in out:
+            out.append(kind)
+    # 格式替代：預期 1 份文件、模型交出 1 份試算表（「分工表」做成表格）
+    # 是合理的格式選擇，不算缺件；只有**數量**也不足時才擋
+    # （evaluation 要文件＋試算表、只出 1 份 → 仍然缺件）。
+    if out and len(state.artifacts_produced) >= len(state.artifacts_expected):
+        return []
+    return out
+
+
 def _verification_index(state: OrchestrationState) -> int | None:
     for i, step in enumerate(state.plan_steps):
         if step.kind == "verify" or "檢查產出" in step.description:
@@ -950,15 +979,32 @@ async def _run(
             state.fail_step(verify_index, "來源驗證未通過", code="answer_verification_failed")
         state.workflow_status = WorkflowStatus.BLOCKED
         state.next_action = "提供研究對象的官方來源，或改用淡江內部分析"
-    elif state.artifacts_expected and not state.artifacts_produced:
-        # 說好要產檔卻一個都沒產出：completed 不能亮起來（稽核不可靠 #11
-        # ——模型直接回文字也全綠）。產檔步驟標失敗，任務停在 blocked。
+    elif _missing_artifact_kinds(state):
+        # 說好要產檔卻沒產齊：completed 不能亮起來（稽核不可靠 #11；
+        # grok 審查發現 2：evaluation 要文件＋試算表，只出一份也不能算完成）。
+        # 產檔步驟標失敗，任務停在 blocked，事件用 task_failed——
+        # 不能一邊存 blocked、一邊對前端送 verdict=allow 的 task_completed
+        # 讓 UI 全綠（grok 審查發現 1）。
+        missing_kinds = _missing_artifact_kinds(state)
         for i, step in enumerate(state.plan_steps):
             if step.kind == "artifact" and step.status != "completed":
                 state.fail_step(i, "預期的檔案尚未產出", code="artifact_missing")
         state.workflow_status = WorkflowStatus.BLOCKED
         state.completion_status = "blocked"
         state.next_action = "說「繼續」讓我把檔案做出來，或改為只要文字說明"
+        missing_labels = "、".join(planner.ARTIFACT_LABEL.get(k, k) for k in missing_kinds)
+        note = f"※ 預期的{missing_labels}還沒有產出，任務尚未完成。"
+        final_text = (final_text or "").rstrip() + "\n\n" + note + "說「繼續」讓我把檔案做出來，或告訴我改成只要文字說明。"
+
+        yield {"type": "message", "text": final_text}
+        memory_service.persist(store, session_id, {"role": "assistant", "content": final_text})
+        memory_service.save_state(store, project_id, state)
+        yield {
+            "type": "task_failed",
+            "summary": state.public_summary(),
+            "text": f"預期的{missing_labels}還沒有產出；可以說「繼續」補產出，或改為只要文字說明。",
+        }
+        return
     else:
         for i in range(1, len(state.plan_steps)):
             state.mark_step(i)

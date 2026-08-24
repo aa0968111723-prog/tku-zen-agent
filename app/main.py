@@ -61,30 +61,9 @@ _CSP = (
 _STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
 
 
-def client_ip(request: Request) -> str:
-    """取真實客戶端 IP。
-
-    反向代理（Zeabur）之後 request.client.host 是代理位址，全站共用一個
-    限流桶（稽核不可靠 #7）。只有在直連端是私有／loopback 位址時才信
-    X-Forwarded-For 的第一個 hop——公網直連的 XFF 可以偽造，不能信。
-    """
-    direct = request.client.host if request.client else "unknown"
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff and _is_private_ip(direct):
-        first = xff.split(",")[0].strip()
-        if first:
-            return first
-    return direct
-
-
-def _is_private_ip(ip: str) -> bool:
-    try:
-        import ipaddress
-
-        parsed = ipaddress.ip_address(ip)
-        return parsed.is_private or parsed.is_loopback
-    except ValueError:
-        return False
+# 真實客戶端 IP：與登入鎖定共用同一套判定（services/clientip.py），
+# 取 XFF 最右非私有跳——最左值可由客戶端偽造輪換繞過節流（grok 審查發現 3）。
+from .services.clientip import client_ip  # noqa: E402
 
 
 @app.middleware("http")

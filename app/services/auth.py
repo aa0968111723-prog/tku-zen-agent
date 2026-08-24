@@ -84,7 +84,11 @@ def _request_dimensions(request: Request, cookie_name: str) -> tuple[tuple[str, 
     連錯 5 次就把全部新使用者鎖 15 分鐘（稽核不可靠 #30 的 DoS）。
     無 cookie 時只用 IP 維度。
     """
-    ip = request.client.host if request.client else "unknown"
+    # 反向代理後 socket IP 是代理位址——用它當鎖定維度等於 5 次錯碼
+    # 鎖全站 15 分鐘（grok 審查發現 4）。改用與限流相同的真實 IP 判定。
+    from .clientip import client_ip
+
+    ip = client_ip(request)
     raw_cookie = request.cookies.get(cookie_name, "")
     dims: list[tuple[str, str]] = [("ip", f"{cookie_name}:{ip}")]
     if raw_cookie:
