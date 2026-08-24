@@ -1210,7 +1210,9 @@ function addArtifact(turn, art) {
   const raw = art.preview || turn._lastContent || "";
   const card = el("article", "artifact work-card result-card");
   card.dataset.kind = ["docx", "pptx", "xlsx", "pdf", "md"].includes(ext) ? "document" : "artifact";
-  card.dataset.verified = art.verified === false ? "warn" : "ok";
+  // 續接工作階段的產出不帶 verified 欄位——狀態未知時不亮任何信任燈
+  const verifiedState = typeof art.verified === "boolean" ? (art.verified ? "ok" : "warn") : "";
+  if (verifiedState) card.dataset.verified = verifiedState;
   card.setAttribute("aria-label", "產出結果：" + artifactTitle(filename));
   const sum = el("header", "result-head");
   sum.appendChild(el("div", "icon", FILE_ICONS[ext] || "▪"));
@@ -1222,7 +1224,7 @@ function addArtifact(turn, art) {
 
   const body = el("div", "artifact-body");
   const facts = el("dl", "result-facts");
-  [["狀態", art.verified === false ? "！檢查有警告" : "✓ 已通過檢查"], ["版本", versionLabel(art.version)], ["格式", CARD_LANGS[art.format] || ({ md: "Markdown", docx: "企劃文件", pptx: "簡報", xlsx: "試算表", pdf: "PDF" })[ext] || ext.toUpperCase()]].forEach(([term, value]) => {
+  [["狀態", verifiedState === "warn" ? "！檢查有警告" : verifiedState === "ok" ? "✓ 已通過檢查" : "已建立（未重新檢查）"], ["版本", versionLabel(art.version)], ["格式", CARD_LANGS[art.format] || ({ md: "Markdown", docx: "企劃文件", pptx: "簡報", xlsx: "試算表", pdf: "PDF" })[ext] || ext.toUpperCase()]].forEach(([term, value]) => {
     facts.append(el("dt", null, term), el("dd", null, value));
   });
   body.appendChild(facts);

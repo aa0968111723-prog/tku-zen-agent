@@ -950,7 +950,8 @@ a:focus-visible {
   padding: 8px 11px;
   cursor: pointer;
 }
-.task-controls .danger { color: var(--neon-red); border-color: rgba(255, 48, 69, .4); }
+/* 文字用較亮的紅保 WCAG AA 對比；霓虹紅留給邊框與光暈 */
+.task-controls .danger { color: #FF8593; border-color: rgba(255, 48, 69, .4); }
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 
@@ -1894,7 +1895,7 @@ select {
 .st-partial { background: var(--neon-yellow); color: #191300; box-shadow: var(--glow-yellow-soft); }
 .st-inferred { background: var(--neon-cyan); color: #04121A; box-shadow: var(--glow-cyan-soft); }
 .st-stale { background: var(--ink-3); color: #0B1114; }
-.st-conflict { background: var(--neon-red); color: #FFF3F4; box-shadow: var(--glow-red-soft); }
+.st-conflict { background: var(--neon-red); color: #04140A; box-shadow: var(--glow-red-soft); }
 .research-chip.st-verified, .research-chip.st-partial, .research-chip.st-inferred,
 .research-chip.st-stale, .research-chip.st-conflict {
   background: transparent;
