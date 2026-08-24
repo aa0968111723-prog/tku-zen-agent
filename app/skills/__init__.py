@@ -299,7 +299,11 @@ class Routing:
                 continue
             candidates = skill.tool_names()
             if self.preferred_tool and name == self.skill.name and self.preferred_tool in candidates:
-                candidates = tuple(t for t in candidates if t in BASE_TOOLS or t == self.preferred_tool)
+                scoped = [*BASE_TOOLS]
+                if self.continuation:
+                    scoped.append("read_artifact")
+                scoped.append(self.preferred_tool)
+                candidates = tuple(dict.fromkeys(scoped))
             for tool in candidates:
                 if tool not in names:
                     names.append(tool)

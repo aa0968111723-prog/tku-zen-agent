@@ -123,7 +123,11 @@ def build_system_prompt(
     parts.append("\n".join(task_block))
 
     if previous_artifacts:
-        lines = ["## 這個專案最近的產出", "", "以下是可沿用或轉換的最新版本；修改時保留版本關聯，不要要求使用者重新描述全部內容。"]
+        lines = [
+            "## 這個專案最近的產出", "",
+            "以下是可沿用或轉換的最新版本；修改時保留版本關聯，不要要求使用者重新描述全部內容。",
+            "轉成另一種格式或修改舊內容前，必須先呼叫 read_artifact 讀取原文，不可只看片名重新編造。",
+        ]
         lines.extend(
             f"- {a.get('filename', '未命名')}（版本 {a.get('version', 1)}，artifact_id={a.get('artifact_id', '')}）"
             for a in previous_artifacts[:8]

@@ -52,7 +52,7 @@ ACTIVITY_TOOLS = {
 READ_ONLY_CACHEABLE_TOOLS = {
     "search_knowledge", "search_previous_examples", "get_current_term",
     "search_social_references", "compare_social_strategies", "analyze_social_positioning",
-    "get_activity_status", "list_activities",
+    "get_activity_status", "list_activities", "read_artifact",
 }
 
 
@@ -114,7 +114,7 @@ def _tool_cache_key(name: str, arguments: dict[str, Any]) -> str:
 
 def _tool_result_for_model(result: dict[str, Any]) -> dict[str, Any]:
     payload = {"ok": result.get("ok", True), "message": result.get("message", "")}
-    for key in ("activity_brief", "readiness", "activities", "task", "alternative", "code"):
+    for key in ("activity_brief", "readiness", "activities", "task", "artifact", "content", "truncated", "alternative", "code"):
         if result.get(key) is not None:
             payload[key] = result[key]
     return payload
@@ -135,6 +135,26 @@ def _control_state(store, project_id: str) -> OrchestrationState | None:
     if latest and latest.workflow_status in {WorkflowStatus.PAUSED, WorkflowStatus.CANCELLED}:
         return latest
     return None
+
+
+def _failure_step_index(state: OrchestrationState) -> int | None:
+    """模型失敗也必須落到可重試的步驟，不能只改整體狀態。"""
+    if state.current_step_id:
+        for index, step in enumerate(state.plan_steps):
+            if step.step_id == state.current_step_id and step.status not in {"completed", "skipped"}:
+                return index
+    for index, step in enumerate(state.plan_steps):
+        if step.status not in {"completed", "skipped"}:
+            return index
+    return len(state.plan_steps) - 1 if state.plan_steps else None
+
+
+def _merge_control_status(state: OrchestrationState, controlled: OrchestrationState) -> None:
+    state.workflow_status = controlled.workflow_status
+    state.completion_status = controlled.completion_status
+    state.next_action = controlled.next_action
+    if controlled.workflow_status == WorkflowStatus.CANCELLED:
+        state.stage = Stage.FAILED
 
 
 def _control_command(message: str) -> str:
@@ -276,8 +296,9 @@ async def _run(
 
     retrieval_task_type = "social_research" if routing.task_sequence else state.task_type.value
     index = await asyncio.to_thread(retrieval.get_index)
+    context_fingerprint = f"{index.fingerprint}:{term_service.fingerprint()}"
     cached = memory_service.get_cached_context(
-        store, project_id, state.retrieval_queries, state.task_type.value, index.fingerprint
+        store, project_id, state.retrieval_queries, state.task_type.value, context_fingerprint
     )
     if cached:
         context_block = cached["context_text"]
@@ -302,7 +323,7 @@ async def _run(
         context_block = bundle.render()
         state.retrieved_sources = bundle.source_labels()
         memory_service.save_cached_context(
-            store, project_id, state.retrieval_queries, state.task_type.value, index.fingerprint,
+            store, project_id, state.retrieval_queries, state.task_type.value, context_fingerprint,
             context_block,
             {
                 "count": len(bundle.hits),
@@ -371,27 +392,55 @@ async def _run(
         state.tool_rounds += 1
         try:
             reply: Reply = await client.chat(messages, tool_schemas)
+            controlled_after_model = _control_state(store, project_id)
+            if controlled_after_model:
+                event_type = (
+                    "task_paused"
+                    if controlled_after_model.workflow_status == WorkflowStatus.PAUSED
+                    else "task_cancelled"
+                )
+                yield {"type": event_type, "summary": controlled_after_model.public_summary()}
+                return
             _record_usage(state, reply, decision["model"])
             memory_service.save_state(store, project_id, state)
         except LLMError:
+            controlled_after_error = _control_state(store, project_id)
+            if controlled_after_error:
+                event_type = (
+                    "task_paused" if controlled_after_error.workflow_status == WorkflowStatus.PAUSED else "task_cancelled"
+                )
+                yield {"type": event_type, "summary": controlled_after_error.public_summary()}
+                return
             state.metrics["failure_count"] = int(state.metrics.get("failure_count", 0)) + 1
             state.stage = Stage.FAILED
             state.completion_status = "failed"
             state.workflow_status = WorkflowStatus.FAILED
             state.last_error_code = "model_error"
             state.next_action = "按重試失敗步驟，或稍後再試"
-            state.fail_step(_step_index_for_tool(state, "model"), "模型服務無法回應", code="model_error") if _step_index_for_tool(state, "model") is not None else None
+            failure_index = _failure_step_index(state)
+            if failure_index is not None:
+                state.fail_step(failure_index, "模型服務無法回應", code="model_error")
             memory_service.save_state(store, project_id, state)
             logger.exception("LLM call failed")
             yield {"type": "error", "text": "系統忙碌中，請稍後再試"}
             return
         except Exception:  # noqa: BLE001
+            controlled_after_error = _control_state(store, project_id)
+            if controlled_after_error:
+                event_type = (
+                    "task_paused" if controlled_after_error.workflow_status == WorkflowStatus.PAUSED else "task_cancelled"
+                )
+                yield {"type": event_type, "summary": controlled_after_error.public_summary()}
+                return
             state.metrics["failure_count"] = int(state.metrics.get("failure_count", 0)) + 1
             state.stage = Stage.FAILED
             state.completion_status = "failed"
             state.workflow_status = WorkflowStatus.FAILED
             state.last_error_code = "model_unexpected_error"
             state.next_action = "按重試失敗步驟，或稍後再試"
+            failure_index = _failure_step_index(state)
+            if failure_index is not None:
+                state.fail_step(failure_index, "模型執行發生非預期錯誤", code="model_unexpected_error")
             memory_service.save_state(store, project_id, state)
             logger.exception("model call failed")
             yield {"type": "error", "text": "系統忙碌中，請稍後再試"}
@@ -478,6 +527,10 @@ async def _run(
                 if result.get("ok") and tc.name in READ_ONLY_CACHEABLE_TOOLS:
                     tool_cache[cache_key] = dict(result)
 
+            controlled_after_tool = _control_state(store, project_id)
+            if controlled_after_tool:
+                _merge_control_status(state, controlled_after_tool)
+
             if not result.get("ok"):
                 code = str(result.get("code") or "tool_failed")
                 result.setdefault("alternative", _tool_alternative(tc.name, code))
@@ -521,6 +574,13 @@ async def _run(
                         "error_code": result.get("code", "tool_failed"),
                         "text": result.get("message", "工具執行失敗"),
                     }
+                if controlled_after_tool:
+                    memory_service.save_state(store, project_id, state)
+                    event_type = (
+                        "task_paused" if state.workflow_status == WorkflowStatus.PAUSED else "task_cancelled"
+                    )
+                    yield {"type": event_type, "summary": state.public_summary()}
+                    return
                 continue
 
             if tc.name in ACTIVITY_TOOLS and step_index is not None:
@@ -600,6 +660,12 @@ async def _run(
                     state.completion_status = "failed"
                     state.next_action = "重試失敗步驟，或先修正驗證錯誤"
                     yield {"type": "artifact_ready", **art}
+
+            if controlled_after_tool:
+                memory_service.save_state(store, project_id, state)
+                event_type = "task_paused" if state.workflow_status == WorkflowStatus.PAUSED else "task_cancelled"
+                yield {"type": event_type, "summary": state.public_summary()}
+                return
 
         state.stage = Stage.EXECUTE
         memory_service.save_state(store, project_id, state)

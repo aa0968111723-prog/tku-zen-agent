@@ -124,7 +124,7 @@ def test_routing_unaffected_by_extra_tools(twenty_mock_tools, message, expected)
 
 
 def test_exposed_tool_count_stays_small_with_activity_tools(twenty_mock_tools):
-    assert len(tools.all_names()) == 44, "應包含 24 個正式工具與 20 個 mock 工具"
+    assert len(tools.all_names()) == 45, "應包含 25 個正式工具與 20 個 mock 工具"
     for s in skills.SKILLS:
         exposed = tools.schemas_for(s.tool_names())
         assert len(exposed) <= 7, f"{s.name} 暴露了 {len(exposed)} 個工具，太多"

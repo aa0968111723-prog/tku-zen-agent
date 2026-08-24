@@ -464,17 +464,31 @@ class SessionStore:
         self, user_id: str, project_id: str | None = None, limit: int = 30,
         *, include_history: bool = False,
     ) -> list[Artifact]:
+        limit = max(1, min(int(limit), 200))
         with self._lock:
-            if project_id:
-                rows = self._conn.execute(
-                    "SELECT * FROM artifacts WHERE user_id=? AND project_id=?"
-                    " ORDER BY created_at DESC, version DESC LIMIT ?",
-                    (user_id, project_id, limit),
-                ).fetchall()
+            if include_history:
+                if project_id:
+                    rows = self._conn.execute(
+                        "SELECT * FROM artifacts WHERE user_id=? AND project_id=?"
+                        " ORDER BY created_at DESC, version DESC LIMIT ?",
+                        (user_id, project_id, limit),
+                    ).fetchall()
+                else:
+                    rows = self._conn.execute(
+                        "SELECT * FROM artifacts WHERE user_id=? ORDER BY created_at DESC, version DESC LIMIT ?",
+                        (user_id, limit),
+                    ).fetchall()
             else:
+                project_clause = " AND project_id=?" if project_id else ""
+                params: tuple[Any, ...] = (user_id, project_id, limit) if project_id else (user_id, limit)
                 rows = self._conn.execute(
-                    "SELECT * FROM artifacts WHERE user_id=? ORDER BY created_at DESC, version DESC LIMIT ?",
-                    (user_id, limit),
+                    "WITH ranked AS ("
+                    " SELECT artifacts.*, ROW_NUMBER() OVER ("
+                    "  PARTITION BY filename ORDER BY version DESC, created_at DESC"
+                    " ) AS version_rank FROM artifacts WHERE user_id=?" + project_clause +
+                    ") SELECT * FROM ranked WHERE version_rank=1"
+                    " ORDER BY created_at DESC, version DESC LIMIT ?",
+                    params,
                 ).fetchall()
         records = [
             Artifact(
@@ -484,18 +498,7 @@ class SessionStore:
             )
             for r in rows
         ]
-        if include_history:
-            return records[:limit]
-        latest: list[Artifact] = []
-        seen: set[str] = set()
-        for record in records:
-            if record.filename in seen:
-                continue
-            seen.add(record.filename)
-            latest.append(record)
-            if len(latest) >= limit:
-                break
-        return latest
+        return records[:limit]
 
     # ── retrieval cache ────────────────────────────────────
 

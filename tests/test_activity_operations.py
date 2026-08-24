@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
 
 from app import main, tools
-from app.llm import Reply, ToolCall, select_model
+from app.llm import LLMError, Reply, ToolCall, select_model
 from app.orchestrator import planner
 from app.services import activities as domain
 from app.services import context as ctx_mod
 from app.services.context import RequestContext
-from app.tools import activity, document
+from app.tools import activity, artifact as artifact_tool, document
+from app.tools.social import _date_bounds, search_social_references
 from tests.fakes import FakeLLM, say, tool
 
 
@@ -59,6 +61,36 @@ def test_readiness_reports_missing_unassigned_overdue_and_next_deadline(tmp_db):
     assert report["next_deadline"]["title"] == "完成報名表"
 
 
+def test_latest_artifact_query_deduplicates_before_limit(tmp_db, tmp_path):
+    uid = tmp_db.ensure_user("u_versions")
+    file_path = tmp_path / "artifact.docx"
+    file_path.write_text("x", encoding="utf-8")
+    for _ in range(35):
+        tmp_db.record_artifact(user_id=uid, filename="企劃書.docx", local_path=str(file_path))
+    tmp_db.record_artifact(user_id=uid, filename="簡報.pptx", local_path=str(file_path))
+
+    latest = tmp_db.list_artifacts(uid, limit=30)
+    assert {item.filename for item in latest} == {"企劃書.docx", "簡報.pptx"}
+    assert next(item for item in latest if item.filename == "企劃書.docx").version == 35
+
+
+def test_current_term_fingerprint_changes_when_term_changes(clean_term):
+    from app.services import current_term
+
+    before = current_term.fingerprint()
+    current_term.update({"academic_year": "115", "president": "林小明"})
+    after = current_term.fingerprint()
+    assert before != after
+
+
+def test_iso_date_range_keeps_date_hyphens_and_filters_sources():
+    assert _date_bounds("2026-01-01~2026-08-24") == ("2026-01-01", "2026-08-24")
+    included = search_social_references("招生", schools="北藝", date_range="2026-01-01~2026-08-24")
+    excluded = search_social_references("招生", schools="北藝", date_range="2025-01-01~2025-12-31")
+    assert included["references"]
+    assert excluded["references"] == []
+
+
 def test_activity_tools_are_idempotent_and_artifact_keeps_activity_lineage(tmp_db, tmp_output_dir):
     uid = tmp_db.ensure_user("u_tools", is_local=True)
     project_id = tmp_db.create_project(uid, "期初茶會")
@@ -80,6 +112,12 @@ def test_activity_tools_are_idempotent_and_artifact_keeps_activity_lineage(tmp_d
     saved = tmp_db.get_artifact(artifact["artifact_id"], uid)
     assert saved.meta["activity_id"] == first["activity_id"]
     assert tmp_db.list_activities(uid, project_id=project_id)[0]["id"] == first["activity_id"]
+
+    other = tmp_db.ensure_user("u_tools_other")
+    with ctx_mod.use(RequestContext(user_id=other, project_id=project_id)):
+        denied = artifact_tool.read_artifact(artifact["artifact_id"])
+    assert denied["ok"] is False
+    assert denied["code"] == "artifact_not_found"
 
 
 def test_activity_api_supports_crud_readiness_and_user_scope(tmp_db, monkeypatch):
@@ -187,6 +225,7 @@ async def test_activity_workflow_persists_tasks_and_feeds_followup_artifact(
 
     second_model = FakeLLM(
         script=[
+            tool("read_artifact", artifact_id=first_artifact["artifact_id"]),
             tool(
                 "create_slides", filename="期初茶會簡報", title="期初茶會",
                 slides_markdown="## 活動目標\n- 凝聚新生\n\n## 活動資訊\n- 日期：待填\n- 地點：待填",
@@ -200,6 +239,7 @@ async def test_activity_workflow_persists_tasks_and_feeds_followup_artifact(
     ]
     assert "## 目前活動的正式資料" in second_model.system_prompt()
     assert "確認教室" in second_model.system_prompt()
+    assert any("凝聚新生" in str(result.get("content") or "") for result in second_model.tool_results())
     second_artifact = next(event for event in second_events if event["type"] == "artifact_ready")
     assert second_artifact["activity_id"] == saved_activity["id"]
 
@@ -290,3 +330,71 @@ async def test_tool_timeout_emits_classified_failure_and_alternative(tmp_db, mon
     assert completed["ok"] is False
     assert completed["error_code"] == "tool_timeout"
     assert "重試" in completed["alternative"]
+
+
+@pytest.mark.asyncio
+async def test_pause_during_model_call_is_not_overwritten(tmp_db, monkeypatch):
+    from app import orchestrator as orch
+    from app.services import memory
+    from app.orchestrator.state import WorkflowStatus
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class WaitingModel:
+        model = "waiting/model"
+
+        async def chat(self, *_args, **_kwargs):
+            started.set()
+            await release.wait()
+            return Reply(content="不應繼續交付")
+
+    monkeypatch.setattr(orch, "NvidiaClient", lambda **_: WaitingModel())
+    uid = tmp_db.ensure_user("u_pause_race", is_local=True)
+    sid = tmp_db.create_session(uid)
+
+    async def collect():
+        return [
+            event async for event in orch.run_turn(
+                RequestContext(user_id=uid, session_id=sid), "規劃期初茶會", destination="local",
+            )
+        ]
+
+    running = asyncio.create_task(collect())
+    await asyncio.wait_for(started.wait(), timeout=2)
+    project_id = tmp_db.get_session(sid, uid)["project_id"]
+    await main._control_task(project_id, "pause", uid)
+    release.set()
+    events = await running
+
+    assert any(event["type"] == "task_paused" for event in events)
+    assert not any(event["type"] == "task_completed" for event in events)
+    assert memory.load_state(tmp_db, project_id).workflow_status == WorkflowStatus.PAUSED
+
+
+@pytest.mark.asyncio
+async def test_model_failure_marks_a_retryable_step(tmp_db, monkeypatch):
+    from app import orchestrator as orch
+    from app.services import memory
+
+    class BrokenModel:
+        model = "broken/model"
+
+        async def chat(self, *_args, **_kwargs):
+            raise LLMError("暫時無法使用")
+
+    monkeypatch.setattr(orch, "NvidiaClient", lambda **_: BrokenModel())
+    uid = tmp_db.ensure_user("u_model_retry", is_local=True)
+    sid = tmp_db.create_session(uid)
+    events = [
+        event async for event in orch.run_turn(
+            RequestContext(user_id=uid, session_id=sid), "規劃期初茶會", destination="local",
+        )
+    ]
+    assert any(event["type"] == "error" for event in events)
+    project_id = tmp_db.get_session(sid, uid)["project_id"]
+    state = memory.load_state(tmp_db, project_id)
+    assert any(step.status == "failed" for step in state.plan_steps)
+    retried = await main._control_task(project_id, "retry", uid)
+    assert retried["action"] == "retry"
+    assert not any(step["status"] == "failed" for step in retried["steps"])

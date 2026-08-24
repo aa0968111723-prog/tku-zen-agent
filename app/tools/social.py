@@ -46,6 +46,16 @@ def _normalise_date(value: str) -> str:
     return f"{match.group(1)}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
 
 
+def _date_bounds(value: str) -> tuple[str, str]:
+    """從範圍字串抽出完整日期，不能把 ISO 日期本身的連字號當分隔符。"""
+    matches = re.findall(r"20\d{2}[-/]?\d{1,2}[-/]?\d{1,2}", value or "")
+    dates = [_normalise_date(item) for item in matches]
+    dates = [item for item in dates if item]
+    if not dates:
+        return "", ""
+    return dates[0], dates[-1]
+
+
 def _references(
     query: str, top_k: int = 5, *, schools: str = "", platform: str = "",
     activity_type: str = "", date_range: str = "",
@@ -63,9 +73,7 @@ def _references(
     wanted_schools = [x.strip().lower() for x in re.split(r"[,，、\s]+", schools) if x.strip()]
     wanted_platform = (platform or "").strip().lower()
     wanted_activity = (activity_type or "").strip().lower()
-    range_parts = re.split(r"\s*(?:至|到|~|～|-)\s*", date_range) if date_range else []
-    range_start = _normalise_date(range_parts[0]) if range_parts else ""
-    range_end = _normalise_date(range_parts[-1]) if len(range_parts) > 1 else range_start
+    range_start, range_end = _date_bounds(date_range)
 
     for position, (score, chunk) in enumerate(hits, 1):
         meta = getattr(chunk, "meta", None)

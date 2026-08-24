@@ -30,11 +30,14 @@ def test_composite_routing_has_explicit_dependency_graph():
 
     slides_state, slides_routing = planner.understand("把上一份企劃改成簡報")
     assert slides_state.artifacts_expected == ["slides"]
-    assert slides_routing.tool_names() == ("search_knowledge", "get_current_term", "create_slides")
+    assert slides_routing.tool_names() == (
+        "search_knowledge", "get_current_term", "read_artifact", "create_slides",
+    )
 
     reels_state, reels_routing = planner.understand("將輪播改成 Reels 腳本")
     assert reels_state.artifacts_expected == ["document"]
     assert "create_reels_script" in reels_routing.tool_names()
+    assert "read_artifact" in reels_routing.tool_names()
 
 
 def test_query_and_restart_phrases_keep_their_task_intent():

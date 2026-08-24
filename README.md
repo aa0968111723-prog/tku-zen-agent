@@ -216,7 +216,7 @@ python scripts/ingest_line.py --dry-run
 
 ```bash
 python scripts/selftest.py    # 快速檢查，30 秒
-python -m pytest              # 342 個測試（含活動／工作流／SSE／artifact／認證／權限／網宣）
+python -m pytest              # 347 個測試（含活動／工作流／SSE／artifact／認證／權限／網宣）
 python -m evals               # 60 個真實社團情境
 ```
 
@@ -235,7 +235,7 @@ Evals 的九個維度與目前分數：
 | **hallucination（門檻必須為 0）** | **0 件** |
 | task completion | 100% |
 | artifact validity | 100% |
-| latency（框架開銷） | 平均約 128 ms（依機器與索引快取而異） |
+| latency（框架開銷） | 平均約 127 ms（依機器與索引快取而異） |
 
 ---
 
@@ -264,10 +264,10 @@ app/
 │   └── context.py        請求身分（contextvars）
 ├── skills/               11 個 skill 與規則式路由
 ├── verification/         產出檢查與修正指示
-├── tools/                24 個工具
+├── tools/                25 個工具
 └── static/               聊天介面、本學期設定
 evals/                    60 個情境 + 九維評分
-tests/                    342 個測試
+tests/                    347 個測試
 ```
 
 ### 幾個刻意的取捨
