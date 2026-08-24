@@ -33,6 +33,8 @@ class TaskType(str, Enum):
     HANDOVER = "handover"
     KNOWLEDGE = "knowledge"
     UNKNOWN = "unknown"
+    SOCIAL_RESEARCH = "social_research"
+    SOCIAL_PUBLICITY = "social_publicity"
 
 
 @dataclass

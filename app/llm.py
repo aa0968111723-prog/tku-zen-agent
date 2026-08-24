@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -18,6 +19,8 @@ from typing import Any
 import httpx
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 
 class LLMError(RuntimeError):
@@ -244,6 +247,9 @@ class NvidiaClient:
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     json=payload,
                 )
+                if resp.status_code in {401, 404}:
+                    logger.error("upstream LLM endpoint rejected request: status=%s", resp.status_code)
+                    raise LLMError("模型服務目前無法使用，請稍後再試")
                 if resp.status_code == 401:
                     raise LLMError("NVIDIA API 金鑰被拒（401）。請確認 .env 裡的 NVIDIA_API_KEY 正確且未過期。")
                 if resp.status_code == 404:
@@ -254,7 +260,8 @@ class NvidiaClient:
                 if resp.status_code == 429 or resp.status_code >= 500:
                     raise httpx.HTTPStatusError("retryable", request=resp.request, response=resp)
                 if resp.status_code >= 400:
-                    raise LLMError(f"NVIDIA API 回應 {resp.status_code}：{resp.text[:500]}")
+                    logger.error("upstream LLM request failed: status=%s", resp.status_code)
+                    raise LLMError("模型服務暫時無法回應，請稍後再試")
                 _telemetry["total_seconds"] += time.perf_counter() - started
                 return self._parse(resp.json(), valid_names={t["function"]["name"] for t in (tools or [])})
             except LLMError:
@@ -273,14 +280,14 @@ class NvidiaClient:
         _telemetry["total_seconds"] += time.perf_counter() - started
         raise LLMError(
             "連續呼叫 NVIDIA API 失敗（可能是免費額度用完、達到每分鐘 40 次上限，或網路問題）。"
-            f"最後一次錯誤：{last_error}"
+            ""
         )
 
     @staticmethod
     def _parse(data: dict[str, Any], valid_names: set[str]) -> Reply:
         choices = data.get("choices") or []
         if not choices:
-            raise LLMError(f"NVIDIA API 回應沒有 choices：{json.dumps(data, ensure_ascii=False)[:400]}")
+            raise LLMError("模型服務回應格式異常，請稍後再試")
         msg = choices[0].get("message") or {}
         content = (msg.get("content") or "").strip()
 
