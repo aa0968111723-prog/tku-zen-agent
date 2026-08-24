@@ -27,6 +27,7 @@ from ..llm import LLMError, NvidiaClient, Reply, estimate_cost, select_model
 from ..services import activities as activity_service
 from ..services import context as ctx_mod
 from ..services import current_term as term_service
+from ..services import fal as fal_service
 from ..services import memory as memory_service
 from ..services.session_store import get_store
 from ..skills import SKILL_BY_NAME
@@ -176,10 +177,11 @@ async def run_turn(
     *,
     destination: str,
     model: str | None = None,
+    attachments: list[dict[str, str]] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """跑完一輪。事件會即時 yield 出去給前端。"""
     with ctx_mod.use(ctx):
-        async for event in _run(ctx, user_message, destination=destination, model=model):
+        async for event in _run(ctx, user_message, destination=destination, model=model, attachments=attachments):
             yield event
 
 
@@ -189,6 +191,7 @@ async def _run(
     *,
     destination: str,
     model: str | None,
+    attachments: list[dict[str, str]] | None,
 ) -> AsyncIterator[dict[str, Any]]:
     store = get_store()
     session_id = ctx.session_id or ""
@@ -273,6 +276,26 @@ async def _run(
         "model_tier": decision["tier"],
     }
 
+    # 圖片只交由 fal.ai 視覺服務整理，文字代理不再直接收到圖片 Base64。
+    # 摘要只停留在這次的模型訊息中，不能寫進任務歷史或資料庫。
+    visual_summary = ""
+    if attachments:
+        yield {"type": "visual_analysis_started", "count": len(attachments)}
+        try:
+            visual_summary = await fal_service.describe_images(attachments)
+        except fal_service.FalError as exc:
+            state.metrics["failure_count"] = int(state.metrics.get("failure_count", 0)) + 1
+            state.stage = Stage.FAILED
+            state.completion_status = "failed"
+            state.workflow_status = WorkflowStatus.FAILED
+            state.last_error_code = exc.code
+            state.next_action = "請改用文字描述圖片內容，或稍後重新加入圖片"
+            memory_service.save_state(store, project_id, state)
+            yield {"type": "error", "text": str(exc), "error_code": exc.code}
+            return
+        state.metrics["visual_attachments"] = len(attachments)
+        yield {"type": "visual_analysis_completed", "count": len(attachments)}
+
     # ── Plan ─────────────────────────────────────────────
     state.stage = Stage.PLAN
     yield {
@@ -354,7 +377,9 @@ async def _run(
     # ── Execute ──────────────────────────────────────────
     state.stage = Stage.EXECUTE
     memory_service.save_state(store, project_id, state)
-    client = _client(decision["model"])
+    # 文字模型的選擇與是否加入圖片無關；圖片已在上方由 fal.ai 轉成暫時摘要。
+    selected_model = model or decision["model"]
+    client = _client(selected_model)
     tool_schemas = tools.schemas_for(routing.tool_names())
     activity_context = activity_service.project_activity_context(store, ctx.user_id, project_id)
 
@@ -372,8 +397,17 @@ async def _run(
             research_sources=store.list_research_sources(project_id),
             activity_context=activity_context,
         ),
-        user_message=user_message,
+        user_message=(
+            user_message
+            if not visual_summary
+            else (
+                f"{user_message}\n\n"
+                "【圖片可見資訊（fal 視覺服務整理，僅供本次任務使用）】\n"
+                f"{visual_summary}"
+            )
+        ),
     )
+    # 只保存使用者原始文字；圖片 Base64 與 fal 視覺摘要都不進對話歷史。
     memory_service.persist_user_message(store, session_id, user_message)
 
     produced: list[dict[str, Any]] = []
@@ -401,7 +435,7 @@ async def _run(
                 )
                 yield {"type": event_type, "summary": controlled_after_model.public_summary()}
                 return
-            _record_usage(state, reply, decision["model"])
+            _record_usage(state, reply, selected_model)
             memory_service.save_state(store, project_id, state)
         except LLMError:
             controlled_after_error = _control_state(store, project_id)
