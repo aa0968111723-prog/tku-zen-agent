@@ -1,8 +1,7 @@
-"""應用程式角色定義與權限對照。
+"""角色常數與權限輔助。
 
-Guest / User / Editor / Admin / System。
-目前實作：未登入 = Guest；一般 cookie = User；admin cookie = Admin。
-Editor 預留給幹部細分（與 User 同等能力，直到產品需要獨立 token）。
+PR-01 只建立穩定的角色名稱與檢查函式，不改變既有 cookie 登入流程。
+後續 HITL／工具暴露可依 Role 擴充。
 """
 
 from __future__ import annotations
@@ -18,41 +17,41 @@ class Role(str, Enum):
     SYSTEM = "system"
 
 
-# 由低到高，便於比較
-_ROLE_RANK = {
+# 由低到高：數字越大權限越高（僅供比較，正式授權仍看 cookie／token）
+ROLE_RANK = {
     Role.GUEST: 0,
-    Role.USER: 1,
-    Role.EDITOR: 2,
-    Role.ADMIN: 3,
-    Role.SYSTEM: 4,
+    Role.USER: 10,
+    Role.EDITOR: 20,
+    Role.ADMIN: 30,
+    Role.SYSTEM: 40,
 }
 
 
-def rank(role: Role) -> int:
-    return _ROLE_RANK[role]
+def rank(role: Role | str) -> int:
+    if isinstance(role, str):
+        try:
+            role = Role(role)
+        except ValueError:
+            return -1
+    return ROLE_RANK.get(role, -1)
 
 
-def at_least(role: Role, minimum: Role) -> bool:
-    return rank(role) >= rank(minimum)
+def has_at_least(actual: Role | str, required: Role | str) -> bool:
+    return rank(actual) >= rank(required)
 
 
-def resolve_role(*, authenticated: bool, is_admin: bool) -> Role:
-    if is_admin:
-        return Role.ADMIN
-    if authenticated:
-        return Role.USER
-    return Role.GUEST
+# 高風險動作：代理不得自行完成，須人工或 admin
+FORBIDDEN_AUTONOMOUS_ACTIONS = frozenset(
+    {
+        "instagram.publish",
+        "instagram.comments.reply",
+        "instagram.messages.send",
+        "data.bulk_export",
+        "data.delete_user",
+        "term.overwrite_without_admin",
+    }
+)
 
 
-# 工具／端點所需最低角色（文件化；執行時仍以 FastAPI Depends 為準）
-ENDPOINT_MIN_ROLE: dict[str, Role] = {
-    "chat": Role.USER,
-    "session": Role.USER,
-    "artifacts": Role.USER,
-    "download": Role.USER,
-    "term.read": Role.USER,
-    "term.write": Role.ADMIN,
-    "reindex": Role.ADMIN,
-    "instagram.publish": Role.ADMIN,
-    "admin.health": Role.ADMIN,
-}
+def is_forbidden_autonomous(action: str) -> bool:
+    return action in FORBIDDEN_AUTONOMOUS_ACTIONS
