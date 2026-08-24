@@ -37,30 +37,101 @@ def _path(name: str, default: str) -> Path:
     return p if p.is_absolute() else (ROOT / p)
 
 
-# ── NVIDIA Build（OpenAI 相容）─────────────────────────────────
+# ── 文字模型供應商（OpenAI 相容）──────────────────────────────
+# 兩家都是 OpenAI 相容的 /chat/completions＋Bearer 認證，所以只差設定：
+#   nvidia  —— NVIDIA Build（免費額度、開源模型）
+#   zeabur  —— Zeabur AI Hub（一把金鑰通到 GPT／Claude／Gemini／Grok）
+# 供應商用 LLM_PROVIDER 指定；沒指定時，設了 ZEABUR_API_KEY 就走 zeabur，
+# 否則維持 nvidia（既有部署不受影響）。
+_PROVIDER_PRESETS: dict[str, dict[str, object]] = {
+    "nvidia": {
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "model": "meta/llama-3.1-70b-instruct",
+        "fast": "meta/llama-3.1-8b-instruct",
+        "strong": "meta/llama-3.3-70b-instruct",
+        "known": [
+            "meta/llama-3.1-70b-instruct",
+            "meta/llama-3.3-70b-instruct",
+            "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+            "moonshotai/kimi-k2-instruct",
+            "qwen/qwen2.5-72b-instruct",
+            "mistralai/mixtral-8x22b-instruct",
+        ],
+    },
+    "zeabur": {
+        # 東京節點離台灣最近；要換區域設 LLM_BASE_URL=https://sfo1.aihub.zeabur.ai/v1
+        "base_url": "https://hnd1.aihub.zeabur.ai/v1",
+        "model": "gpt-4o",
+        "fast": "gpt-4o-mini",
+        "strong": "claude-3-5-sonnet",
+        "known": [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "claude-3-5-sonnet",
+            "claude-3-opus",
+            "gemini-2.0-flash",
+            "grok-2",
+        ],
+    },
+}
+
 NVIDIA_API_KEY = _secret("NVIDIA_API_KEY")
-NVIDIA_BASE_URL = (os.getenv("NVIDIA_BASE_URL") or "https://integrate.api.nvidia.com/v1").rstrip("/")
-NVIDIA_MODEL = (os.getenv("NVIDIA_MODEL") or "meta/llama-3.1-70b-instruct").strip()
-NVIDIA_FAST_MODEL = (os.getenv("NVIDIA_FAST_MODEL") or "meta/llama-3.1-8b-instruct").strip()
-NVIDIA_STRONG_MODEL = (os.getenv("NVIDIA_STRONG_MODEL") or NVIDIA_MODEL).strip()
-# NVIDIA Build 目前通常以額度計費而非美元；需要自架或付費端點時可填實際單價。
-NVIDIA_INPUT_COST_PER_MILLION = float(os.getenv("NVIDIA_INPUT_COST_PER_MILLION") or 0)
-NVIDIA_OUTPUT_COST_PER_MILLION = float(os.getenv("NVIDIA_OUTPUT_COST_PER_MILLION") or 0)
-# ── fal.ai 視覺服務（選用）────────────────────────────────────
-# 文字代理仍使用上方的 NVIDIA 模型。只有圖片理解與使用者主動生成的
-# 視覺稿會送往 fal.ai；未設定時，文字工作台仍可正常使用。
+ZEABUR_API_KEY = _secret("ZEABUR_API_KEY")
+
+
+def _resolve_provider() -> str:
+    explicit = (os.getenv("LLM_PROVIDER") or "").strip().lower()
+    if explicit in _PROVIDER_PRESETS:
+        return explicit
+    return "zeabur" if ZEABUR_API_KEY else "nvidia"
+
+
+LLM_PROVIDER = _resolve_provider()
+_PRESET = _PROVIDER_PRESETS[LLM_PROVIDER]
+
+# 金鑰：優先用供應商專屬變數，其次是通用的 LLM_API_KEY
+LLM_API_KEY = (
+    (ZEABUR_API_KEY if LLM_PROVIDER == "zeabur" else NVIDIA_API_KEY)
+    or _secret("LLM_API_KEY")
+)
+LLM_BASE_URL = (
+    os.getenv("LLM_BASE_URL")
+    or os.getenv("NVIDIA_BASE_URL")
+    or str(_PRESET["base_url"])
+).rstrip("/")
+LLM_MODEL = (os.getenv("LLM_MODEL") or os.getenv("NVIDIA_MODEL") or str(_PRESET["model"])).strip()
+LLM_FAST_MODEL = (os.getenv("LLM_FAST_MODEL") or os.getenv("NVIDIA_FAST_MODEL") or str(_PRESET["fast"])).strip()
+LLM_STRONG_MODEL = (
+    os.getenv("LLM_STRONG_MODEL") or os.getenv("NVIDIA_STRONG_MODEL") or str(_PRESET["strong"])
+).strip()
+
+# 舊名保留：既有程式與 .env 都還在用 NVIDIA_* 這組名字。
+# 它們現在只是「目前供應商」的別名，不再綁定 NVIDIA。
+NVIDIA_BASE_URL = LLM_BASE_URL
+NVIDIA_MODEL = LLM_MODEL
+NVIDIA_FAST_MODEL = LLM_FAST_MODEL
+NVIDIA_STRONG_MODEL = LLM_STRONG_MODEL
+# NVIDIA Build 以額度計費；Zeabur AI Hub 是預付點數。要看美元估算就填單價。
+NVIDIA_INPUT_COST_PER_MILLION = float(
+    os.getenv("LLM_INPUT_COST_PER_MILLION") or os.getenv("NVIDIA_INPUT_COST_PER_MILLION") or 0
+)
+NVIDIA_OUTPUT_COST_PER_MILLION = float(
+    os.getenv("LLM_OUTPUT_COST_PER_MILLION") or os.getenv("NVIDIA_OUTPUT_COST_PER_MILLION") or 0
+)
+
+# ── fal.ai 視覺服務（圖片輸入與輸出）──────────────────────────
+# 圖片理解（使用者上傳的照片、海報）與視覺稿生成都走 fal.ai；
+# 未設定時，文字工作台仍可正常使用，只是圖片功能會誠實說明未啟用。
 FAL_KEY = (os.getenv("FAL_KEY") or "").strip()
 FAL_VISION_MODEL = (os.getenv("FAL_VISION_MODEL") or "google/gemini-2.5-flash").strip()
 FAL_IMAGE_MODEL = (os.getenv("FAL_IMAGE_MODEL") or "fal-ai/flux/schnell").strip()
 
-# 給介面下拉選單用：已知支援 function calling 的免費模型
+# 給介面下拉選單用：目前供應商已知支援 function calling 的模型。
+# 可用 LLM_KNOWN_MODELS（逗號分隔）覆寫。
 KNOWN_TOOL_MODELS = [
-    "meta/llama-3.1-70b-instruct",
-    "meta/llama-3.3-70b-instruct",
-    "nvidia/llama-3.3-nemotron-super-49b-v1.5",
-    "moonshotai/kimi-k2-instruct",
-    "qwen/qwen2.5-72b-instruct",
-    "mistralai/mixtral-8x22b-instruct",
+    m.strip()
+    for m in (os.getenv("LLM_KNOWN_MODELS") or ",".join(_PRESET["known"])).split(",")  # type: ignore[arg-type]
+    if m.strip()
 ]
 
 # ── 產出落點 ──────────────────────────────────────────────────
@@ -153,13 +224,21 @@ bootstrap_current_term()
 def missing_config() -> list[str]:
     """回傳啟動時該提醒使用者的設定問題。"""
     problems: list[str] = []
-    if not NVIDIA_API_KEY or NVIDIA_API_KEY.startswith("nvapi-請填入"):
-        problems.append(
-            "尚未設定 NVIDIA_API_KEY。請到 https://build.nvidia.com/settings/api-keys "
-            "免費申請，再填進專案根目錄的 .env 檔。"
-        )
-    elif not NVIDIA_API_KEY.startswith("nvapi-"):
+    if not LLM_API_KEY or LLM_API_KEY.startswith(("nvapi-請填入", "請填入")):
+        if LLM_PROVIDER == "zeabur":
+            problems.append(
+                "尚未設定 ZEABUR_API_KEY。請到 Zeabur 後台 → AI Hub → API Keys 取得，"
+                "再填進 .env 或部署環境變數。"
+            )
+        else:
+            problems.append(
+                "尚未設定 NVIDIA_API_KEY。請到 https://build.nvidia.com/settings/api-keys "
+                "免費申請，再填進專案根目錄的 .env 檔。"
+            )
+    elif LLM_PROVIDER == "nvidia" and not LLM_API_KEY.startswith("nvapi-"):
         problems.append("NVIDIA_API_KEY 格式看起來不對，正常應該以 nvapi- 開頭。")
+    if not FAL_KEY:
+        problems.append("尚未設定 FAL_KEY，圖片理解與視覺稿生成會停用（文字功能不受影響）。")
     if DEFAULT_DESTINATION not in {"local", "drive", "both"}:
         problems.append(f"DEFAULT_DESTINATION 只能是 local / drive / both，目前是 {DEFAULT_DESTINATION!r}。")
     if auth_mode() == "token" and not APP_ACCESS_TOKEN:

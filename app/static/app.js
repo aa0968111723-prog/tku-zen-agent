@@ -2883,6 +2883,18 @@ async function loadIgStatus() {
 // 模型下拉不顯示原始供應商 ID——顯示中文描述＋簡短名。
 // 送到後端的 option value 維持原始 ID 不變；原名放在 title 供進階使用者查看。
 const MODEL_DISPLAY = [
+  // Zeabur AI Hub（GPT／Claude／Gemini／Grok）
+  [/gpt-4o[-_.]?mini/i, "輕快（GPT-4o mini）"],
+  [/gpt-4o/i, "標準（GPT-4o）"],
+  [/^o1|[-_.]o1$/i, "推理強化（o1）"],
+  [/o3[-_.]?mini/i, "推理輕快（o3-mini）"],
+  [/claude.*opus/i, "長文精修（Claude Opus）"],
+  [/claude.*sonnet/i, "標準（Claude Sonnet）"],
+  [/claude.*haiku/i, "輕快（Claude Haiku）"],
+  [/gemini.*flash/i, "輕快（Gemini Flash）"],
+  [/gemini/i, "標準（Gemini）"],
+  [/grok/i, "通用（Grok）"],
+  // NVIDIA Build（開源模型）
   // nemotron 要排在 llama 之前：其 ID 常內含 llama-3.3（如 llama-3.3-nemotron-super-49b）
   [/nemotron/i, "推理強化（Nemotron 49B）"],
   [/kimi/i, "長文（Kimi K2）"],

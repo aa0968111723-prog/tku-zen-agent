@@ -30,19 +30,44 @@ class LLMError(RuntimeError):
     pass
 
 
+# ── 供應商顯示名（錯誤訊息用；不要在訊息裡硬編碼某一家）────────
+_PROVIDER_NAMES = {"nvidia": "NVIDIA Build", "zeabur": "Zeabur AI Hub"}
+_PROVIDER_KEY_ENV = {"nvidia": "NVIDIA_API_KEY", "zeabur": "ZEABUR_API_KEY"}
+_PROVIDER_SIGNUP = {
+    "nvidia": "https://build.nvidia.com/settings/api-keys",
+    "zeabur": "https://zeabur.com/dashboard（AI Hub → API Keys）",
+}
+
+
+def _provider_name() -> str:
+    return _PROVIDER_NAMES.get(config.LLM_PROVIDER, "模型服務")
+
+
+def _key_env_name() -> str:
+    return _PROVIDER_KEY_ENV.get(config.LLM_PROVIDER, "LLM_API_KEY")
+
+
+def _missing_key_message() -> str:
+    return (
+        f"沒有 {_provider_name()} 的 API 金鑰。請到 "
+        f"{_PROVIDER_SIGNUP.get(config.LLM_PROVIDER, '供應商後台')} 取得一組，"
+        f"填進 .env 或部署環境變數的 {_key_env_name()}。"
+    )
+
+
 # ── 模型路由 ─────────────────────────────────────────────────
 # 不同階段對模型的要求不一樣：分類/改寫要快，長文與工具呼叫要穩。
 # 使用者在介面上選的模型永遠優先（override），這裡只是沒指定時的預設。
 MODEL_ROUTES: dict[str, str] = {
-    "classify": config.NVIDIA_FAST_MODEL,         # 短、量大、要求低
+    "classify": config.LLM_FAST_MODEL,         # 短、量大、要求低
     "execute": "",                              # 空 = 用 config.NVIDIA_MODEL
-    "longform": config.NVIDIA_STRONG_MODEL,
+    "longform": config.LLM_STRONG_MODEL,
 }
 
 
 def route_model(task: str = "execute") -> str:
     """依任務類型挑模型。沒設定就退回使用者的主力模型。"""
-    return (MODEL_ROUTES.get(task) or config.NVIDIA_MODEL).strip()
+    return (MODEL_ROUTES.get(task) or config.LLM_MODEL).strip()
 
 
 def select_model(
@@ -231,9 +256,9 @@ def _salvage_inline_tool_call(content: str, valid_names: set[str]) -> list[ToolC
 
 class NvidiaClient:
     def __init__(self, api_key: str | None = None, base_url: str | None = None, model: str | None = None):
-        self.api_key = api_key or config.NVIDIA_API_KEY
-        self.base_url = (base_url or config.NVIDIA_BASE_URL).rstrip("/")
-        self.model = model or config.NVIDIA_MODEL
+        self.api_key = api_key or config.LLM_API_KEY
+        self.base_url = (base_url or config.LLM_BASE_URL).rstrip("/")
+        self.model = model or config.LLM_MODEL
 
     async def chat(
         self,
@@ -246,10 +271,7 @@ class NvidiaClient:
         max_retries: int = 4,
     ) -> Reply:
         if not self.api_key:
-            raise LLMError(
-                "沒有 NVIDIA API 金鑰。請到 https://build.nvidia.com/settings/api-keys "
-                "免費申請一組，填進專案根目錄的 .env 檔的 NVIDIA_API_KEY。"
-            )
+            raise LLMError(_missing_key_message())
 
         payload: dict[str, Any] = {
             "model": model or self.model,
@@ -283,7 +305,10 @@ class NvidiaClient:
                 # 不然金鑰貼錯永遠只看得到「模型服務無法使用」（稽核不可靠 #2）。
                 if resp.status_code == 401:
                     logger.error("NVIDIA API key rejected (401)")
-                    raise LLMError("NVIDIA API 金鑰被拒（401）。請確認 .env 裡的 NVIDIA_API_KEY 正確且未過期。")
+                    raise LLMError(
+                        f"{_provider_name()} 的 API 金鑰被拒（401）。"
+                        f"請確認環境變數 {_key_env_name()} 正確且未過期。"
+                    )
                 if resp.status_code == 404:
                     logger.error("model not found (404): %s", payload["model"])
                     raise LLMError(
@@ -313,7 +338,7 @@ class NvidiaClient:
         _telemetry["failures"] += 1
         _telemetry["total_seconds"] += time.perf_counter() - started
         raise LLMError(
-            "連續呼叫 NVIDIA API 失敗（可能是免費額度用完、達到每分鐘 40 次上限，或網路問題）。"
+            f"連續呼叫 {_provider_name()} 失敗（可能是額度或點數用完、達到速率上限，或網路問題）。"
         )
 
     @staticmethod

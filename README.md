@@ -7,24 +7,47 @@
 507 份歷年檔案**（企劃書、活動細流、社評報告、社課簡報、IG 文案、財務表、
 挑戰營資料），所以做出來的東西跟社團一直以來的格式對得上。
 
-用 NVIDIA Build 的**免費模型**驅動，不用付月費。
+模型層可切換供應商（兩家都是 OpenAI 相容端點，只差設定）：
+
+- **Zeabur AI Hub**（建議）—— 一把金鑰通到 GPT／Claude／Gemini／Grok，預付點數計費，
+  工具呼叫穩定度明顯優於開源模型。
+- **NVIDIA Build** —— 免費額度、開源模型，不用付月費。
+
+圖片的**輸入（理解上傳的照片、海報）與輸出（生成視覺稿）**都走 **fal.ai**；
+沒設定 `FAL_KEY` 時圖片功能會誠實說明未啟用，純文字任務不受影響。
 
 ---
 
 ## 三分鐘上手
 
-### 1. 拿一組免費的 NVIDIA 金鑰
+### 1. 拿一組模型金鑰（擇一）
 
-到 <https://build.nvidia.com/settings/api-keys> 註冊並產生金鑰。
+**Zeabur AI Hub**（建議）：Zeabur 後台 → AI Hub → API Keys。預付點數，
+一把金鑰即可用 GPT-4o／Claude／Gemini／Grok，換模型只要改 `LLM_MODEL`。
+
+**NVIDIA Build**（免費）：<https://build.nvidia.com/settings/api-keys> 註冊並產生金鑰。
 不用信用卡，註冊送 1,000 點推論額度（可申請加到 5,000），每分鐘 40 次請求。
+
+圖片功能另外需要 fal.ai 金鑰：<https://fal.ai/dashboard/keys>（選用）。
 
 ### 2. 雙擊 `啟動.bat`
 
 第一次會自動建立 Python 環境、安裝套件、開記事本讓你貼金鑰：
 
 ```
-NVIDIA_API_KEY=nvapi-你的金鑰
+# Zeabur AI Hub（建議）
+LLM_PROVIDER=zeabur
+ZEABUR_API_KEY=你的金鑰
+
+# 或 NVIDIA Build（免費）
+# NVIDIA_API_KEY=nvapi-你的金鑰
+
+# 圖片理解與視覺稿（選用）
+FAL_KEY=你的-fal-金鑰
 ```
+
+模型可用 `LLM_MODEL` 指定（留空用供應商預設）；端點用 `LLM_BASE_URL`
+（Zeabur 東京 `https://hnd1.aihub.zeabur.ai/v1`、美西 `https://sfo1.aihub.zeabur.ai/v1`）。
 
 ### 3. 瀏覽器打開 <http://127.0.0.1:8848>
 
@@ -139,7 +162,8 @@ Google 沒有可以直接呼叫的表單建立 API。代理改成產一支 Apps 
 1. 推到 GitHub（`.env`、`data/`、產出檔都在 `.gitignore` 裡）
 2. Zeabur → 新增服務 → 從 GitHub 部署
 3. 環境變數：
-   - `NVIDIA_API_KEY`
+   - `LLM_PROVIDER=zeabur` ＋ `ZEABUR_API_KEY`（或改用 `NVIDIA_API_KEY`）
+   - `FAL_KEY`（圖片理解與視覺稿；不設就停用圖片功能）
    - **`APP_ACCESS_TOKEN`** ← 一般授權碼，一定要設，見下
    - **`ADMIN_ACCESS_TOKEN`** ← 管理授權碼（重建索引、改本學期資料、Instagram 連接）
    - `DEFAULT_DESTINATION=drive`
@@ -173,7 +197,7 @@ Google 沒有可以直接呼叫的表單建立 API。代理改成產一支 Apps 
 補救步驟，補上環境變數後重新部署即可。
 
 環境變數的值請只填授權碼本身，不要連前後引號一起貼——引號會被當成授權碼的一部分。
-（`APP_ACCESS_TOKEN`、`ADMIN_ACCESS_TOKEN`、`NVIDIA_API_KEY`、`INSTAGRAM_ACCESS_TOKEN`
+（`APP_ACCESS_TOKEN`、`ADMIN_ACCESS_TOKEN`、`ZEABUR_API_KEY`、`NVIDIA_API_KEY`、`FAL_KEY`、`INSTAGRAM_ACCESS_TOKEN`
 已經會自動去掉貼錯的引號。）
 
 另外：
@@ -303,7 +327,7 @@ Evals 共 64 個情境，含事件流斷言與學校歸屬幻覺偵測，單一�
 ```
 app/
 ├── main.py               FastAPI 路由、認證、任務控制、活動 API、SSE
-├── llm.py                NVIDIA Build 用戶端（模型路由、重試、telemetry）
+├── llm.py                模型用戶端（Zeabur AI Hub／NVIDIA Build 可切換、重試、telemetry）
 ├── orchestrator/         Understand→Plan→Retrieve→Execute→Verify→Repair→Deliver
 │   ├── planner.py        規則式意圖分類、複合任務依賴計畫
 │   ├── prompt.py         分層系統提示（事實優先順序）
@@ -380,7 +404,7 @@ scipy 沒裝或語料太小時自動降級成純 BM25。
 
 | 症狀 | 原因 |
 |---|---|
-| 黃色警告說沒有金鑰 | `.env` 的 `NVIDIA_API_KEY` 沒填或填錯 |
+| 黃色警告說沒有金鑰 | `.env` 的 `ZEABUR_API_KEY`／`NVIDIA_API_KEY` 沒填或填錯 |
 | 「金鑰被拒（401）」 | 金鑰失效，重新產一組 |
 | 「找不到模型（404）」 | 模型代號改了，到 build.nvidia.com/models 查 |
 | 「連續呼叫失敗」 | 免費額度用完、超過每分鐘 40 次、或網路問題 |
