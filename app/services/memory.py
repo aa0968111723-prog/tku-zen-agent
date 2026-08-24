@@ -64,7 +64,13 @@ def ensure_project(store: SessionStore, ctx: ctx_mod.RequestContext, state: Orch
 
 
 def save_state(store: SessionStore, project_id: str, state: OrchestrationState) -> None:
-    store.remember(project_id, STATE_KEY, json.dumps(state.to_dict(), ensure_ascii=False), source="orchestrator")
+    store.remember(
+        project_id,
+        STATE_KEY,
+        json.dumps(state.to_dict(), ensure_ascii=False),
+        source="orchestrator",
+        max_len=24000,
+    )
     store.touch_project(project_id)
 
 

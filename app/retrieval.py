@@ -267,8 +267,9 @@ class Index:
         k: int = 6,
         min_curated: int | None = None,
         include_external: bool = False,
+        chunk_filter=None,
     ) -> list[tuple[float, Chunk]]:
-        return self.search_scored(query, k, min_curated, include_external)[0]
+        return self.search_scored(query, k, min_curated, include_external, chunk_filter)[0]
 
     def search_scored(
         self,
@@ -276,6 +277,7 @@ class Index:
         k: int = 6,
         min_curated: int | None = None,
         include_external: bool = False,
+        chunk_filter=None,
     ) -> tuple[list[tuple[float, Chunk]], float]:
         """回傳 (結果, 信心值)。
 
@@ -291,6 +293,8 @@ class Index:
         scored: list[tuple[float, Chunk]] = []
         for c in self.chunks:
             if not include_external and getattr(c.meta, "source_type", "") == "external_reference":
+                continue
+            if chunk_filter is not None and not chunk_filter(c):
                 continue
             length = c.length
             score = 0.0
@@ -400,7 +404,7 @@ def get_index(rebuild: bool = False) -> Index:
     return _index
 
 
-def build_context(queries: list[str], *, task_type: str = ""):
+def build_context(queries: list[str], *, task_type: str = "", scope=None):
     """對外的 hybrid 檢索入口（orchestrator 用）。
 
     放在這裡而不是直接 import app.rag，是為了讓 app.rag 可以反過來
@@ -408,4 +412,4 @@ def build_context(queries: list[str], *, task_type: str = ""):
     """
     from .rag.context import build_context as _build
 
-    return _build(queries, task_type=task_type)
+    return _build(queries, task_type=task_type, scope=scope)

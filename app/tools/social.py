@@ -6,13 +6,11 @@ the normal artifact directory and never publish to Instagram.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
 from .. import retrieval
-from ..rag import parse
-from ..services import current_term as term_service
+from ..research import entities as research_entities
 from .base import Artifact, dated_dir, deliver, safe_filename, unique_path
 
 EXTERNAL_WARNING = "【外校公開參考——僅供比較分析，禁止照抄，不是淡江資料】"
@@ -24,38 +22,45 @@ FOUR_HEADINGS = (
 )
 
 
-def _school(path: str, text: str) -> str:
-    parent = Path(path).parent.name
-    if parent and parent not in {"社群", "knowledge"}:
-        return parent
-    match = re.search(r"(?:學校|學院)[:：]\s*([^\n，,。]+)", text)
-    if match:
-        return match.group(1).strip()
-    known = ("北科", "北藝", "台大", "政大", "清大", "交大", "禪心社", "領袖社", "禪學社")
-    for item in known:
-        if item in text:
-            return item
-    return "未確認學校"
-
-
 def _references(query: str, top_k: int = 5) -> list[dict[str, Any]]:
+    """查外校公開參考段落。
+
+    資料歸屬**只**來自建索引時的 entity metadata（registry 別名比對），
+    不做「內容像哪間學校」的嗅探——標題或內容相似不代表屬於那間學校。
+    查詢點名了特定學校時，只回傳該校（研究對象）的段落。
+    """
     query = (query or "外校禪學社社群文宣").strip()
+    resolution = research_entities.resolve(query)
+    target_ids = {e.entity_id for e in resolution.external_targets()}
+    unresolved_schools = {u.school for u in resolution.unresolved}
+
     index = retrieval.get_index()
-    hits = index.search(query, k=max(1, min(int(top_k or 5), 10)), min_curated=0, include_external=True)
+    hits = index.search(query, k=max(1, min(int(top_k or 5), 10)) * 3, min_curated=0, include_external=True)
     out: list[dict[str, Any]] = []
     for score, chunk in hits:
         meta = getattr(chunk, "meta", None)
         if not meta or meta.source_type != "external_reference":
             continue
+        entity_id = getattr(meta, "entity_id", "")
+        if (target_ids or unresolved_schools) and entity_id not in target_ids:
+            continue   # 研究對象講明了，就不拿別校資料湊數
         out.append(
             {
-                "school": _school(chunk.path, chunk.text),
+                "entity_id": entity_id,
+                "school": getattr(meta, "school", "") or "未對應到已收錄的學校",
+                "organization": getattr(meta, "organization", ""),
                 "source_file": Path(chunk.path).name,
                 "source": chunk.source,
+                "source_url": getattr(meta, "source_url", ""),
+                "captured_at": getattr(meta, "captured_at", ""),
+                "source_type": getattr(meta, "external_source_type", "") or "official_instagram",
+                "authority_level": getattr(meta, "authority_level", "official"),
                 "excerpt": chunk.text[:900],
                 "score": round(float(score), 4),
             }
         )
+        if len(out) >= max(1, min(int(top_k or 5), 10)):
+            break
     return out
 
 
@@ -69,9 +74,50 @@ def _four_sections(query: str, refs: list[dict[str, Any]]) -> dict[str, str]:
     }
 
 
+def _no_reference_result(query: str) -> dict[str, Any]:
+    resolution = research_entities.resolve(query)
+    schools = "、".join(
+        sorted({u.school for u in resolution.unresolved}
+               | {e.school for e in resolution.no_source_entities if e.school})
+    )
+    subject = f"「{schools}」" if schools else f"「{query}」"
+    return {
+        "ok": True,
+        "query": query,
+        "references": [],
+        "source_filenames": [],
+        "schools": [],
+        "sections": {},
+        "no_verified_source": True,
+        "message": (
+            f"外校公開資料庫裡**沒有**{subject}的已驗證來源。\n"
+            "不可以推測或用淡江資料頂替該校事實。回覆使用者時請直接說明：\n"
+            "「目前沒有足夠公開來源確認此資訊，因此不提供確定結論。」\n"
+            "並請使用者提供該校社團的官方 Instagram、Facebook 或網址。"
+        ),
+    }
+
+
 def _research_result(query: str, refs: list[dict[str, Any]]) -> dict[str, Any]:
+    if not refs:
+        return _no_reference_result(query)
     sections = _four_sections(query, refs)
-    message = "\n\n".join(f"## {name}\n{value}" for name, value in sections.items())
+    blocks: list[str] = []
+    for r in refs:
+        head = f"【外校已驗證資料】{r['organization'] or r['school']}（學校：{r['school']}"
+        if r.get("source_url"):
+            head += f"，來源：{r['source_url']}"
+        if r.get("captured_at"):
+            head += f"，檢索日期：{r['captured_at']}"
+        head += "）"
+        blocks.append(f"{head}\n{r['excerpt']}")
+    message = (
+        "\n\n".join(f"## {name}\n{value}" for name, value in sections.items())
+        + "\n\n───────────\n\n"
+        + "\n\n".join(blocks)
+        + "\n\n───────────\n描述外校做法時，只能引用上面摘錄的內容並標注學校名稱；"
+          "摘錄裡沒有的細節不可以自行補寫。"
+    )
     return {
         "ok": True,
         "query": query,

@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import re
 
+from ..research import entities as research_entities
+from ..research.entities import EntityResolution, ResearchMode, ResearchScope
 from ..services import current_term as term_service
-from ..skills import Routing, route
+from ..skills import SKILL_BY_NAME, Routing, route
 from .state import OrchestrationState, PlanStep, Stage, TaskType
 
 # 這些問題問的是「今年的事實」，一定要先查當期狀態
@@ -57,16 +59,33 @@ def detect_required_facts(message: str, skill_required: tuple[str, ...]) -> list
     return out
 
 
-def build_retrieval_queries(message: str, routing: Routing) -> list[str]:
+def build_retrieval_queries(
+    message: str,
+    routing: Routing,
+    scope: ResearchScope | None = None,
+    resolution: EntityResolution | None = None,
+) -> list[str]:
     """把一句自然語言拆成幾個互補的檢索查詢。
 
     一定會包含「劇本層」與「歷年範例層」各至少一個，
     這樣 context 裡永遠同時有「該怎麼做」與「以前怎麼做的」。
+    外部研究時，另外用「正式社團名＋主題」下查詢——研究對象是誰，
+    查詢就寫誰，不讓 BM25 拿相似內容亂配對。
     """
     queries: list[str] = []
+    cleaned = re.sub(r"[，。！？、\n]+", " ", message).strip()
+
+    # 外部研究對象的專屬查詢放最前面
+    if scope is not None and scope.mode in {ResearchMode.EXTERNAL, ResearchMode.COMPARATIVE}:
+        for eid in scope.target_entities:
+            entity = research_entities.entity_by_id(eid)
+            if entity is not None:
+                queries.append(f"{entity.name} {cleaned[:40]}".strip())
+                queries.append(entity.name)
+        if scope.generic_external:
+            queries.append(f"外校 社群 {cleaned[:40]}".strip())
 
     # 1. 使用者原句（抓專有名詞、活動名稱最準）
-    cleaned = re.sub(r"[，。！？、\n]+", " ", message).strip()
     if cleaned:
         queries.append(cleaned[:80])
 
@@ -83,11 +102,28 @@ def build_retrieval_queries(message: str, routing: Routing) -> list[str]:
         q = q.strip()
         if q and q not in out:
             out.append(q)
-    return out[:4]
+    return out[:5]
 
 
-def plan_for(routing: Routing, needs_artifact: bool) -> list[PlanStep]:
+def plan_for(routing: Routing, needs_artifact: bool, scope: ResearchScope | None = None) -> list[PlanStep]:
     skill = routing.skill
+
+    if scope is not None and scope.mode == ResearchMode.EXTERNAL:
+        return [
+            PlanStep("確認研究對象（學校與正式社團）"),
+            PlanStep("查外校官方公開資料"),
+            PlanStep("只依可驗證來源整理，推測分開標示"),
+            PlanStep("檢查來源與研究對象一致"),
+        ]
+    if scope is not None and scope.mode == ResearchMode.COMPARATIVE:
+        return [
+            PlanStep("確認研究對象（學校與正式社團）"),
+            PlanStep("查外校官方公開資料"),
+            PlanStep("查淡江內部資料（分開整理）"),
+            PlanStep("比較差異並提出淡江可採用建議"),
+            PlanStep("檢查來源與研究對象一致"),
+        ]
+
     steps = [PlanStep("查社團知識庫與歷年範例")]
 
     if not needs_artifact:
@@ -118,8 +154,32 @@ def verification_rules_for(routing: Routing) -> list[str]:
 
 
 def understand(message: str) -> tuple[OrchestrationState, Routing]:
-    """Understand → Plan。回傳初始化好的狀態。"""
+    """Understand → Plan。回傳初始化好的狀態。
+
+    政大事故後：這裡先做**實體解析**再做其他事。研究對象是誰、
+    用哪種研究模式，在任何檢索發生之前就定案，並寫進 state 讓
+    檢索與回答閘門共用同一份範圍。
+    """
     routing = route(message)
+
+    # ── 實體解析與研究模式 ────────────────────────────────
+    resolution = research_entities.resolve(message)
+    scope = research_entities.decide_scope(message, resolution, routing.skill.task_type)
+
+    # 訊息點名了外校，但路由落在一般查詢／文件 → 改走外校社群研究，
+    # 讓後面的檢索與驗證都按外部研究的規矩來。
+    if (
+        scope.mode in {ResearchMode.EXTERNAL, ResearchMode.COMPARATIVE}
+        and routing.skill.name in {"knowledge", "documents"}
+    ):
+        routing = Routing(
+            skill=SKILL_BY_NAME["social_research"],
+            score=routing.score,
+            runner_up=routing.skill.name,
+            produce_artifact=False,
+            scores=routing.scores,
+        )
+
     needs_artifact = routing.produce_artifact and bool(routing.skill.artifacts_expected)
 
     state = OrchestrationState()
@@ -129,11 +189,19 @@ def understand(message: str) -> tuple[OrchestrationState, Routing]:
     except ValueError:
         state.task_type = TaskType.UNKNOWN
     state.selected_skill = routing.skill.name
+    state.research_mode = scope.mode.value
+    state.research_scope = scope.to_dict()
+    state.target_entities = list(scope.target_entities)
+    state.target_schools = list(scope.target_schools)
+    state.clarification_pending = (
+        scope.mode in {ResearchMode.EXTERNAL, ResearchMode.COMPARATIVE}
+        and resolution.needs_clarification
+    )
     state.required_facts = detect_required_facts(message, routing.skill.required_facts)
-    state.retrieval_queries = build_retrieval_queries(message, routing)
+    state.retrieval_queries = build_retrieval_queries(message, routing, scope, resolution)
     state.artifacts_expected = list(routing.skill.artifacts_expected) if needs_artifact else []
     state.verification_rules = verification_rules_for(routing) if needs_artifact else []
-    state.plan_steps = plan_for(routing, needs_artifact)
+    state.plan_steps = plan_for(routing, needs_artifact, scope)
 
     # 對照當期狀態，看看缺哪些今年的事實
     term = term_service.load()

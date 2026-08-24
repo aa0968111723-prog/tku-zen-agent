@@ -432,14 +432,18 @@ class SessionStore:
 
     # ── working memory ───────────────────────────────────────
 
-    def remember(self, project_id: str, key: str, value: str, source: str = "") -> None:
+    def remember(
+        self, project_id: str, key: str, value: str, source: str = "", max_len: int = 4000
+    ) -> None:
+        # max_len：一般事實維持 4000；orchestration state 這類結構化 JSON
+        # 由呼叫端放寬——截斷 JSON 會讓整份狀態讀不回來。
         with self._lock:
             self._conn.execute(
                 "INSERT INTO working_memory(project_id, key, value, source, updated_at)"
                 " VALUES(?,?,?,?,?)"
                 " ON CONFLICT(project_id, key) DO UPDATE SET value=excluded.value,"
                 " source=excluded.source, updated_at=excluded.updated_at",
-                (project_id, key[:120], value[:4000], source, _now()),
+                (project_id, key[:120], value[:max_len], source, _now()),
             )
             self._conn.commit()
 
