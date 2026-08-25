@@ -1,0 +1,130 @@
+# 人物／場景／日期／活動／社團視覺資料庫
+
+本功能是既有 FastAPI、SQLite、cookie 授權與 fal.ai 圖片理解的增量擴充。聊天、
+知識庫、活動管理與產檔工具沒有被替換；新頁面位於 `/visual-assets`。
+
+## 資料與信任模型
+
+原圖寫入 `VISUAL_ASSET_DIR/<user_id>/<asset_id>/original.<ext>` 後不再覆寫。
+縮圖與 1:1、4:5、9:16、16:9 是可重建的非破壞式衍生檔。系統沒有刪除原圖的
+API，PATCH 也拒絕 storage path、雜湊、尺寸、上傳者等不可變欄位。
+
+AI 結果不直接當成事實。每個 observation 都有：
+
+- `source`：EXIF、file metadata、OCR、fal vision 或 user confirmation
+- `confidence`：0–1
+- `status`：`confirmed`、`possible`、`pending`、`conflict`、`ignored`
+- `evidence`：可回看圖片的文字依據或使用者修正原因
+
+EXIF、檔案日期、OCR、活動日期與使用者輸入分別存在
+`visual_date_candidates`。值不同時 API 回傳 `date_status=conflict`，不選一個
+覆蓋其他候選。
+
+學校是社團與人物的上層實體。社團以 `(school_id, name)` 唯一；人物姓名不做
+唯一限制，因此同名者會得到不同 ID。把已知人物或活動連到不同學校的圖片時，
+API 會回 `school_conflict`，不建立關聯。
+
+人物流程特別保守：
+
+1. 一般視覺分析只計數、描述匿名人物，不允許模型回傳姓名。
+2. 只有 `visual_people.status=confirmed` 且有人工確認參考圖的人物能進入比對。
+3. 比對結果永遠以 `possible`／「可能是」保存。
+4. 使用者按確認後才成為可靠關聯；單次錯誤不會改模型權重。
+
+## SQLite 資料表
+
+| 資料表 | 用途 |
+|---|---|
+| `visual_schools` | 學校與別名，隔離跨校資料 |
+| `visual_clubs` | 社團、Logo 資產、社群、網站、別名與來源 |
+| `visual_people` | 人物、暱稱、學校、社團、角色、狀態與信心 |
+| `visual_person_references` | 已人工確認的人物參考照片 |
+| `visual_scenes` | 場景分類與自訂場景 |
+| `visual_events` | 活動名稱、類型、社團、學校、日期、地點、文案與證據 |
+| `visual_assets` | 原圖／縮圖路徑、格式、尺寸、EXIF、雜湊、embedding、權限、品質與分析 |
+| `visual_observations` | 圖片與人物／場景／活動／社團／Logo 的有證據關聯 |
+| `visual_date_candidates` | 並列的日期來源與衝突 |
+| `visual_analysis_jobs` | 分析階段、進度與安全錯誤碼 |
+| `visual_learning_events` | 搜尋、推薦、選用、排除、下載、工具成敗與用途 |
+| `visual_corrections` | 使用者修正、原值、新值、原因與管理審核 |
+
+## 圖片分析
+
+上傳時一定先完成離線分析：Pillow 解碼驗證、EXIF 日期、SHA-256、感知雜湊、
+色彩向量、縮圖、模糊／清晰度、亮度、解析度與海報／影片／IG 首圖適用性。
+完全相同的 SHA-256 會標示 `duplicate_of`，但新上傳原圖仍保留，不會偷偷刪除。
+
+設定 `FAL_KEY` 後，背景流程再呼叫現有 fal.ai Vision：
+
+- 繁體中文 OCR、海報文字、活動、日期、時間、地點、人名文字、社團與 Logo 文字
+- 場景、活動類型、物件、Logo、舞台、佈置、文件／海報
+- 已確認人物參考圖的受控候選比對
+
+未設定視覺服務時本機品質與去重仍可用，狀態顯示 `needs_vision_config`，不會假裝
+OCR 已完成。
+
+## 搜尋與輸出
+
+`GET /api/visual-assets/search` 同時使用關鍵字、AI/OCR 標籤、實體關聯、本機
+語意向量、畫質與使用者選用／排除回饋排序。自然語言中明確出現的既知場景會
+成為有證據的條件，沒有場景 observation 的圖片不會冒充命中。另支援學校、
+社團、人物、場景、活動、日期、比例、畫質、商用權限、隱私與重複圖篩選。
+
+`POST /api/visual-assets/search-by-image` 使用感知雜湊與色彩向量找相似構圖；
+查詢圖片只在請求期間解碼，不會自動加入資料庫。
+
+單圖端點可下載原圖、縮圖及 1:1、4:5、9:16、16:9 衍生圖。素材包匯出為 ZIP，
+內含選定圖片、`manifest.json` 與 UTF-8 BOM `manifest.csv`。加入分鏡、貼文、
+海報或素材包會寫 learning event，供排序與策略洞察使用。
+
+## API
+
+所有端點都套用既有 cookie 授權、全站限流、CSRF Origin 檢查、安全標頭與
+append-only audit；列表端點有 page/limit 並受 `VISUAL_SEARCH_LIMIT` 限制。
+
+| Method | Path | 說明 |
+|---|---|---|
+| POST | `/api/visual-assets/upload` | 多檔上傳、本機分析、排程 AI 分析 |
+| POST | `/api/visual-assets/analyze` | 重試／明確執行 AI 分析 |
+| GET | `/api/visual-assets/dashboard` | 首頁統計與最近上傳 |
+| GET | `/api/visual-assets/search` | 自然語言與結構化搜尋 |
+| POST | `/api/visual-assets/search-by-image` | 以圖搜圖 |
+| GET | `/api/visual-assets/{id}` | 圖片、證據、日期候選與分析工作 |
+| PATCH | `/api/visual-assets/{id}` | 僅修改權限、來源、學校／社團與審核狀態 |
+| GET | `/api/visual-assets/{id}/file` | 原圖、縮圖與比例衍生圖 |
+| POST | `/api/visual-assets/{id}/usage` | 選用、排除、分鏡、貼文、下載紀錄 |
+| POST | `/api/visual-assets/export` | 素材包 ZIP＋JSON＋CSV |
+| POST | `/api/entities/confirm` | 確認、修正或忽略 observation |
+| GET | `/api/people` | 人物列表 |
+| GET | `/api/clubs` | 社團列表 |
+| GET | `/api/events` | 活動列表 |
+| GET | `/api/scenes` | 場景列表 |
+| GET | `/api/learning/insights` | 搜尋／工具／修正洞察 |
+| GET | `/api/learning/corrections` | 修正紀錄 |
+| POST | `/api/learning/approve` | 管理者審核修正紀錄 |
+
+## 部署設定
+
+```env
+DB_PATH=/persistent/agent.sqlite3
+VISUAL_ASSET_DIR=/persistent/visual-assets
+VISUAL_EXPORT_DIR=/persistent/visual-exports
+VISUAL_MAX_FILE_BYTES=20000000
+VISUAL_MAX_BATCH=30
+VISUAL_SEARCH_LIMIT=60
+FAL_KEY=...
+```
+
+Zeabur 必須把 SQLite、原圖與衍生圖放在持久化磁碟；只設 DB_PATH 而沒有持久化
+`VISUAL_ASSET_DIR` 會留下資料列但在容器重啟後失去檔案。備份時兩者要一起備份。
+
+目前 embedding 是不需外部金鑰的可重現文字特徵、色彩向量與感知雜湊，適合社團
+規模的 SQLite 內排序。未來可在保留相同欄位與來源證據的前提下，換成專用向量
+服務；不得用未審核修正直接訓練或改模型權重。
+
+## 驗證
+
+`tests/test_visual_asset_database.py` 涵蓋上傳、品質、原圖不變、重複圖、海報 OCR、
+日期衝突、活動／場景、跨校隔離、同名人物、自然語言搜尋、以圖搜圖、修正、
+學習紀錄、素材包、不可變欄位、未登入、超大與損壞圖片、手機 UI 契約。外部
+Vision 一律使用 fake，CI 不會傳送私人圖片或消耗額度。

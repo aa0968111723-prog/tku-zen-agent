@@ -6,6 +6,10 @@ __pycache__/
 # 產出檔
 outputs/
 
+# 本機瀏覽器驗收證據與 Playwright CLI session（不進版控）
+output/
+.playwright-cli/
+
 # data/ 放憑證、SQLite 與填了真實資料的本學期設定 —— 預設全部不上傳。
 # 只有不含真實資料的範本例外。
 data/*

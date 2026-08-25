@@ -155,6 +155,15 @@ ENABLE_LINE_CORPUS = _bool("ENABLE_LINE_CORPUS", False)
 # 伺服器一重開就消失，多 process 部署還會互相看不到。
 DB_PATH = _path("DB_PATH", "data/agent.sqlite3")
 
+# ── 視覺資產庫 ────────────────────────────────────────────────
+# 原圖、縮圖與非破壞式衍生圖都放在獨立目錄。部署時應與 DB_PATH
+# 一起指向持久化磁碟；任何 API 都不提供刪除或覆寫原圖的能力。
+VISUAL_ASSET_DIR = _path("VISUAL_ASSET_DIR", "data/visual-assets")
+VISUAL_EXPORT_DIR = _path("VISUAL_EXPORT_DIR", "outputs/visual-exports")
+VISUAL_MAX_FILE_BYTES = max(1_000_000, int(os.getenv("VISUAL_MAX_FILE_BYTES") or 20_000_000))
+VISUAL_MAX_BATCH = max(1, min(100, int(os.getenv("VISUAL_MAX_BATCH") or 30)))
+VISUAL_SEARCH_LIMIT = max(1, min(200, int(os.getenv("VISUAL_SEARCH_LIMIT") or 60)))
+
 # ── 認證 ─────────────────────────────────────────────────────
 # local  = 單人本機模式，不需要登入，所有請求都是同一個使用者
 # token  = 部署模式，要先用 APP_ACCESS_TOKEN 換到身分才能用
@@ -202,6 +211,8 @@ TOOL_MAX_ATTEMPTS = max(1, int(os.getenv("TOOL_MAX_ATTEMPTS") or 2))
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 (ROOT / "data").mkdir(parents=True, exist_ok=True)
+VISUAL_ASSET_DIR.mkdir(parents=True, exist_ok=True)
+VISUAL_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def bootstrap_current_term() -> None:
