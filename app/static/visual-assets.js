@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const visualState = { panel: "dashboard", uploadFiles: [], selected: new Set(), lastItems: [], pollers: new Map() };
+const visualState = { panel: "dashboard", uploadFiles: [], uploadMode: "batch", selected: new Set(), lastItems: [], pollers: new Map() };
 
 function node(tag, cls, text) {
   const item = document.createElement(tag);
@@ -54,22 +54,22 @@ function showPanel(name) {
   });
   window.scrollTo({ top: 0, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   if (name === "dashboard") loadDashboard();
-  if (name === "review") loadReview("pending");
+  if (name === "review") loadReview("pending_review");
 }
 
 function statusLabel(value) {
-  return ({ confirmed: "已確認", complete: "分析完成", possible: "可能", pending: "待確認", conflict: "衝突", ignored: "已忽略", analyzing: "分析中", processing_entities: "建立關聯中", local_complete: "本機檢查完成", needs_vision_config: "AI 分析未啟用", analysis_failed: "分析失敗" })[value] || value || "待確認";
+  return ({ verified: "已確認", complete: "分析完成", probable: "可能", pending_review: "待確認", conflicted: "衝突", failed: "分析失敗", analyzing: "分析中", processing_entities: "建立關聯中", local_complete: "本機檢查完成", needs_vision_config: "AI 分析未啟用", analysis_failed: "分析失敗" })[value] || value || "待確認";
 }
 
 function badge(value, label = "") {
-  return node("span", `status-badge ${value || "pending"}`, label || statusLabel(value));
+  return node("span", `status-badge ${value || "pending_review"}`, label || statusLabel(value));
 }
 
 function emptyCard(text) {
   return node("p", "empty-visual", text);
 }
 
-function assetCard(asset, { selectable = false } = {}) {
+function assetCard(asset, { selectable = false, confirmable = false, retryable = false } = {}) {
   const card = node("article", "asset-card");
   card.dataset.assetId = asset.asset_id;
   if (visualState.selected.has(asset.asset_id)) card.classList.add("is-selected");
@@ -92,10 +92,10 @@ function assetCard(asset, { selectable = false } = {}) {
   body.appendChild(node("p", "asset-meta", `${asset.width || 0}×${asset.height || 0} · 畫質 ${Math.round(asset.quality_score || 0)}${asset.school_name ? ` · ${asset.school_name}` : ""}`));
   const badges = node("div", "badge-row");
   badges.appendChild(badge(asset.analysis_status));
-  if (asset.review_status && asset.review_status !== "pending") badges.appendChild(badge(asset.review_status));
-  if (asset.duplicate_of) badges.appendChild(badge("conflict", "重複圖片"));
-  if (asset.commercial_use === "allowed") badges.appendChild(badge("confirmed", "可商用"));
-  if (asset.commercial_use === "unknown") badges.appendChild(badge("possible", "權限待確認"));
+  if (asset.review_status) badges.appendChild(badge(asset.review_status));
+  if (asset.duplicate_of) badges.appendChild(badge("conflicted", "重複素材"));
+  if (asset.commercial_use === "allowed") badges.appendChild(badge("verified", "可商用"));
+  if (asset.commercial_use === "unknown") badges.appendChild(badge("probable", "權限待確認"));
   body.appendChild(badges);
   if (asset.recommendation_reasons && asset.recommendation_reasons.length) {
     const list = node("ul", "asset-reasons");
@@ -110,6 +110,24 @@ function assetCard(asset, { selectable = false } = {}) {
   download.href = `/api/visual-assets/${encodeURIComponent(asset.asset_id)}/file?variant=original&download=true`;
   download.addEventListener("click", () => recordUsage(asset.asset_id, "downloaded", { source: "asset_card" }));
   actions.append(inspect, download);
+  if (confirmable && asset.review_status !== "verified") {
+    const confirm = node("button", "primary", "一鍵確認"); confirm.type = "button";
+    confirm.addEventListener("click", async () => {
+      try { await requestJSON(`/api/visual-assets/${encodeURIComponent(asset.asset_id)}/confirm`, { method: "POST", body: JSON.stringify({ reason: "使用者在待確認清單一鍵確認" }) }); setStatus("素材已確認", "green"); loadReview("pending_review"); }
+      catch (error) { setStatus(error.message, "red"); }
+    });
+    actions.appendChild(confirm);
+  }
+  if (retryable) {
+    const retry = node("button", null, "重試分析"); retry.type = "button";
+    retry.addEventListener("click", async () => {
+      setStatus("正在重試這個素材…");
+      try { await requestJSON(`/api/visual-assets/${encodeURIComponent(asset.asset_id)}/retry`, { method: "POST" }); setStatus("重試完成", "green"); }
+      catch (error) { setStatus(error.message, "red"); }
+      loadReview("failed");
+    });
+    actions.appendChild(retry);
+  }
   if (selectable) {
     const storyboard = node("button", null, "加入分鏡");
     storyboard.type = "button";
@@ -144,6 +162,7 @@ function toggleSelection(asset, card, button) {
   }
   $("selection-count").textContent = `已選 ${visualState.selected.size} 張`;
   $("export-pack").disabled = visualState.selected.size === 0;
+  $("batch-confirm").disabled = visualState.selected.size === 0;
 }
 
 async function recordUsage(assetId, action, context = {}) {
@@ -170,26 +189,31 @@ async function loadDashboard() {
   } catch (error) { setStatus(error.message, "red"); }
 }
 
-function setUploadFiles(files) {
-  const accepted = [...files].filter((file) => ["image/jpeg", "image/png", "image/webp"].includes(file.type));
-  visualState.uploadFiles = accepted.slice(0, 30);
+function setUploadFiles(files, mode = "batch") {
+  const extensions = /\.(jpe?g|png|webp|mp4|mov|webm|pdf|docx|pptx|txt|md|csv)$/i;
+  const accepted = [...files].filter((file) => file.type.startsWith("image/") || file.type.startsWith("video/") || extensions.test(file.name));
+  visualState.uploadFiles = accepted.slice(0, mode === "folder" ? 300 : 30);
+  visualState.uploadMode = mode;
+  $("import-mode").textContent = mode === "folder" ? "資料夾匯入：保留相對路徑與 manifest" : mode === "camera" ? "手機拍照上傳" : "一般批次上傳";
   const host = $("upload-preview");
   host.replaceChildren();
-  visualState.uploadFiles.forEach((file) => {
+  visualState.uploadFiles.slice(0, 60).forEach((file) => {
     const figure = document.createElement("figure");
-    const image = document.createElement("img");
-    const url = URL.createObjectURL(file);
-    image.src = url;
-    image.alt = file.name;
-    image.onload = () => URL.revokeObjectURL(url);
-    figure.append(image, node("figcaption", null, file.name));
+    if (file.type.startsWith("image/")) {
+      const image = document.createElement("img");
+      const url = URL.createObjectURL(file); image.src = url; image.alt = file.name;
+      image.onload = () => URL.revokeObjectURL(url); figure.appendChild(image);
+    } else figure.appendChild(node("div", "file-placeholder", file.type.startsWith("video/") ? "VIDEO" : "DOCUMENT"));
+    figure.appendChild(node("figcaption", null, file.webkitRelativePath || file.name));
     host.appendChild(figure);
   });
-  setStatus(visualState.uploadFiles.length ? `已選擇 ${visualState.uploadFiles.length} 張圖片` : "尚未選擇圖片");
+  if (visualState.uploadFiles.length > 60) host.appendChild(node("p", "muted", `另有 ${visualState.uploadFiles.length - 60} 個素材，將在背景分批匯入`));
+  setStatus(visualState.uploadFiles.length ? `已選擇 ${visualState.uploadFiles.length} 個素材` : "尚未選擇素材");
 }
 
 function uploadFiles() {
-  if (!visualState.uploadFiles.length) { setStatus("請先選擇圖片", "yellow"); return; }
+  if (!visualState.uploadFiles.length) { setStatus("請先選擇素材", "yellow"); return; }
+  if (visualState.uploadMode === "folder") { uploadFolderBatches(); return; }
   const data = new FormData();
   visualState.uploadFiles.forEach((file) => data.append("files", file, file.name));
   data.append("school", $("upload-school").value.trim());
@@ -198,10 +222,15 @@ function uploadFiles() {
   data.append("privacy", $("upload-privacy").value);
   data.append("commercial_use", $("upload-commercial").value);
   data.append("auto_analyze", "true");
+  const signature = visualState.uploadFiles.map((file) => `${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`).join("|");
+  let hash = 2166136261; for (let i = 0; i < signature.length; i += 1) hash = Math.imul(hash ^ signature.charCodeAt(i), 16777619);
+  const idempotencyKey = `browser-${(hash >>> 0).toString(16)}-${visualState.uploadFiles.length}`;
+  data.append("idempotency_key", idempotencyKey);
+  let endpoint = "/api/visual-assets/upload";
   const xhr = new XMLHttpRequest();
   $("upload-progress").hidden = false;
   $("upload-progress-text").textContent = "正在上傳原圖（不覆寫）…";
-  xhr.open("POST", "/api/visual-assets/upload");
+  xhr.open("POST", endpoint);
   xhr.upload.onprogress = (event) => {
     if (!event.lengthComputable) return;
     const percent = Math.round(event.loaded / event.total * 100);
@@ -219,12 +248,43 @@ function uploadFiles() {
       return;
     }
     $("upload-progress-bar").style.width = "100%";
-    $("upload-progress-text").textContent = `已保存 ${result.created} 張原圖，正在分析…`;
+    const saved = result.created === undefined ? (result.items || []).length : result.created + (Number(result.skipped) || 0);
+    $("upload-progress-text").textContent = `已保存 ${saved} 個原始素材，正在分析…`;
     renderAnalysisRows(result.items || []);
     (result.items || []).forEach((item) => pollAnalysis(item.asset_id));
-    setStatus(`已保存 ${result.created} 張；辨識結果會逐張更新`, "green");
+    const failures = (result.errors || []).length;
+    setStatus(`已保存 ${saved} 個；${failures ? `${failures} 個失敗可用同一資料夾單獨重試` : "辨識結果會逐筆更新"}`, failures ? "yellow" : "green");
   };
   xhr.send(data);
+}
+
+async function uploadFolderBatches() {
+  const files = visualState.uploadFiles;
+  const allItems = files.map((file, index) => ({ client_key: file.webkitRelativePath || `${index}:${file.name}`, relative_path: file.webkitRelativePath || file.name, filename: file.name, size: file.size, last_modified: new Date(file.lastModified).toISOString() }));
+  const signature = allItems.map((item) => `${item.relative_path}:${item.size}:${item.last_modified}`).join("|");
+  let hash = 2166136261; for (let i = 0; i < signature.length; i += 1) hash = Math.imul(hash ^ signature.charCodeAt(i), 16777619);
+  const key = `folder-${(hash >>> 0).toString(16)}-${files.length}`;
+  const created = []; const errors = [];
+  $("upload-progress").hidden = false;
+  for (let offset = 0; offset < files.length; offset += 30) {
+    const chunk = files.slice(offset, offset + 30); const entries = allItems.slice(offset, offset + 30);
+    const data = new FormData(); chunk.forEach((file) => data.append("files", file, file.name));
+    data.append("manifest", JSON.stringify({ total_count: files.length, items: entries }));
+    data.append("idempotency_key", key); data.append("root_name", (files[0].webkitRelativePath || "folder").split("/")[0]);
+    data.append("school", $("upload-school").value.trim()); data.append("club", $("upload-club").value.trim());
+    data.append("source", $("upload-source").value.trim() || "folder_import"); data.append("privacy", $("upload-privacy").value);
+    data.append("commercial_use", $("upload-commercial").value); data.append("auto_analyze", "true"); data.append("resync", "false");
+    $("upload-progress-text").textContent = `資料夾匯入 ${Math.min(offset + chunk.length, files.length)} / ${files.length}`;
+    let response;
+    try { response = await fetch("/api/visual-assets/import", { method: "POST", body: data }); }
+    catch { errors.push(...entries.map((entry) => ({ client_key: entry.client_key, message: "連線中斷；重選同一資料夾即可續傳" }))); continue; }
+    let result = {}; try { result = await response.json(); } catch { result = {}; }
+    if (!response.ok && !(result.items || []).length) { errors.push(...(result.errors || [{ message: (result.detail && (result.detail.message || result.detail)) || "匯入失敗" }])); continue; }
+    created.push(...(result.items || []), ...(result.skipped || [])); errors.push(...(result.errors || []));
+    $("upload-progress-bar").style.width = `${Math.round(Math.min(offset + chunk.length, files.length) / files.length * 100)}%`;
+  }
+  renderAnalysisRows(created); created.forEach((item) => pollAnalysis(item.asset_id));
+  setStatus(`資料夾已處理 ${files.length} 個：${created.length} 個可用、${errors.length} 個失敗可重選後續傳`, errors.length ? "yellow" : "green");
 }
 
 function renderAnalysisRows(items) {
@@ -304,13 +364,12 @@ async function loadReview(kind) {
   document.querySelectorAll("[data-review]").forEach((button) => button.classList.toggle("is-active", button.dataset.review === kind));
   setStatus("正在整理待審核資料…");
   try {
-    let path = "/api/visual-assets/search?limit=60";
-    if (kind === "duplicate") path += "&duplicate=only";
-    if (kind === "high-quality") path += "&quality_min=75&duplicate=exclude";
+    let path = `/api/visual-assets/review-queue?limit=60&status=${encodeURIComponent(kind)}`;
+    if (kind === "duplicate") path = "/api/visual-assets/search?limit=60&duplicate=only";
+    if (kind === "high-quality") path = "/api/visual-assets/search?limit=60&quality_min=75&duplicate=exclude";
     const data = await requestJSON(path);
-    let items = data.items || [];
-    if (kind === "pending") items = items.filter((item) => ["pending", "possible", "conflict"].includes(item.review_status) || ["local_complete", "needs_vision_config", "analysis_failed"].includes(item.analysis_status));
-    renderAssetGrid($("review-results"), items, { empty: "目前沒有這類圖片" });
+    const items = data.items || [];
+    renderAssetGrid($("review-results"), items, { empty: "目前沒有這類素材", selectable: true, confirmable: !["verified","failed"].includes(kind), retryable: kind === "failed" });
     setStatus(`顯示 ${items.length} 張`, "green");
   } catch (error) { setStatus(error.message, "red"); }
 }
@@ -334,10 +393,10 @@ async function openAsset(assetId) {
 function renderAssetDetail(asset) {
   const host = $("asset-modal-body"); host.replaceChildren();
   const preview = node("div", "detail-preview");
-  const image = document.createElement("img"); image.src = asset.original_url; image.alt = asset.original_filename;
+  const image = document.createElement("img"); image.src = asset.asset_type === "image" ? asset.original_url : asset.thumbnail_url; image.alt = asset.original_filename;
   preview.appendChild(image);
   const sizeActions = node("div", "asset-actions");
-  ["original", "1:1", "4:5", "9:16", "16:9"].forEach((variant) => {
+  (asset.asset_type === "image" ? ["original", "1:1", "4:5", "9:16", "16:9"] : ["original", "thumbnail"]).forEach((variant) => {
     const link = node("a", null, variant === "original" ? "原圖" : variant);
     link.href = `/api/visual-assets/${encodeURIComponent(asset.asset_id)}/file?variant=${encodeURIComponent(variant)}&download=true`;
     sizeActions.appendChild(link);
@@ -348,7 +407,7 @@ function renderAssetDetail(asset) {
   summary.appendChild(node("h3", null, "品質與狀態"));
   const row = node("div", "badge-row"); row.append(badge(asset.analysis_status), badge(asset.review_status), badge(asset.date_status, `日期：${statusLabel(asset.date_status)}`));
   summary.append(row, node("p", "muted", `${asset.width}×${asset.height} · 畫質 ${Math.round(asset.quality_score)} · 清晰 ${Math.round(asset.blur_score)} · 亮度 ${Math.round(asset.brightness_score)}`));
-  if (asset.duplicate_of) summary.appendChild(node("p", "status-badge conflict", `重複於 ${asset.duplicate_of}`));
+  if (asset.duplicate_of) summary.appendChild(node("p", "status-badge conflicted", `重複於 ${asset.duplicate_of}`));
   details.appendChild(summary);
 
   const observations = node("section", "detail-section"); observations.appendChild(node("h3", null, "辨識人物／場景／活動／社團"));
@@ -360,7 +419,7 @@ function renderAssetDetail(asset) {
   (asset.date_candidates || []).forEach((date) => {
     const item = node("div", "observation");
     item.append(badge(date.status), node("strong", null, ` ${date.value}`), node("p", null, `來源：${date.source} · 信心 ${Math.round((date.confidence || 0) * 100)}% · ${date.evidence || ""}`));
-    if (date.status !== "confirmed") {
+    if (date.status !== "verified") {
       const button = node("button", "ghost", "確認此日期"); button.type = "button";
       button.addEventListener("click", () => confirmEntity(asset, { entity_type: "date", candidate_label: date.value, action: "confirm" }));
       item.appendChild(button);
@@ -379,7 +438,7 @@ function observationRow(asset, obs) {
   const item = node("div", "observation");
   const title = node("div", "badge-row"); title.append(badge(obs.status), node("strong", null, `${obs.entity_type} · ${obs.label || "未命名候選"}`));
   item.append(title, node("p", null, `來源：${obs.source} · 信心 ${Math.round((obs.confidence || 0) * 100)}%`), node("p", null, `證據：${evidenceText(obs.evidence)}`));
-  if (!["confirmed", "ignored"].includes(obs.status)) {
+  if (obs.status !== "verified" && obs.review_action !== "ignored") {
     const actions = node("div", "observation-actions");
     if (!(obs.entity_type === "person" && !obs.entity_id)) {
       const confirm = node("button", null, "確認"); confirm.type = "button";
@@ -428,6 +487,17 @@ async function exportPack() {
   } catch (error) { setStatus(error.message, "red"); }
 }
 
+async function batchConfirm() {
+  const ids = [...visualState.selected];
+  if (!ids.length) return;
+  setStatus(`正在確認 ${ids.length} 個素材…`);
+  const results = await Promise.allSettled(ids.map((id) => requestJSON(`/api/visual-assets/${encodeURIComponent(id)}/confirm`, { method: "POST", body: JSON.stringify({ reason: "使用者批次確認" }) })));
+  const failed = results.filter((result) => result.status === "rejected").length;
+  if (!failed) visualState.selected.clear();
+  setStatus(failed ? `${ids.length - failed} 個已確認；${failed} 個因衝突需逐筆修正` : `${ids.length} 個素材已確認`, failed ? "yellow" : "green");
+  loadReview("pending_review");
+}
+
 async function boot() {
   try {
     const auth = await requestJSON("/api/auth");
@@ -445,8 +515,10 @@ $("visual-gate-form").addEventListener("submit", async (event) => {
 });
 document.querySelectorAll(".visual-tabs button").forEach((button) => button.addEventListener("click", () => showPanel(button.dataset.panel)));
 document.querySelectorAll("[data-open-panel]").forEach((button) => button.addEventListener("click", () => showPanel(button.dataset.openPanel)));
-$("visual-files").addEventListener("change", (event) => setUploadFiles(event.target.files || []));
-$("clear-upload").addEventListener("click", () => { visualState.uploadFiles = []; $("visual-files").value = ""; $("upload-preview").replaceChildren(); setStatus("已清除待上傳清單"); });
+$("visual-files").addEventListener("change", (event) => setUploadFiles(event.target.files || [], "batch"));
+$("camera-files").addEventListener("change", (event) => setUploadFiles(event.target.files || [], "camera"));
+$("folder-files").addEventListener("change", (event) => setUploadFiles(event.target.files || [], "folder"));
+$("clear-upload").addEventListener("click", () => { visualState.uploadFiles = []; ["visual-files","camera-files","folder-files"].forEach((id) => { $(id).value = ""; }); $("upload-preview").replaceChildren(); setStatus("已清除待上傳清單"); });
 $("upload-form").addEventListener("submit", (event) => { event.preventDefault(); uploadFiles(); });
 const dropZone = $("drop-zone");
 ["dragenter", "dragover"].forEach((name) => dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.classList.add("is-dragging"); }));
@@ -463,6 +535,7 @@ document.querySelectorAll("[data-search]").forEach((button) => button.addEventLi
 document.querySelectorAll("[data-review]").forEach((button) => button.addEventListener("click", () => loadReview(button.dataset.review)));
 document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => { showPanel("search"); $("search-query").value = ({ person: "人物清楚", club: "社團活動", event: "活動現場", scene: "校園 教室 舞台" })[button.dataset.filter] || ""; runSearch(); }));
 $("export-pack").addEventListener("click", exportPack);
+$("batch-confirm").addEventListener("click", batchConfirm);
 $("asset-modal-close").addEventListener("click", () => { $("asset-modal").hidden = true; });
 $("asset-modal").addEventListener("click", (event) => { if (event.target === $("asset-modal")) $("asset-modal").hidden = true; });
 boot();

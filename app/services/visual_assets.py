@@ -19,12 +19,17 @@ import threading
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 from PIL import Image, ImageFilter, ImageOps, ImageStat, UnidentifiedImageError
+from docx import Document
+from pypdf import PdfReader
+from pptx import Presentation
 
 from .. import config
+from ..rag.hybrid import reciprocal_rank_fusion
+from .visual_migrations import apply_visual_migrations
 
 
 def now() -> str:
@@ -66,7 +71,7 @@ CREATE TABLE IF NOT EXISTS visual_clubs (
     logo_asset_id TEXT NOT NULL DEFAULT '',
     social_accounts TEXT NOT NULL DEFAULT '{}',
     official_website TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'pending',
+    status TEXT NOT NULL DEFAULT 'pending_review',
     source TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -80,7 +85,7 @@ CREATE TABLE IF NOT EXISTS visual_people (
     name TEXT NOT NULL,
     nickname TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'pending',
+    status TEXT NOT NULL DEFAULT 'pending_review',
     source TEXT NOT NULL DEFAULT '{}',
     confidence REAL NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -106,7 +111,7 @@ CREATE TABLE IF NOT EXISTS visual_events (
     end_time TEXT NOT NULL DEFAULT '',
     location TEXT NOT NULL DEFAULT '',
     copy_text TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'pending',
+    status TEXT NOT NULL DEFAULT 'pending_review',
     evidence TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -142,7 +147,7 @@ CREATE TABLE IF NOT EXISTS visual_assets (
     suitability TEXT NOT NULL DEFAULT '{}',
     ocr_text TEXT NOT NULL DEFAULT '',
     analysis TEXT NOT NULL DEFAULT '{}',
-    review_status TEXT NOT NULL DEFAULT 'pending',
+    review_status TEXT NOT NULL DEFAULT 'pending_review',
     school_id TEXT REFERENCES visual_schools(id),
     club_id TEXT REFERENCES visual_clubs(id),
     duplicate_of TEXT REFERENCES visual_assets(id),
@@ -159,7 +164,7 @@ CREATE TABLE IF NOT EXISTS visual_observations (
     entity_type TEXT NOT NULL,
     entity_id TEXT NOT NULL DEFAULT '',
     label TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'pending',
+    status TEXT NOT NULL DEFAULT 'pending_review',
     confidence REAL NOT NULL DEFAULT 0,
     source TEXT NOT NULL,
     evidence TEXT NOT NULL DEFAULT '{}',
@@ -176,7 +181,7 @@ CREATE TABLE IF NOT EXISTS visual_date_candidates (
     precision TEXT NOT NULL DEFAULT 'date',
     source TEXT NOT NULL,
     confidence REAL NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'possible',
+    status TEXT NOT NULL DEFAULT 'probable',
     evidence TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
@@ -185,7 +190,7 @@ CREATE INDEX IF NOT EXISTS idx_visual_dates_asset ON visual_date_candidates(asse
 CREATE TABLE IF NOT EXISTS visual_person_references (
     person_id TEXT NOT NULL REFERENCES visual_people(id),
     asset_id TEXT NOT NULL REFERENCES visual_assets(id),
-    status TEXT NOT NULL DEFAULT 'confirmed',
+    status TEXT NOT NULL DEFAULT 'verified',
     created_at TEXT NOT NULL,
     PRIMARY KEY(person_id, asset_id)
 );
@@ -256,8 +261,16 @@ SCENE_NAMES = (
     "校園", "教室", "禪堂", "舞台", "報到區", "戶外", "茶會", "講座",
     "社課", "聚餐", "活動現場", "海報", "文件",
 )
-ALLOWED_MIME = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
-STATUS_VALUES = {"confirmed", "possible", "pending", "conflict", "ignored"}
+IMAGE_MIME = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+VIDEO_MIME = {"video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm"}
+DOCUMENT_MIME = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "text/plain": ".txt", "text/markdown": ".md", "text/csv": ".csv",
+}
+ALLOWED_MIME = {**IMAGE_MIME, **VIDEO_MIME, **DOCUMENT_MIME}
+STATUS_VALUES = {"verified", "probable", "pending_review", "conflicted", "failed"}
 
 
 class VisualAssetError(ValueError):
@@ -280,6 +293,8 @@ class ImageInspection:
     quality_score: float
     suitability: dict[str, Any]
     thumbnail: bytes
+    asset_type: str = "image"
+    extracted_text: str = ""
 
 
 def _variance(values: Iterable[float]) -> float:
@@ -309,7 +324,7 @@ def _color_embedding(image: Image.Image) -> list[float]:
 
 
 def inspect_image(content: bytes, mime_type: str) -> ImageInspection:
-    if mime_type not in ALLOWED_MIME:
+    if mime_type not in IMAGE_MIME:
         raise VisualAssetError("只支援 JPEG、PNG、WebP 圖片", code="unsupported_media_type")
     if not content:
         raise VisualAssetError("圖片內容是空的", code="empty_file")
@@ -358,6 +373,66 @@ def inspect_image(content: bytes, mime_type: str) -> ImageInspection:
     )
 
 
+def _placeholder_thumbnail(title: str, subtitle: str) -> bytes:
+    canvas = Image.new("RGB", (720, 480), (9, 17, 31))
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle((34, 34, 686, 446), radius=24, outline=(34, 211, 238), width=4)
+    draw.text((70, 165), title[:28], fill=(235, 250, 255))
+    draw.text((70, 225), subtitle[:58], fill=(129, 230, 217))
+    out = io.BytesIO()
+    canvas.save(out, format="JPEG", quality=88)
+    return out.getvalue()
+
+
+def _document_text(content: bytes, mime_type: str) -> str:
+    stream = io.BytesIO(content)
+    if mime_type == "application/pdf":
+        return "\n".join((page.extract_text() or "") for page in PdfReader(stream).pages)
+    if mime_type.endswith("wordprocessingml.document"):
+        return "\n".join(p.text for p in Document(stream).paragraphs)
+    if mime_type.endswith("presentationml.presentation"):
+        deck = Presentation(stream)
+        return "\n".join(shape.text for slide in deck.slides for shape in slide.shapes if hasattr(shape, "text"))
+    return content.decode("utf-8-sig", errors="replace")
+
+
+def inspect_media(content: bytes, mime_type: str, filename: str = "") -> ImageInspection:
+    """Inspect an image, video or document while keeping its binary on disk."""
+    if mime_type in IMAGE_MIME:
+        return inspect_image(content, mime_type)
+    if mime_type not in ALLOWED_MIME:
+        raise VisualAssetError(
+            "只支援 JPEG、PNG、WebP、MP4、MOV、WebM、PDF、DOCX、PPTX 與文字文件",
+            code="unsupported_media_type",
+        )
+    if not content:
+        raise VisualAssetError("素材內容是空的", code="empty_file")
+    digest = hashlib.sha256(content).hexdigest()
+    if mime_type in DOCUMENT_MIME:
+        try:
+            text = _document_text(content, mime_type)[:20000]
+        except Exception as exc:
+            raise VisualAssetError("文件內容無法讀取", code="invalid_document") from exc
+        return ImageInspection(
+            width=0, height=0, orientation="document", exif_date="", sha256=digest,
+            perceptual_hash=digest[:16], color_embedding=[], blur_score=0,
+            brightness_score=0, quality_score=50 if text.strip() else 25,
+            suitability={"poster": False, "video": False, "instagram_cover": False,
+                         "reasons": ["文件素材", *([] if text.strip() else ["未擷取到內嵌文字"])]},
+            thumbnail=_placeholder_thumbnail("DOCUMENT", filename or mime_type),
+            asset_type="document", extracted_text=text,
+        )
+    return ImageInspection(
+        width=0, height=0, orientation="video", exif_date="", sha256=digest,
+        perceptual_hash=digest[:16], color_embedding=[], blur_score=0,
+        brightness_score=0, quality_score=0,
+        suitability={"poster": False, "video": True, "instagram_cover": False,
+                     "reasons": ["影片已保留；影格解碼器未配置"]},
+        thumbnail=_placeholder_thumbnail("VIDEO", filename or mime_type), asset_type="video",
+    )
+
+
 def semantic_embedding(text: str, dimensions: int = 192) -> list[float]:
     """不依賴外部服務的可重現語意特徵；AI 標籤/OCR 進來後會重算。"""
     normalized = re.sub(r"\s+", " ", text.lower()).strip()
@@ -394,7 +469,17 @@ class VisualAssetStore:
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock:
-            self._conn.executescript(SCHEMA)
+            apply_visual_migrations(self._conn, SCHEMA)
+            stamp = now()
+            self._conn.execute(
+                """UPDATE visual_analysis_jobs SET status='failed',stage='interrupted',progress=100,
+                       error_code='interrupted_process',error_message='服務重新啟動，請重試分析',updated_at=?
+                   WHERE status='running'""",(stamp,),
+            )
+            self._conn.execute(
+                """UPDATE visual_assets SET processing_state='failed',review_status='failed',updated_at=?
+                   WHERE id IN (SELECT asset_id FROM visual_analysis_jobs WHERE error_code='interrupted_process')""",(stamp,),
+            )
             for name in SCENE_NAMES:
                 self._conn.execute(
                     "INSERT OR IGNORE INTO visual_scenes(id,name,category,created_at) VALUES(?,?,?,?)",
@@ -446,7 +531,7 @@ class VisualAssetStore:
             stamp = now()
             self._conn.execute(
                 "INSERT INTO visual_clubs(id,school_id,name,status,source,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                (cid, school_id, label, "confirmed" if confirmed else "pending", dumps(source or {}), stamp, stamp),
+                (cid, school_id, label, "verified" if confirmed else "pending_review", dumps(source or {}), stamp, stamp),
             )
             self._conn.commit()
         return cid
@@ -455,6 +540,7 @@ class VisualAssetStore:
         self, *, user_id: str, filename: str, mime_type: str, content: bytes,
         source: str = "upload", school: str = "", club: str = "", privacy: str = "private",
         commercial_use: str = "unknown", file_created_date: str = "", source_metadata: dict[str, Any] | None = None,
+        relative_path: str = "", manifest_id: str = "", supersedes_asset_id: str = "",
     ) -> dict[str, Any]:
         if len(content) > config.VISUAL_MAX_FILE_BYTES:
             raise VisualAssetError(f"圖片超過 {config.VISUAL_MAX_FILE_BYTES // 1_000_000}MB 上限", code="file_too_large")
@@ -462,7 +548,7 @@ class VisualAssetStore:
             raise VisualAssetError("隱私狀態必須是 private、shared 或 public")
         if commercial_use not in {"allowed", "not_allowed", "unknown"}:
             raise VisualAssetError("商用權限必須是 allowed、not_allowed 或 unknown")
-        inspection = inspect_image(content, mime_type)
+        inspection = inspect_media(content, mime_type, filename)
         school_id = self.ensure_school(school)
         club_id = self.ensure_club(school_id, club, source={"type": "user_input"}, confirmed=True) if club else None
         asset_id = new_id("asset")
@@ -489,15 +575,20 @@ class VisualAssetStore:
                     id,user_id,original_filename,storage_path,thumbnail_path,mime_type,extension,width,height,orientation,
                     uploaded_at,source,source_metadata,exif_date,file_created_date,sha256,perceptual_hash,color_embedding,
                     semantic_embedding,privacy,commercial_use,analysis_status,quality_score,blur_score,brightness_score,
-                    suitability,review_status,school_id,club_id,duplicate_of,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    suitability,ocr_text,review_status,school_id,club_id,duplicate_of,created_at,updated_at,
+                    asset_type,relative_path,manifest_id,aspect_ratio,people_count,overall_confidence,processing_state,
+                    last_confirmed_at,supersedes_asset_id
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     asset_id,user_id,filename[:240],str(original_path),str(thumb_path),mime_type,safe_ext,
                     inspection.width,inspection.height,inspection.orientation,stamp,source[:120],dumps(source_metadata or {}),
                     inspection.exif_date,file_created_date[:40],inspection.sha256,inspection.perceptual_hash,
-                    dumps(inspection.color_embedding),dumps(semantic_embedding(filename)),privacy,commercial_use,
+                    dumps(inspection.color_embedding),dumps(semantic_embedding(filename + " " + inspection.extracted_text)),privacy,commercial_use,
                     "local_complete",inspection.quality_score,inspection.blur_score,inspection.brightness_score,
-                    dumps(inspection.suitability),"pending",school_id,club_id,duplicate_of,stamp,stamp,
+                    dumps(inspection.suitability),inspection.extracted_text,"pending_review",school_id,club_id,duplicate_of,stamp,stamp,
+                    inspection.asset_type,relative_path[:1000],manifest_id[:100],
+                    round(inspection.width / inspection.height, 6) if inspection.height else 0,
+                    0,0,"completed","",supersedes_asset_id[:80],
                 ),
             )
             for value, date_source, confidence in (
@@ -507,7 +598,7 @@ class VisualAssetStore:
                 if normalized:
                     self._conn.execute(
                         "INSERT INTO visual_date_candidates(id,asset_id,value,source,confidence,status,evidence,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                        (new_id("date"),asset_id,normalized,date_source,confidence,"possible",value,stamp),
+                        (new_id("date"),asset_id,normalized,date_source,confidence,"probable",value,stamp),
                     )
             self._conn.commit()
         return self.get_asset(asset_id, user_id) or {}
@@ -553,6 +644,8 @@ class VisualAssetStore:
             "id","original_filename","mime_type","width","height","orientation","uploaded_at","source",
             "exif_date","file_created_date","privacy","commercial_use","analysis_status","quality_score",
             "blur_score","brightness_score","ocr_text","review_status","duplicate_of","school_id","club_id","created_at","updated_at",
+            "asset_type","relative_path","manifest_id","aspect_ratio","people_count","overall_confidence",
+            "processing_state","last_confirmed_at","supersedes_asset_id",
         )}
         result["asset_id"] = result.pop("id")
         result["thumbnail_url"] = f"/api/visual-assets/{result['asset_id']}/file?variant=thumbnail"
@@ -567,9 +660,9 @@ class VisualAssetStore:
                 obs["evidence"] = loads(obs.get("evidence"), {})
             result["observations"] = observations
         if dates is not None:
-            distinct = sorted({d["value"] for d in dates if d.get("status") != "ignored"})
+            distinct = sorted({d["value"] for d in dates if d.get("status") != "failed"})
             result["date_candidates"] = dates
-            result["date_status"] = "conflict" if len(distinct) > 1 else ("confirmed" if any(d.get("status") == "confirmed" for d in dates) else "possible" if dates else "pending")
+            result["date_status"] = "conflicted" if len(distinct) > 1 else ("verified" if any(d.get("status") == "verified" for d in dates) else "probable" if dates else "pending_review")
         if job is not None:
             result["analysis_job"] = job
         return result
@@ -585,6 +678,8 @@ class VisualAssetStore:
         ratios = {"1:1":(1,1),"4:5":(4,5),"9:16":(9,16),"16:9":(16,9)}
         if variant not in ratios:
             raise VisualAssetError("variant 必須是 original、thumbnail、1:1、4:5、9:16 或 16:9")
+        if asset.get("asset_type") != "image":
+            raise VisualAssetError("文件與影片目前只支援原始檔及縮圖輸出", code="unsupported_rendition")
         source = Path(asset["storage_path"])
         target = source.parent / f"rendition-{variant.replace(':','x')}.jpg"
         if not target.exists():
@@ -641,11 +736,12 @@ class VisualAssetStore:
         jid = new_id("job")
         stamp = now()
         with self._lock:
+            attempts = int(self._conn.execute("SELECT COUNT(*) FROM visual_analysis_jobs WHERE asset_id=?",(asset_id,)).fetchone()[0]) + 1
             self._conn.execute(
-                "INSERT INTO visual_analysis_jobs(id,asset_id,status,stage,progress,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                (jid,asset_id,"running","preparing",5,stamp,stamp),
+                "INSERT INTO visual_analysis_jobs(id,asset_id,status,stage,progress,attempts,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                (jid,asset_id,"running","preparing",5,attempts,stamp,stamp),
             )
-            self._conn.execute("UPDATE visual_assets SET analysis_status='analyzing',updated_at=? WHERE id=?", (stamp,asset_id))
+            self._conn.execute("UPDATE visual_assets SET analysis_status='analyzing',processing_state='running',updated_at=? WHERE id=?", (stamp,asset_id))
             self._conn.commit()
         return jid
 
@@ -655,6 +751,16 @@ class VisualAssetStore:
                 "UPDATE visual_analysis_jobs SET status=?,stage=?,progress=?,error_code=?,error_message=?,updated_at=? WHERE id=?",
                 (status,stage,max(0,min(100,progress)),error_code[:80],error_message[:500],now(),job_id),
             )
+            if status == "failed":
+                self._conn.execute(
+                    "UPDATE visual_assets SET processing_state='failed',review_status='failed',updated_at=? WHERE id=(SELECT asset_id FROM visual_analysis_jobs WHERE id=?)",
+                    (now(),job_id),
+                )
+            elif status == "complete":
+                self._conn.execute(
+                    "UPDATE visual_assets SET processing_state='completed',updated_at=? WHERE id=(SELECT asset_id FROM visual_analysis_jobs WHERE id=?)",
+                    (now(),job_id),
+                )
             self._conn.commit()
 
     def set_analysis(self, asset_id: str, result: dict[str, Any], *, status: str = "complete") -> None:
@@ -665,8 +771,11 @@ class VisualAssetStore:
         ])
         with self._lock:
             self._conn.execute(
-                "UPDATE visual_assets SET ocr_text=?,analysis=?,semantic_embedding=?,analysis_status=?,updated_at=? WHERE id=?",
-                (str(result.get("ocr_text") or "")[:20000],dumps(result),dumps(semantic_embedding(summary)),status,now(),asset_id),
+                "UPDATE visual_assets SET ocr_text=?,analysis=?,semantic_embedding=?,analysis_status=?,people_count=?,overall_confidence=?,review_status=CASE WHEN review_status IN ('pending_review','failed') THEN 'probable' ELSE review_status END,updated_at=? WHERE id=?",
+                (str(result.get("ocr_text") or "")[:20000],dumps(result),dumps(semantic_embedding(summary)),status,
+                 int((result.get("people") or {}).get("count") or 0) if isinstance(result.get("people"),dict) else 0,
+                 max([float(x.get("confidence") or 0) for key in ("scenes","clubs") for x in (result.get(key) or []) if isinstance(x,dict)] or [0.0]),
+                 now(),asset_id),
             )
             self._conn.commit()
 
@@ -677,10 +786,10 @@ class VisualAssetStore:
 
     def add_observation(
         self, asset_id: str, entity_type: str, *, label: str = "", entity_id: str = "",
-        status: str = "possible", confidence: float = 0.0, source: str, evidence: dict[str, Any] | None = None,
+        status: str = "probable", confidence: float = 0.0, source: str, evidence: dict[str, Any] | None = None,
     ) -> str:
         if status not in STATUS_VALUES:
-            status = "pending"
+            status = "pending_review"
         oid = new_id("obs")
         stamp = now()
         with self._lock:
@@ -703,7 +812,7 @@ class VisualAssetStore:
             self._conn.commit()
         return oid
 
-    def add_date(self, asset_id: str, value: str, *, source: str, confidence: float, evidence: str = "", status: str = "possible") -> str | None:
+    def add_date(self, asset_id: str, value: str, *, source: str, confidence: float, evidence: str = "", status: str = "probable") -> str | None:
         normalized = normalize_date(value)
         if not normalized:
             return None
@@ -718,6 +827,11 @@ class VisualAssetStore:
                 "INSERT INTO visual_date_candidates(id,asset_id,value,source,confidence,status,evidence,created_at) VALUES(?,?,?,?,?,?,?,?)",
                 (did,asset_id,normalized,source,max(0,min(1,float(confidence))),status,evidence[:1000],now()),
             )
+            distinct = int(self._conn.execute(
+                "SELECT COUNT(DISTINCT value) FROM visual_date_candidates WHERE asset_id=? AND status!='failed'",(asset_id,),
+            ).fetchone()[0])
+            if distinct > 1:
+                self._conn.execute("UPDATE visual_assets SET review_status='conflicted',updated_at=? WHERE id=?",(now(),asset_id))
             self._conn.commit()
         return did
 
@@ -738,17 +852,20 @@ class VisualAssetStore:
     def ensure_event(
         self, *, school_id: str | None, club_id: str | None, name: str, event_type: str = "",
         event_date: str = "", start_time: str = "", end_time: str = "", location: str = "",
-        status: str = "possible", evidence: list[dict[str, Any]] | None = None,
+        status: str = "probable", evidence: list[dict[str, Any]] | None = None,
     ) -> str:
         label = (name or "待確認活動").strip()[:200]
         date_value = normalize_date(event_date)
         with self._lock:
-            row = self._conn.execute(
-                "SELECT id FROM visual_events WHERE name=? AND COALESCE(school_id,'')=COALESCE(?,'') AND event_date=? ORDER BY created_at LIMIT 1",
-                (label,school_id,date_value),
-            ).fetchone()
-            if row:
-                return str(row[0])
+            # Re-analysis of the same source asset is idempotent. A matching
+            # label/date from another asset is still never permission to merge.
+            source_asset = next((str(item.get("asset_id") or "") for item in (evidence or []) if isinstance(item,dict) and item.get("asset_id")),"")
+            if source_asset:
+                row = self._conn.execute(
+                    "SELECT id FROM visual_events WHERE evidence LIKE ? ORDER BY created_at LIMIT 1",(f'%"asset_id":"{source_asset}"%',),
+                ).fetchone()
+                if row:
+                    return str(row[0])
             eid = new_id("event")
             stamp = now()
             self._conn.execute(
@@ -763,9 +880,9 @@ class VisualAssetStore:
         return self._rows(
             """SELECT p.id AS person_id,p.name,a.storage_path,a.mime_type
                FROM visual_person_references r
-               JOIN visual_people p ON p.id=r.person_id AND p.status='confirmed'
+               JOIN visual_people p ON p.id=r.person_id AND p.status='verified'
                JOIN visual_assets a ON a.id=r.asset_id
-               WHERE r.status='confirmed' AND (a.user_id=? OR a.privacy IN ('shared','public'))
+               WHERE r.status='verified' AND (a.user_id=? OR a.privacy IN ('shared','public'))
                ORDER BY r.created_at DESC LIMIT ?""",
             (user_id,limit),
         )
@@ -784,22 +901,22 @@ class VisualAssetStore:
             where.append("a.school_id IN (SELECT id FROM visual_schools WHERE canonical_name LIKE ? OR aliases LIKE ?)")
             params.extend([f"%{school_filter}%", f"%{school_filter}%"])
         if club:
-            where.append("a.id IN (SELECT asset_id FROM visual_observations WHERE entity_type='club' AND label LIKE ? AND status!='ignored') OR a.club_id IN (SELECT id FROM visual_clubs WHERE name LIKE ? OR aliases LIKE ?)")
+            where.append("a.id IN (SELECT asset_id FROM visual_observations WHERE entity_type='club' AND label LIKE ? AND review_action!='ignored') OR a.club_id IN (SELECT id FROM visual_clubs WHERE name LIKE ? OR aliases LIKE ?)")
             params.extend([f"%{club}%",f"%{club}%",f"%{club}%"])
         if person:
-            where.append("a.id IN (SELECT o.asset_id FROM visual_observations o LEFT JOIN visual_people p ON p.id=o.entity_id WHERE o.entity_type='person' AND o.status!='ignored' AND (p.name LIKE ? OR p.nickname LIKE ? OR o.label LIKE ?))")
+            where.append("a.id IN (SELECT o.asset_id FROM visual_observations o LEFT JOIN visual_people p ON p.id=o.entity_id WHERE o.entity_type='person' AND o.review_action!='ignored' AND (p.name LIKE ? OR p.nickname LIKE ? OR o.label LIKE ?))")
             params.extend([f"%{person}%",f"%{person}%",f"%{person}%"])
         if scene:
-            where.append("a.id IN (SELECT asset_id FROM visual_observations WHERE entity_type='scene' AND label LIKE ? AND status!='ignored')")
+            where.append("a.id IN (SELECT asset_id FROM visual_observations WHERE entity_type='scene' AND label LIKE ? AND review_action!='ignored')")
             params.append(f"%{scene}%")
         if event:
-            where.append("a.id IN (SELECT o.asset_id FROM visual_observations o LEFT JOIN visual_events e ON e.id=o.entity_id WHERE o.entity_type='event' AND o.status!='ignored' AND (e.name LIKE ? OR o.label LIKE ?))")
+            where.append("a.id IN (SELECT o.asset_id FROM visual_observations o LEFT JOIN visual_events e ON e.id=o.entity_id WHERE o.entity_type='event' AND o.review_action!='ignored' AND (e.name LIKE ? OR o.label LIKE ?))")
             params.extend([f"%{event}%",f"%{event}%"])
         if date_from:
-            where.append("EXISTS (SELECT 1 FROM visual_date_candidates d WHERE d.asset_id=a.id AND d.status!='ignored' AND d.value>=?)")
+            where.append("EXISTS (SELECT 1 FROM visual_date_candidates d WHERE d.asset_id=a.id AND d.status!='failed' AND d.value>=?)")
             params.append(date_from)
         if date_to:
-            where.append("EXISTS (SELECT 1 FROM visual_date_candidates d WHERE d.asset_id=a.id AND d.status!='ignored' AND d.value<=?)")
+            where.append("EXISTS (SELECT 1 FROM visual_date_candidates d WHERE d.asset_id=a.id AND d.status!='failed' AND d.value<=?)")
             params.append(date_to)
         if quality_min:
             where.append("a.quality_score>=?")
@@ -819,8 +936,8 @@ class VisualAssetStore:
             f"""SELECT a.*,
                    COALESCE(s.canonical_name,'') AS school_name,
                    COALESCE(c.name,'') AS club_name,
-                   COALESCE((SELECT GROUP_CONCAT(label,' ') FROM visual_observations o WHERE o.asset_id=a.id AND o.status!='ignored'),'') AS labels,
-                   COALESCE((SELECT GROUP_CONCAT(value,' ') FROM visual_date_candidates d WHERE d.asset_id=a.id AND d.status!='ignored'),'') AS dates,
+                   COALESCE((SELECT GROUP_CONCAT(label,' ') FROM visual_observations o WHERE o.asset_id=a.id AND o.review_action!='ignored'),'') AS labels,
+                   COALESCE((SELECT GROUP_CONCAT(value,' ') FROM visual_date_candidates d WHERE d.asset_id=a.id AND d.status!='failed'),'') AS dates,
                    COALESCE((SELECT SUM(CASE WHEN event_type IN ('selected','used','downloaded') THEN 1 WHEN event_type='excluded' THEN -1 ELSE 0 END) FROM visual_learning_events l WHERE l.asset_id=a.id),0) AS feedback
                FROM visual_assets a
                LEFT JOIN visual_schools s ON s.id=a.school_id
@@ -829,10 +946,14 @@ class VisualAssetStore:
             tuple(params),
         )
         qvec = semantic_embedding(q) if q else []
-        qtokens = [t for t in re.split(r"[\s,，、。]+", q) if len(t) >= 1]
+        qtokens = [t for t in re.split(r"[\s,，、。]+", q) if len(t) >= 2]
+        compact_q = re.sub(r"找|照片|圖片|素材|請|幫我|的", "", q)
+        qtokens += [compact_q[i:i+2] for i in range(max(0,len(compact_q)-1)) if not compact_q[i:i+2].isspace()]
+        qtokens = list(dict.fromkeys(qtokens))
         ratio_alias = infer_ratio(q, ratio)
-        inferred_scene = scene or next((name for name in SCENE_NAMES if name in q), "")
-        ranked: list[tuple[float, dict[str, Any], list[str]]] = []
+        hard_scene_names = ("校園","教室","禪堂","舞台","報到區","戶外","海報","文件")
+        inferred_scene = scene or next((name for name in hard_scene_names if name in q), "")
+        candidates: list[tuple[dict[str, Any], int, float, list[str]]] = []
         for row in rows:
             if ratio_alias and not ratio_matches(row["width"], row["height"], ratio_alias):
                 continue
@@ -844,15 +965,12 @@ class VisualAssetStore:
             doc_lower = document.lower()
             keyword_hits = sum(1 for token in qtokens if token in doc_lower)
             sem = cosine(qvec, loads(row.get("semantic_embedding"), [])) if q else 0.0
-            score = keyword_hits * 1.25 + max(0.0, sem) * 2.2 + float(row.get("quality_score") or 0) / 250.0
-            score += max(-0.5, min(0.75, float(row.get("feedback") or 0) * 0.08))
             reasons: list[str] = []
             if keyword_hits:
                 reasons.append(f"符合 {keyword_hits} 個文字／實體條件")
             if sem > 0.12:
                 reasons.append("圖像描述與查詢語意相近")
             if inferred_scene and inferred_scene in row.get("labels", ""):
-                score += 1.0
                 reasons.append(f"場景符合「{inferred_scene}」")
             if float(row.get("quality_score") or 0) >= 75:
                 reasons.append("畫質評分高")
@@ -862,7 +980,18 @@ class VisualAssetStore:
                 reasons.append("偵測到重複原圖")
             if q and keyword_hits == 0 and sem <= 0.02:
                 continue
-            ranked.append((score,row,reasons or ["符合目前篩選條件"]))
+            candidates.append((row,keyword_hits,sem,reasons or ["符合目前篩選條件"]))
+        keyword_ranking = [item[0]["id"] for item in sorted(candidates,key=lambda item:(item[1],item[0].get("uploaded_at","")),reverse=True) if item[1] > 0]
+        semantic_ranking = [item[0]["id"] for item in sorted(candidates,key=lambda item:item[2],reverse=True) if item[2] > 0.02]
+        fused = reciprocal_rank_fusion([keyword_ranking,semantic_ranking]) if q else {}
+        ranked: list[tuple[float,dict[str,Any],list[str]]] = []
+        for row,keyword_hits,sem,reasons in candidates:
+            score = fused.get(row["id"],0.0) * 100.0
+            score += float(row.get("quality_score") or 0) / 250.0
+            score += max(-0.5,min(0.75,float(row.get("feedback") or 0) * 0.08))
+            if inferred_scene:
+                score += 1.0
+            ranked.append((score,row,reasons))
         ranked.sort(key=lambda item: (item[0], item[1].get("uploaded_at", "")), reverse=True)
         total = len(ranked)
         chunk = ranked[(page - 1) * limit:page * limit]
@@ -904,6 +1033,185 @@ class VisualAssetStore:
             items.append(item)
         return items,total
 
+    @staticmethod
+    def safe_relative_path(value: str, filename: str) -> str:
+        raw = (value or filename).replace("\\", "/").lstrip("/")
+        path = PurePosixPath(raw)
+        if not raw or ".." in path.parts:
+            raise VisualAssetError("manifest relative_path 不可跳出匯入根目錄", code="invalid_manifest_path")
+        return str(path)[:1000]
+
+    def start_import(
+        self, user_id: str, *, idempotency_key: str, root_name: str,
+        manifest: dict[str, Any], total_count: int,
+    ) -> dict[str, Any]:
+        key = idempotency_key.strip()[:160]
+        if len(key) < 8:
+            raise VisualAssetError("idempotency_key 至少需要 8 個字元", code="invalid_idempotency_key")
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM visual_imports WHERE user_id=? AND idempotency_key=?", (user_id,key),
+            ).fetchone()
+            stamp = now()
+            if row:
+                import_id = str(row[0])
+                self._conn.execute(
+                    "UPDATE visual_imports SET manifest_json=?,total_count=MAX(total_count,?),updated_at=? WHERE id=?",
+                    (dumps(manifest),total_count,stamp,import_id),
+                )
+            else:
+                import_id = new_id("import")
+                self._conn.execute(
+                    """INSERT INTO visual_imports(id,user_id,idempotency_key,root_name,manifest_json,status,total_count,created_at,updated_at)
+                       VALUES(?,?,?,?,?,'pending_review',?,?,?)""",
+                    (import_id,user_id,key,root_name[:240],dumps(manifest),total_count,stamp,stamp),
+                )
+            self._conn.commit()
+        return self.get_import(import_id,user_id) or {}
+
+    def ingest_import_item(
+        self, *, user_id: str, import_id: str, client_key: str, relative_path: str,
+        filename: str, mime_type: str, content: bytes, last_modified: str = "",
+        school: str = "", club: str = "", source: str = "folder_import",
+        privacy: str = "private", commercial_use: str = "unknown", resync: bool = False,
+    ) -> tuple[dict[str, Any], bool]:
+        current_import = self._rows("SELECT * FROM visual_imports WHERE id=? AND user_id=?", (import_id,user_id))
+        if not current_import:
+            raise VisualAssetError("找不到匯入工作或沒有權限", code="not_found")
+        rel = self.safe_relative_path(relative_path, filename)
+        key = (client_key or rel)[:240]
+        digest = hashlib.sha256(content).hexdigest()
+        existing_rows = self._rows(
+            "SELECT * FROM visual_import_items WHERE import_id=? AND client_key=?", (import_id,key),
+        )
+        existing = existing_rows[0] if existing_rows else None
+        if existing and existing.get("status") == "verified" and existing.get("sha256") == digest:
+            item = self.get_asset(str(existing.get("asset_id") or ""),user_id)
+            if item:
+                return item, True
+        if existing and existing.get("asset_id") and existing.get("sha256") != digest and not resync:
+            raise VisualAssetError("檔案內容已變更；請使用 resync=true 建立新版本", code="resync_required")
+        stamp = now()
+        item_id = str(existing.get("id")) if existing else new_id("import_item")
+        attempts = int(existing.get("attempts") or 0) + 1 if existing else 1
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO visual_import_items(
+                       id,import_id,client_key,relative_path,filename,size_bytes,last_modified,sha256,status,attempts,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(import_id,client_key) DO UPDATE SET
+                       relative_path=excluded.relative_path,filename=excluded.filename,size_bytes=excluded.size_bytes,
+                       last_modified=excluded.last_modified,sha256=excluded.sha256,status='pending_review',
+                       error_code='',error_message='',attempts=?,updated_at=?""",
+                (item_id,import_id,key,rel,filename[:240],len(content),last_modified[:80],digest,"pending_review",attempts,stamp,stamp,attempts,stamp),
+            )
+            self._conn.commit()
+        try:
+            asset = self.create_asset(
+                user_id=user_id,filename=filename,mime_type=mime_type,content=content,source=source,
+                school=school,club=club,privacy=privacy,commercial_use=commercial_use,
+                file_created_date=last_modified,source_metadata={"import_id":import_id,"client_key":key},
+                relative_path=rel,manifest_id=import_id,
+                supersedes_asset_id=str(existing.get("asset_id") or "") if existing and resync else "",
+            )
+            with self._lock:
+                self._conn.execute(
+                    "UPDATE visual_import_items SET asset_id=?,status='verified',error_code='',error_message='',updated_at=? WHERE id=?",
+                    (asset["asset_id"],now(),item_id),
+                )
+                self._refresh_import_locked(import_id)
+                self._conn.commit()
+            return asset, False
+        except VisualAssetError as exc:
+            with self._lock:
+                self._conn.execute(
+                    "UPDATE visual_import_items SET status='failed',error_code=?,error_message=?,updated_at=? WHERE id=?",
+                    (exc.code,str(exc)[:500],now(),item_id),
+                )
+                self._refresh_import_locked(import_id)
+                self._conn.commit()
+            raise
+
+    def _refresh_import_locked(self, import_id: str) -> None:
+        counts = self._conn.execute(
+            """SELECT COUNT(*) AS seen,
+                      SUM(CASE WHEN status='verified' THEN 1 ELSE 0 END) AS completed,
+                      SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed
+               FROM visual_import_items WHERE import_id=?""", (import_id,),
+        ).fetchone()
+        seen,completed,failed = (int(counts[0] or 0),int(counts[1] or 0),int(counts[2] or 0))
+        total_row = self._conn.execute("SELECT total_count FROM visual_imports WHERE id=?",(import_id,)).fetchone()
+        total = max(seen,int(total_row[0] or 0) if total_row else seen)
+        status = "failed" if failed and not completed else "verified" if completed >= total and not failed else "pending_review"
+        stamp = now()
+        self._conn.execute(
+            "UPDATE visual_imports SET status=?,completed_count=?,failed_count=?,updated_at=?,last_synced_at=? WHERE id=?",
+            (status,completed,failed,stamp,stamp,import_id),
+        )
+
+    def get_import(self, import_id: str, user_id: str) -> dict[str, Any] | None:
+        imports = self._rows("SELECT * FROM visual_imports WHERE id=? AND user_id=?",(import_id,user_id))
+        if not imports:
+            return None
+        result = imports[0]
+        result["manifest"] = loads(result.pop("manifest_json"),{})
+        result["items"] = self._rows(
+            "SELECT client_key,relative_path,filename,size_bytes,last_modified,asset_id,status,error_code,error_message,attempts,updated_at FROM visual_import_items WHERE import_id=? ORDER BY created_at",
+            (import_id,),
+        )
+        return result
+
+    def review_queue(self, user_id: str, *, status: str = "", page: int = 1, limit: int = 30) -> tuple[list[dict[str, Any]], int]:
+        allowed = {"", "verified", "probable", "pending_review", "conflicted", "failed"}
+        if status not in allowed:
+            raise VisualAssetError("review queue 狀態無效")
+        where = ["a.user_id=?"]
+        params: list[Any] = [user_id]
+        if status:
+            where.append("a.review_status=?")
+            params.append(status)
+        else:
+            where.append("a.review_status IN ('probable','pending_review','conflicted','failed')")
+        condition = " AND ".join(where)
+        with self._lock:
+            total = int(self._conn.execute(f"SELECT COUNT(*) FROM visual_assets a WHERE {condition}",tuple(params)).fetchone()[0])
+            rows = self._conn.execute(
+                f"""SELECT a.*,COALESCE(s.canonical_name,'') AS school_name,COALESCE(c.name,'') AS club_name
+                    FROM visual_assets a LEFT JOIN visual_schools s ON s.id=a.school_id
+                    LEFT JOIN visual_clubs c ON c.id=a.club_id WHERE {condition}
+                    ORDER BY a.updated_at DESC LIMIT ? OFFSET ?""",
+                (*params,limit,(page-1)*limit),
+            ).fetchall()
+        return [self.public_asset(dict(row)) for row in rows],total
+
+    def confirm_asset(self, asset_id: str, user_id: str, *, reason: str = "") -> dict[str, Any]:
+        asset = self.owned_asset(asset_id,user_id)
+        if not asset:
+            raise VisualAssetError("找不到可確認的素材",code="not_found")
+        dates = self._rows("SELECT DISTINCT value FROM visual_date_candidates WHERE asset_id=? AND status!='failed'",(asset_id,))
+        if len(dates) > 1:
+            with self._lock:
+                self._conn.execute("UPDATE visual_assets SET review_status='conflicted',updated_at=? WHERE id=?",(now(),asset_id))
+                self._conn.commit()
+            raise VisualAssetError("日期證據互相衝突，請先選擇或修正日期",code="date_conflict")
+        stamp = now()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE visual_assets SET review_status='verified',last_confirmed_at=?,updated_at=? WHERE id=? AND user_id=?",
+                (stamp,stamp,asset_id,user_id),
+            )
+            self._conn.execute(
+                "UPDATE visual_observations SET status='verified',updated_at=? WHERE asset_id=? AND status IN ('probable','pending_review') AND review_action!='ignored'",
+                (stamp,asset_id),
+            )
+            self._conn.execute(
+                "UPDATE visual_date_candidates SET status='verified' WHERE asset_id=? AND status='probable'",(asset_id,),
+            )
+            self._conn.commit()
+        self.add_correction(user_id,asset_id,"asset_review",{"status":asset.get("review_status")},{"status":"verified"},reason)
+        self.record_learning(user_id,"correction",asset_id=asset_id,payload={"entity_type":"asset","action":"confirm"},outcome="verified")
+        return self.get_asset(asset_id,user_id) or {}
+
     def confirm_entity(
         self, *, user_id: str, asset_id: str, entity_type: str, action: str,
         entity_id: str = "", candidate_label: str = "", values: dict[str, Any] | None = None,
@@ -920,9 +1228,9 @@ class VisualAssetStore:
                 old = self._conn.execute("SELECT * FROM visual_observations WHERE id=? AND asset_id=?", (observation_id,asset_id)).fetchone()
                 if not old:
                     raise VisualAssetError("找不到辨識結果", code="not_found")
-                self._conn.execute("UPDATE visual_observations SET status='ignored',updated_at=? WHERE id=?", (now(),observation_id))
+                self._conn.execute("UPDATE visual_observations SET review_action='ignored',updated_at=? WHERE id=?", (now(),observation_id))
                 self._conn.commit()
-            self.add_correction(user_id,asset_id,entity_type,dict(old),{"status":"ignored"},reason)
+            self.add_correction(user_id,asset_id,entity_type,dict(old),{"review_action":"ignored"},reason)
             self.record_learning(user_id,"correction",asset_id=asset_id,payload={"entity_type":entity_type,"action":"ignore"},outcome="reviewed")
             return self.get_asset(asset_id,user_id) or {}
         if action not in {"confirm","correct"}:
@@ -933,7 +1241,7 @@ class VisualAssetStore:
         label = (candidate_label or values.get("name") or values.get("value") or "").strip()
         if entity_type == "person":
             if final_id:
-                people = self._rows("SELECT * FROM visual_people WHERE id=? AND status='confirmed'", (final_id,))
+                people = self._rows("SELECT * FROM visual_people WHERE id=? AND status='verified'", (final_id,))
                 if not people:
                     raise VisualAssetError("只能比對已建立且已確認的人物", code="person_not_confirmed")
                 person_row = people[0]
@@ -952,34 +1260,34 @@ class VisualAssetStore:
                 with self._lock:
                     self._conn.execute(
                         "INSERT INTO visual_people(id,school_id,club_id,name,nickname,role,status,source,confidence,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                        (final_id,person_school,club_id,label,str(values.get("nickname") or "")[:100],str(values.get("role") or "")[:120],"confirmed",dumps({"type":"user_confirmation","asset_id":asset_id}),1.0,stamp,stamp),
+                        (final_id,person_school,club_id,label,str(values.get("nickname") or "")[:100],str(values.get("role") or "")[:120],"verified",dumps({"type":"user_confirmation","asset_id":asset_id}),1.0,stamp,stamp),
                     )
                     if not school_id:
                         self._conn.execute("UPDATE visual_assets SET school_id=?,updated_at=? WHERE id=?", (person_school,stamp,asset_id))
                     self._conn.commit()
-            self.add_observation(asset_id,"person",label=label,entity_id=final_id,status="confirmed",confidence=1.0,source="user_confirmation",evidence={"action":action,"reason":reason})
+            self.add_observation(asset_id,"person",label=label,entity_id=final_id,status="verified",confidence=1.0,source="user_confirmation",evidence={"action":action,"reason":reason})
             if values.get("use_as_reference", True):
                 with self._lock:
                     self._conn.execute(
                         "INSERT OR REPLACE INTO visual_person_references(person_id,asset_id,status,created_at) VALUES(?,?,?,?)",
-                        (final_id,asset_id,"confirmed",now()),
+                        (final_id,asset_id,"verified",now()),
                     )
                     self._conn.commit()
         elif entity_type == "scene":
             if not label:
                 raise VisualAssetError("請指定場景")
             final_id = self.scene_id(label)
-            self.add_observation(asset_id,"scene",label=label,entity_id=final_id,status="confirmed",confidence=1.0,source="user_confirmation",evidence={"reason":reason})
+            self.add_observation(asset_id,"scene",label=label,entity_id=final_id,status="verified",confidence=1.0,source="user_confirmation",evidence={"reason":reason})
         elif entity_type == "club":
             if not label:
                 raise VisualAssetError("請指定社團")
             chosen_school = self.ensure_school(str(values.get("school") or "")) or school_id
             final_id = self.ensure_club(chosen_school,label,source={"type":"user_confirmation"},confirmed=True) or ""
             with self._lock:
-                self._conn.execute("UPDATE visual_clubs SET status='confirmed',updated_at=? WHERE id=?", (now(),final_id))
+                self._conn.execute("UPDATE visual_clubs SET status='verified',updated_at=? WHERE id=?", (now(),final_id))
                 self._conn.execute("UPDATE visual_assets SET school_id=?,club_id=?,updated_at=? WHERE id=?", (chosen_school,final_id,now(),asset_id))
                 self._conn.commit()
-            self.add_observation(asset_id,"club",label=label,entity_id=final_id,status="confirmed",confidence=1.0,source="user_confirmation",evidence={"reason":reason})
+            self.add_observation(asset_id,"club",label=label,entity_id=final_id,status="verified",confidence=1.0,source="user_confirmation",evidence={"reason":reason})
         elif entity_type == "event":
             if not label:
                 raise VisualAssetError("請指定活動名稱")
@@ -996,20 +1304,27 @@ class VisualAssetStore:
                     school_id=chosen_school,club_id=asset.get("club_id"),name=label,
                     event_type=str(values.get("event_type") or ""),event_date=str(values.get("date") or ""),
                     start_time=str(values.get("start_time") or values.get("time") or ""),end_time=str(values.get("end_time") or ""),
-                    location=str(values.get("location") or ""),status="confirmed",evidence=[{"source":"user_confirmation","asset_id":asset_id}],
+                    location=str(values.get("location") or ""),status="verified",evidence=[{"source":"user_confirmation","asset_id":asset_id}],
                 )
             with self._lock:
-                self._conn.execute("UPDATE visual_events SET status='confirmed',updated_at=? WHERE id=?", (now(),final_id))
+                self._conn.execute("UPDATE visual_events SET status='verified',updated_at=? WHERE id=?", (now(),final_id))
                 self._conn.commit()
-            self.add_observation(asset_id,"event",label=label,entity_id=final_id,status="confirmed",confidence=1.0,source="user_confirmation",evidence={"reason":reason})
+            self.add_observation(asset_id,"event",label=label,entity_id=final_id,status="verified",confidence=1.0,source="user_confirmation",evidence={"reason":reason})
         elif entity_type == "date":
             if not label or not normalize_date(label):
                 raise VisualAssetError("日期格式無法辨識，請使用 YYYY-MM-DD")
-            final_id = self.add_date(asset_id,label,source="user_input",confidence=1.0,evidence=reason,status="confirmed") or ""
+            final_id = self.add_date(asset_id,label,source="user_input",confidence=1.0,evidence=reason,status="verified") or ""
         else:
             raise VisualAssetError("不支援的實體類型")
-        self.add_correction(user_id,asset_id,entity_type,{"candidate":candidate_label,"observation_id":observation_id},{"entity_id":final_id,"label":label,"status":"confirmed"},reason)
-        self.record_learning(user_id,"correction",asset_id=asset_id,payload={"entity_type":entity_type,"action":action},outcome="confirmed")
+        stamp = now()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE visual_assets SET review_status='verified',last_confirmed_at=?,updated_at=? WHERE id=? AND user_id=?",
+                (stamp,stamp,asset_id,user_id),
+            )
+            self._conn.commit()
+        self.add_correction(user_id,asset_id,entity_type,{"candidate":candidate_label,"observation_id":observation_id},{"entity_id":final_id,"label":label,"status":"verified"},reason)
+        self.record_learning(user_id,"correction",asset_id=asset_id,payload={"entity_type":entity_type,"action":action},outcome="verified")
         return self.get_asset(asset_id,user_id) or {}
 
     def dashboard(self, user_id: str) -> dict[str, Any]:
@@ -1017,12 +1332,12 @@ class VisualAssetStore:
         with self._lock:
             total = int(self._conn.execute(f"SELECT COUNT(*) FROM visual_assets WHERE {visible}",(user_id,)).fetchone()[0])
             counts = {
-                "pending": int(self._conn.execute(f"SELECT COUNT(*) FROM visual_assets WHERE {visible} AND review_status IN ('pending','possible')",(user_id,)).fetchone()[0]),
+                "pending": int(self._conn.execute(f"SELECT COUNT(*) FROM visual_assets WHERE {visible} AND review_status IN ('pending_review','probable','conflicted','failed')",(user_id,)).fetchone()[0]),
                 "duplicates": int(self._conn.execute(f"SELECT COUNT(*) FROM visual_assets WHERE {visible} AND duplicate_of IS NOT NULL",(user_id,)).fetchone()[0]),
                 "high_quality": int(self._conn.execute(f"SELECT COUNT(*) FROM visual_assets WHERE {visible} AND quality_score>=75",(user_id,)).fetchone()[0]),
-                "people": int(self._conn.execute("SELECT COUNT(*) FROM visual_people").fetchone()[0]),
-                "clubs": int(self._conn.execute("SELECT COUNT(*) FROM visual_clubs").fetchone()[0]),
-                "events": int(self._conn.execute("SELECT COUNT(*) FROM visual_events").fetchone()[0]),
+                "people": int(self._conn.execute("SELECT COUNT(DISTINCT o.entity_id) FROM visual_observations o JOIN visual_assets a ON a.id=o.asset_id WHERE a.user_id=? AND o.entity_type='person' AND o.entity_id!=''",(user_id,)).fetchone()[0]),
+                "clubs": int(self._conn.execute("SELECT COUNT(DISTINCT id) FROM visual_clubs WHERE id IN (SELECT club_id FROM visual_assets WHERE user_id=? AND club_id IS NOT NULL UNION SELECT o.entity_id FROM visual_observations o JOIN visual_assets a ON a.id=o.asset_id WHERE a.user_id=? AND o.entity_type='club' AND o.entity_id!='')",(user_id,user_id)).fetchone()[0]),
+                "events": int(self._conn.execute("SELECT COUNT(DISTINCT o.entity_id) FROM visual_observations o JOIN visual_assets a ON a.id=o.asset_id WHERE a.user_id=? AND o.entity_type='event' AND o.entity_id!=''",(user_id,)).fetchone()[0]),
                 "scenes": int(self._conn.execute("SELECT COUNT(*) FROM visual_scenes").fetchone()[0]),
             }
         recent,total_recent,_ = self.search(user_id,page=1,limit=12)
@@ -1043,7 +1358,7 @@ class VisualAssetStore:
     def learning_insights(self, user_id: str) -> dict[str, Any]:
         rows = self._rows("SELECT event_type,COUNT(*) AS count FROM visual_learning_events WHERE user_id=? GROUP BY event_type ORDER BY count DESC",(user_id,))
         corrections = self._rows("SELECT field_name,COUNT(*) AS count FROM visual_corrections WHERE user_id=? GROUP BY field_name ORDER BY count DESC",(user_id,))
-        failures = self._rows("SELECT error_code,COUNT(*) AS count FROM visual_analysis_jobs WHERE status='failed' GROUP BY error_code ORDER BY count DESC")
+        failures = self._rows("SELECT j.error_code,COUNT(*) AS count FROM visual_analysis_jobs j JOIN visual_assets a ON a.id=j.asset_id WHERE j.status='failed' AND a.user_id=? GROUP BY j.error_code ORDER BY count DESC",(user_id,))
         return {
             "event_counts": rows, "correction_hotspots": corrections, "analysis_failures": failures,
             "policy": "只調整搜尋排序統計與策略建議；不修改模型權重，辨識事實仍需人工確認。",
@@ -1105,11 +1420,20 @@ class VisualAssetStore:
                 self._conn.commit()
         return self.get_asset(asset_id, user_id)
 
-    def list_entities(self, kind: str, *, query: str = "", school: str = "", page: int = 1, limit: int = 30) -> tuple[list[dict[str, Any]], int]:
+    def list_entities(self, kind: str, *, user_id: str, query: str = "", school: str = "", page: int = 1, limit: int = 30) -> tuple[list[dict[str, Any]], int]:
         table_map = {"people":"visual_people", "clubs":"visual_clubs", "events":"visual_events", "scenes":"visual_scenes"}
         table = table_map[kind]
         where, params = ["1=1"], []
         name_col = "name"
+        if kind == "people":
+            where.append("id IN (SELECT o.entity_id FROM visual_observations o JOIN visual_assets a ON a.id=o.asset_id WHERE a.user_id=? AND o.entity_type='person' AND o.entity_id!='')")
+            params.append(user_id)
+        elif kind == "clubs":
+            where.append("id IN (SELECT club_id FROM visual_assets WHERE user_id=? AND club_id IS NOT NULL UNION SELECT o.entity_id FROM visual_observations o JOIN visual_assets a ON a.id=o.asset_id WHERE a.user_id=? AND o.entity_type='club' AND o.entity_id!='')")
+            params.extend([user_id,user_id])
+        elif kind == "events":
+            where.append("id IN (SELECT o.entity_id FROM visual_observations o JOIN visual_assets a ON a.id=o.asset_id WHERE a.user_id=? AND o.entity_type='event' AND o.entity_id!='')")
+            params.append(user_id)
         if query:
             where.append(f"{name_col} LIKE ?")
             params.append(f"%{query}%")

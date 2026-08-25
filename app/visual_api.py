@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import json
+import mimetypes
 from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
@@ -19,7 +21,7 @@ router = APIRouter(prefix="/api", dependencies=[Depends(auth.require_user)], tag
 
 
 def _http_error(exc: VisualAssetError) -> HTTPException:
-    status = 404 if exc.code == "not_found" else 413 if exc.code == "file_too_large" else 409 if exc.code in {"school_conflict","immutable_field"} else 422
+    status = 404 if exc.code == "not_found" else 413 if exc.code == "file_too_large" else 409 if exc.code in {"school_conflict","immutable_field","date_conflict","resync_required"} else 422
     return HTTPException(status_code=status,detail={"code":exc.code,"message":str(exc)})
 
 
@@ -37,7 +39,7 @@ class AssetPatch(StrictRequest):
     commercial_use: Literal["allowed","not_allowed","unknown"] | None = None
     source: str | None = Field(default=None,max_length=120)
     source_metadata: dict[str,Any] | None = None
-    review_status: Literal["confirmed","possible","pending","conflict","ignored"] | None = None
+    review_status: Literal["verified","probable","pending_review","conflicted","failed"] | None = None
     school: str | None = Field(default=None,max_length=120)
     club: str | None = Field(default=None,max_length=160)
 
@@ -77,6 +79,17 @@ class ApproveLearningRequest(StrictRequest):
     correction_id: str = Field(min_length=8,max_length=80)
 
 
+class AssetConfirmRequest(StrictRequest):
+    reason: str = Field(default="使用者確認整筆素材",max_length=1000)
+
+
+def _media_type(upload: UploadFile) -> str:
+    supplied = (upload.content_type or "").lower()
+    if supplied and supplied != "application/octet-stream":
+        return supplied
+    return (mimetypes.guess_type(upload.filename or "")[0] or supplied).lower()
+
+
 @router.post("/visual-assets/upload",status_code=201)
 async def upload_visual_assets(
     request: Request,
@@ -89,6 +102,7 @@ async def upload_visual_assets(
     commercial_use: Literal["allowed","not_allowed","unknown"] = Form(default="unknown"),
     file_created_date: str = Form(default="",max_length=40),
     auto_analyze: bool = Form(default=True),
+    idempotency_key: str = Form(default="",max_length=160),
     user_id: str = Depends(auth.require_user),
 ):
     if not files:
@@ -96,22 +110,36 @@ async def upload_visual_assets(
     if len(files) > config.VISUAL_MAX_BATCH:
         raise HTTPException(status_code=413,detail=f"一次最多上傳 {config.VISUAL_MAX_BATCH} 張圖片")
     store = get_visual_store()
+    upload_job = None
+    if idempotency_key:
+        generated_manifest = {"total_count":len(files),"items":[{"client_key":f"{i}:{f.filename or 'unnamed'}","relative_path":f.filename or "unnamed"} for i,f in enumerate(files)]}
+        upload_job = store.start_import(user_id,idempotency_key=idempotency_key,root_name="direct-upload",manifest=generated_manifest,total_count=len(files))
     created: list[dict[str,Any]] = []
+    skipped_count = 0
     errors: list[dict[str,str]] = []
-    for upload in files:
+    for index,upload in enumerate(files):
         filename = (upload.filename or "unnamed-image")[:240]
-        mime_type = (upload.content_type or "").lower()
+        mime_type = _media_type(upload)
         try:
+            was_skipped = False
             content = await upload.read(config.VISUAL_MAX_FILE_BYTES + 1)
-            if len(content) > config.VISUAL_MAX_FILE_BYTES:
+            if len(content) > config.VISUAL_MAX_FILE_BYTES and not upload_job:
                 raise VisualAssetError(f"圖片超過 {config.VISUAL_MAX_FILE_BYTES // 1_000_000}MB 上限",code="file_too_large")
-            item = store.create_asset(
-                user_id=user_id,filename=filename,mime_type=mime_type,content=content,source=source,
-                school=school,club=club,privacy=privacy,commercial_use=commercial_use,
-                file_created_date=file_created_date,source_metadata={"upload_content_type":mime_type},
-            )
+            if upload_job:
+                item,was_skipped = store.ingest_import_item(
+                    user_id=user_id,import_id=upload_job["id"],client_key=f"{index}:{filename}",relative_path=filename,
+                    filename=filename,mime_type=mime_type,content=content,last_modified=file_created_date,
+                    school=school,club=club,source=source,privacy=privacy,commercial_use=commercial_use,
+                )
+            else:
+                item = store.create_asset(
+                    user_id=user_id,filename=filename,mime_type=mime_type,content=content,source=source,
+                    school=school,club=club,privacy=privacy,commercial_use=commercial_use,
+                    file_created_date=file_created_date,source_metadata={"upload_content_type":mime_type},
+                )
             created.append(item)
-            if auto_analyze:
+            skipped_count += int(was_skipped)
+            if auto_analyze and not was_skipped:
                 background.add_task(_safe_analyze,item["asset_id"],user_id)
         except VisualAssetError as exc:
             errors.append({"filename":filename,"code":exc.code,"message":str(exc)})
@@ -121,11 +149,68 @@ async def upload_visual_assets(
         action="visual.upload",actor_user_id=user_id,resource="visual-assets",
         detail={"created":len(created),"errors":[e["code"] for e in errors],"school":school,"club":club},request=request,ok=bool(created),
     )
-    payload = {"items":created,"errors":errors,"created":len(created),"analysis_scheduled":bool(auto_analyze and created)}
+    payload = {"items":created,"errors":errors,"created":len(created) - skipped_count,"skipped":skipped_count,"analysis_scheduled":bool(auto_analyze and created and skipped_count < len(created)),"import_id":upload_job["id"] if upload_job else ""}
     if not created:
         status = 413 if errors and all(e["code"] == "file_too_large" for e in errors) else 422
         return JSONResponse(payload,status_code=status)
     return payload
+
+
+@router.post("/visual-assets/import",status_code=201)
+async def import_visual_assets(
+    request: Request, background: BackgroundTasks, files: list[UploadFile] = File(...),
+    manifest: str = Form(...,max_length=200_000), idempotency_key: str = Form(...,min_length=8,max_length=160),
+    root_name: str = Form(default="folder",max_length=240), school: str = Form(default="",max_length=120),
+    club: str = Form(default="",max_length=160), source: str = Form(default="folder_import",max_length=120),
+    privacy: Literal["private","shared","public"] = Form(default="private"),
+    commercial_use: Literal["allowed","not_allowed","unknown"] = Form(default="unknown"),
+    resync: bool = Form(default=False), auto_analyze: bool = Form(default=True),
+    user_id: str = Depends(auth.require_user),
+):
+    if len(files) > config.VISUAL_MAX_BATCH:
+        raise HTTPException(status_code=413,detail=f"一次最多匯入 {config.VISUAL_MAX_BATCH} 個素材；其餘可沿用 import_id 續傳")
+    try:
+        data = json.loads(manifest)
+        entries = data.get("items") if isinstance(data,dict) else None
+        if not isinstance(entries,list):
+            raise ValueError
+    except (ValueError,TypeError,json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422,detail={"code":"invalid_manifest","message":"manifest 必須含 items 陣列"}) from exc
+    if len(entries) < len(files):
+        raise HTTPException(status_code=422,detail={"code":"manifest_file_mismatch","message":"manifest 項目少於本次檔案數"})
+    store = get_visual_store()
+    job = store.start_import(user_id,idempotency_key=idempotency_key,root_name=root_name,manifest=data,total_count=int(data.get("total_count") or len(entries)))
+    created,errors,skipped = [],[],[]
+    for index,upload in enumerate(files):
+        entry = entries[index] if isinstance(entries[index],dict) else {}
+        filename = (upload.filename or str(entry.get("filename") or "unnamed"))[:240]
+        try:
+            content = await upload.read(config.VISUAL_MAX_FILE_BYTES + 1)
+            asset,was_skipped = store.ingest_import_item(
+                user_id=user_id,import_id=job["id"],client_key=str(entry.get("client_key") or entry.get("relative_path") or filename),
+                relative_path=str(entry.get("relative_path") or filename),filename=filename,mime_type=_media_type(upload),content=content,
+                last_modified=str(entry.get("last_modified") or ""),school=school,club=club,source=source,
+                privacy=privacy,commercial_use=commercial_use,resync=resync,
+            )
+            (skipped if was_skipped else created).append(asset)
+            if auto_analyze and not was_skipped:
+                background.add_task(_safe_analyze,asset["asset_id"],user_id)
+        except VisualAssetError as exc:
+            errors.append({"filename":filename,"client_key":str(entry.get("client_key") or ""),"code":exc.code,"message":str(exc)})
+        finally:
+            await upload.close()
+    current = store.get_import(job["id"],user_id) or job
+    audit.write_audit(action="visual.import",actor_user_id=user_id,resource=job["id"],detail={"created":len(created),"skipped":len(skipped),"failed":len(errors),"resync":resync},request=request,ok=bool(created or skipped))
+    payload = {"import":current,"items":created,"skipped":skipped,"errors":errors,"partial_failure":bool(errors and (created or skipped))}
+    return JSONResponse(payload,status_code=201 if created or skipped else 422)
+
+
+@router.get("/visual-imports/{import_id}")
+async def get_visual_import(import_id: str,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    item = get_visual_store().get_import(import_id,user_id)
+    if not item:
+        raise HTTPException(status_code=404,detail="找不到匯入工作或沒有權限")
+    return item
 
 
 @router.post("/visual-assets/analyze")
@@ -135,7 +220,7 @@ async def analyze_visual_assets(req: AnalyzeRequest, request: Request, user_id: 
         try:
             items.append(await analyze_asset(asset_id,user_id))
         except fal.FalError as exc:
-            errors.append({"asset_id":asset_id,"code":exc.code,"message":str(exc)})
+            errors.append({"asset_id":asset_id,"code":"BLOCKED_BY_EXTERNAL_DEPENDENCY","provider_code":exc.code,"message":str(exc)})
         except VisualAssetError as exc:
             errors.append({"asset_id":asset_id,"code":exc.code,"message":str(exc)})
     audit.write_audit(action="visual.analyze",actor_user_id=user_id,resource="visual-assets",detail={"completed":len(items),"errors":[e["code"] for e in errors]},request=request,ok=bool(items))
@@ -191,6 +276,53 @@ async def search_visual_assets_by_image(
     get_visual_store().record_learning(user_id,"search_by_image",payload={"result_ids":[i["asset_id"] for i in items]},outcome=str(total))
     audit.write_audit(action="visual.search_by_image",actor_user_id=user_id,resource="visual-assets",detail={"count":total},request=request)
     return {"items":items,"total":total,"page":page,"limit":min(limit,config.VISUAL_SEARCH_LIMIT)}
+
+
+@router.get("/visual-assets/review-queue")
+async def visual_review_queue(
+    status: str = Query(default="",pattern=r"^(|verified|probable|pending_review|conflicted|failed)$"),
+    page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),
+    user_id: str = Depends(auth.require_user),
+) -> dict[str,Any]:
+    capped = min(limit,config.VISUAL_SEARCH_LIMIT)
+    items,total = get_visual_store().review_queue(user_id,status=status,page=page,limit=capped)
+    return {"items":items,"total":total,"page":page,"limit":capped,"status":status or "needs_review"}
+
+
+@router.post("/visual-assets/{asset_id}/analyze")
+async def analyze_one_visual_asset(asset_id: str,request: Request,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    try:
+        item = await analyze_asset(asset_id,user_id)
+    except fal.FalError as exc:
+        raise HTTPException(status_code=503,detail={"code":"BLOCKED_BY_EXTERNAL_DEPENDENCY","provider_code":exc.code,"message":str(exc)}) from exc
+    except VisualAssetError as exc:
+        raise _http_error(exc) from exc
+    audit.write_audit(action="visual.analyze",actor_user_id=user_id,resource=asset_id,request=request)
+    return item
+
+
+@router.post("/visual-assets/{asset_id}/retry")
+async def retry_visual_asset(asset_id: str,request: Request,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    if not get_visual_store().owned_asset(asset_id,user_id):
+        raise HTTPException(status_code=404,detail="找不到可重試的素材")
+    try:
+        item = await analyze_asset(asset_id,user_id)
+    except fal.FalError as exc:
+        raise HTTPException(status_code=503,detail={"code":"BLOCKED_BY_EXTERNAL_DEPENDENCY","provider_code":exc.code,"message":str(exc)}) from exc
+    except VisualAssetError as exc:
+        raise _http_error(exc) from exc
+    audit.write_audit(action="visual.retry",actor_user_id=user_id,resource=asset_id,request=request)
+    return item
+
+
+@router.post("/visual-assets/{asset_id}/confirm")
+async def confirm_visual_asset(asset_id: str,req: AssetConfirmRequest,request: Request,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    try:
+        item = get_visual_store().confirm_asset(asset_id,user_id,reason=req.reason)
+    except VisualAssetError as exc:
+        raise _http_error(exc) from exc
+    audit.write_audit(action="visual.asset_confirm",actor_user_id=user_id,resource=asset_id,request=request)
+    return item
 
 
 @router.get("/visual-assets/{asset_id}")
@@ -305,30 +437,30 @@ async def confirm_visual_entity(req: ConfirmRequest,request: Request,user_id: st
     return item
 
 
-async def _entity_list(kind: str,query: str,school: str,page: int,limit: int) -> dict[str,Any]:
+async def _entity_list(kind: str,query: str,school: str,page: int,limit: int,user_id: str) -> dict[str,Any]:
     capped = min(limit,config.VISUAL_SEARCH_LIMIT)
-    items,total = get_visual_store().list_entities(kind,query=query,school=school,page=page,limit=capped)
+    items,total = get_visual_store().list_entities(kind,user_id=user_id,query=query,school=school,page=page,limit=capped)
     return {"items":items,kind:items,"total":total,"page":page,"limit":capped}
 
 
 @router.get("/people")
-async def list_people(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1)):
-    return await _entity_list("people",q,school,page,limit)
+async def list_people(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),user_id: str = Depends(auth.require_user)):
+    return await _entity_list("people",q,school,page,limit,user_id)
 
 
 @router.get("/clubs")
-async def list_clubs(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1)):
-    return await _entity_list("clubs",q,school,page,limit)
+async def list_clubs(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),user_id: str = Depends(auth.require_user)):
+    return await _entity_list("clubs",q,school,page,limit,user_id)
 
 
 @router.get("/events")
-async def list_events(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1)):
-    return await _entity_list("events",q,school,page,limit)
+async def list_events(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),user_id: str = Depends(auth.require_user)):
+    return await _entity_list("events",q,school,page,limit,user_id)
 
 
 @router.get("/scenes")
-async def list_scenes(q: str = Query(default="",max_length=200),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1)):
-    return await _entity_list("scenes",q,"",page,limit)
+async def list_scenes(q: str = Query(default="",max_length=200),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),user_id: str = Depends(auth.require_user)):
+    return await _entity_list("scenes",q,"",page,limit,user_id)
 
 
 @router.get("/learning/insights")

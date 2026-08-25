@@ -1,4 +1,4 @@
-# 人物／場景／日期／活動／社團視覺資料庫
+# 視覺資料庫 Phase 1：圖片／影片／文件素材庫
 
 本功能是既有 FastAPI、SQLite、cookie 授權與 fal.ai 圖片理解的增量擴充。聊天、
 知識庫、活動管理與產檔工具沒有被替換；新頁面位於 `/visual-assets`。
@@ -13,11 +13,11 @@ AI 結果不直接當成事實。每個 observation 都有：
 
 - `source`：EXIF、file metadata、OCR、fal vision 或 user confirmation
 - `confidence`：0–1
-- `status`：`confirmed`、`possible`、`pending`、`conflict`、`ignored`
+- `status`：`verified`、`probable`、`pending_review`、`conflicted`、`failed`
 - `evidence`：可回看圖片的文字依據或使用者修正原因
 
 EXIF、檔案日期、OCR、活動日期與使用者輸入分別存在
-`visual_date_candidates`。值不同時 API 回傳 `date_status=conflict`，不選一個
+`visual_date_candidates`。值不同時 API 回傳 `date_status=conflicted`，不選一個
 覆蓋其他候選。
 
 學校是社團與人物的上層實體。社團以 `(school_id, name)` 唯一；人物姓名不做
@@ -27,8 +27,8 @@ API 會回 `school_conflict`，不建立關聯。
 人物流程特別保守：
 
 1. 一般視覺分析只計數、描述匿名人物，不允許模型回傳姓名。
-2. 只有 `visual_people.status=confirmed` 且有人工確認參考圖的人物能進入比對。
-3. 比對結果永遠以 `possible`／「可能是」保存。
+2. 只有 `visual_people.status=verified` 且有人工確認參考圖的人物能進入比對。
+3. 比對結果永遠以 `probable`／「可能是」保存。
 4. 使用者按確認後才成為可靠關聯；單次錯誤不會改模型權重。
 
 ## SQLite 資料表
@@ -49,6 +49,25 @@ API 會回 `school_conflict`，不建立關聯。
 | `visual_corrections` | 使用者修正、原值、新值、原因與管理審核 |
 | `visual_collections` | 素材包、影片分鏡、社群貼文與海報素材集合 |
 | `visual_collection_items` | 集合內圖片順序、說明與建議比例 |
+| `visual_schema_migrations` | 已套用 migration 版本；部署升級不重建資料庫 |
+| `visual_imports` | 使用者、idempotency key、manifest、總進度與最後同步時間 |
+| `visual_import_items` | 相對路徑、單檔狀態、雜湊、錯誤碼、嘗試次數與資產版本 |
+
+Migration 依序為 `0001_initial_visual_schema` 與
+`0002_phase1_media_import`。第二段會保留既有資料並把舊審核字彙轉成統一狀態；
+服務重啟時未完成的 running job 會標示 `interrupted_process`，不會在 reload 後假裝完成。
+
+## 匯入與重新同步
+
+直接上傳及資料夾匯入都支援 client idempotency key。資料夾 API 接受 manifest 的
+`client_key`、`relative_path`、`last_modified`；伺服器持久化每個項目的成功、失敗、
+錯誤碼與 attempts。同一 key／同一雜湊會安全略過，失敗項目可單獨重送。內容變更時
+必須明確指定 `resync=true`，系統建立新 asset 並填入 `supersedes_asset_id`，不覆寫
+舊檔。binary 只寫入 `VISUAL_ASSET_DIR`，SQLite 僅保存路徑、雜湊與結構化資料。
+
+圖片由 Pillow 實際解碼；PDF、DOCX、PPTX 與文字文件使用本機 parser 擷取文字並
+建立縮圖。MP4、MOV、WebM 原檔可匯入；目前部署未附影格解碼器，因此影片分析會
+明確回報 `BLOCKED_BY_EXTERNAL_DEPENDENCY`，不假造尺寸或標籤。
 
 ## 圖片分析
 
@@ -68,7 +87,8 @@ OCR 已完成。
 ## 搜尋與輸出
 
 `GET /api/visual-assets/search` 同時使用關鍵字、AI/OCR 標籤、實體關聯、本機
-語意向量、畫質與使用者選用／排除回饋排序。自然語言中明確出現的既知場景會
+語意向量、畫質與使用者選用／排除回饋排序。關鍵字與向量排名沿用既有
+Intelligence Library Hybrid RAG 的 Reciprocal Rank Fusion。自然語言中明確出現的既知場景會
 成為有證據的條件，沒有場景 observation 的圖片不會冒充命中。另支援學校、
 社團、人物、場景、活動、日期、比例、畫質、商用權限、隱私與重複圖篩選。
 
@@ -87,7 +107,13 @@ append-only audit；列表端點有 page/limit 並受 `VISUAL_SEARCH_LIMIT` 限�
 | Method | Path | 說明 |
 |---|---|---|
 | POST | `/api/visual-assets/upload` | 多檔上傳、本機分析、排程 AI 分析 |
+| POST | `/api/visual-assets/import` | manifest 資料夾匯入、續傳、部分失敗與重新同步 |
 | POST | `/api/visual-assets/analyze` | 重試／明確執行 AI 分析 |
+| POST | `/api/visual-assets/{id}/analyze` | 單一素材分析；外部不可用回明確 blocker |
+| POST | `/api/visual-assets/{id}/retry` | 重試失敗分析並累計 attempts |
+| POST | `/api/visual-assets/{id}/confirm` | 一鍵確認素材；日期衝突時拒絕並要求修正 |
+| GET | `/api/visual-assets/review-queue` | 目前使用者的待審核／衝突／失敗佇列 |
+| GET | `/api/visual-imports/{id}` | 伺服器端匯入進度與逐檔結果 |
 | GET | `/api/visual-assets/dashboard` | 首頁統計與最近上傳 |
 | GET | `/api/visual-assets/search` | 自然語言與結構化搜尋 |
 | POST | `/api/visual-assets/search-by-image` | 以圖搜圖 |
@@ -129,7 +155,9 @@ Zeabur 必須把 SQLite、原圖與衍生圖放在持久化磁碟；只設 DB_PA
 
 ## 驗證
 
-`tests/test_visual_asset_database.py` 涵蓋上傳、品質、原圖不變、重複圖、海報 OCR、
+`tests/test_visual_asset_database.py` 與 `tests/test_visual_asset_phase1.py` 涵蓋上傳、品質、原圖不變、重複圖、海報 OCR、
 日期衝突、活動／場景、跨校隔離、同名人物、自然語言搜尋、以圖搜圖、修正、
-學習紀錄、素材包、不可變欄位、未登入、超大與損壞圖片、手機 UI 契約。外部
-Vision 一律使用 fake，CI 不會傳送私人圖片或消耗額度。
+學習紀錄、素材包、不可變欄位、未登入、跨使用者隔離、超大與損壞圖片、manifest、
+部分失敗、續傳、idempotency、重新同步、文件擷取、外部阻擋標記與手機 UI 契約。
+成功路徑的 Vision 使用 deterministic fake，CI 不會傳送私人圖片或消耗額度；
+真實外部模型若未配置，一律列為 `BLOCKED_BY_EXTERNAL_DEPENDENCY`，不列 PASS。

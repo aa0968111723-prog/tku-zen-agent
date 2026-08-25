@@ -30,6 +30,20 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
         raise VisualAssetError("找不到可分析的圖片",code="not_found")
     job_id = store.create_job(asset_id)
     try:
+        if asset.get("asset_type") == "document":
+            text = str(asset.get("ocr_text") or "")
+            result = {
+                "summary": f"文件素材：{asset.get('original_filename','')}", "ocr_text": text,
+                "dates": [], "scenes": [{"label":"文件","confidence":1.0,"evidence":"檔案格式"}],
+                "event": {}, "clubs": [], "people": {"count":0,"descriptions":[]},
+                "objects": ["文件"], "logos": [], "quality_notes": [], "is_poster": False,
+            }
+            store.add_observation(asset_id,"scene",label="文件",entity_id=store.scene_id("文件"),status="verified",confidence=1.0,source="local_document_parser",evidence={"mime_type":asset.get("mime_type")})
+            store.set_analysis(asset_id,result,status="complete")
+            store.update_job(job_id,status="complete",stage="complete",progress=100)
+            return store.get_asset(asset_id,user_id) or {}
+        if asset.get("asset_type") == "video":
+            raise fal.FalError("影片已安全匯入，但伺服器未配置影格解碼器。",code="video_decoder_not_configured")
         target_url = _data_url(asset["storage_path"],asset["mime_type"])
         store.update_job(job_id,status="running",stage="ocr_and_scene",progress=25)
         result = await fal.analyze_visual_asset(target_url)
@@ -45,7 +59,7 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
                 continue
             scene_id = store.scene_id(label)
             store.add_observation(
-                asset_id,"scene",label=label,entity_id=scene_id,status="possible",
+                asset_id,"scene",label=label,entity_id=scene_id,status="probable",
                 confidence=_confidence(scene.get("confidence")),source=source,
                 evidence={"text":str(scene.get("evidence") or "")[:1000]},
             )
@@ -57,7 +71,7 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
                 continue
             # 此欄只描述畫面中的匿名人物，不允許模型提供姓名。
             store.add_observation(
-                asset_id,"person",label=f"未辨識人物 {index + 1}",status="pending",
+                asset_id,"person",label=f"未辨識人物 {index + 1}",status="pending_review",
                 confidence=_confidence(person.get("confidence")),source=source,
                 evidence={"description":str(person.get("evidence") or person.get("label") or "")[:1000]},
             )
@@ -65,7 +79,7 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
         for logo in result.get("logos",[]) if isinstance(result.get("logos"),list) else []:
             if isinstance(logo,dict) and str(logo.get("text") or "").strip():
                 store.add_observation(
-                    asset_id,"logo",label=str(logo["text"])[:300],status="possible",
+                    asset_id,"logo",label=str(logo["text"])[:300],status="probable",
                     confidence=_confidence(logo.get("confidence")),source=source,
                     evidence={"text":str(logo.get("evidence") or "")[:1000]},
                 )
@@ -80,7 +94,7 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
             if predicted_school_id:
                 entity_id = store.ensure_club(predicted_school_id,label,source={"type":source,"evidence":club.get("evidence")},confirmed=False) or ""
             store.add_observation(
-                asset_id,"club",label=label,entity_id=entity_id,status="possible",
+                asset_id,"club",label=label,entity_id=entity_id,status="probable",
                 confidence=_confidence(club.get("confidence")),source=source,
                 evidence={"school_candidate":predicted_school,"text":str(club.get("evidence") or "")[:1000]},
             )
@@ -90,7 +104,7 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
             if isinstance(date,dict):
                 store.add_date(
                     asset_id,str(date.get("value") or ""),source="ocr",confidence=_confidence(date.get("confidence")),
-                    evidence=str(date.get("evidence") or ""),status="possible",
+                    evidence=str(date.get("evidence") or ""),status="probable",
                 )
 
         event = result.get("event") if isinstance(result.get("event"),dict) else {}
@@ -101,16 +115,16 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
                 school_id=asset.get("school_id"),club_id=asset.get("club_id"),name=event_name,
                 event_type=str(event.get("type") or ""),event_date=event_date,
                 start_time=str(event.get("start_time") or ""),end_time=str(event.get("end_time") or ""),
-                location=str(event.get("location") or ""),status="possible",
+                location=str(event.get("location") or ""),status="probable",
                 evidence=[{"source":source,"asset_id":asset_id,"text":event.get("evidence")}],
             )
             store.add_observation(
-                asset_id,"event",label=event_name,entity_id=event_id,status="possible",
+                asset_id,"event",label=event_name,entity_id=event_id,status="probable",
                 confidence=_confidence(event.get("confidence")),source=source,
                 evidence={"text":str(event.get("evidence") or "")[:1000]},
             )
 
-        # 人物比對只讀「已確認人物＋已確認參考圖」。結果仍一律 possible。
+        # 人物比對只讀「已確認人物＋已確認參考圖」。結果仍一律 probable。
         references = []
         for ref in store.confirmed_person_references(user_id):
             try:
@@ -127,7 +141,7 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
                 confidence = _confidence(match.get("confidence"))
                 if ref and confidence >= 0.55:
                     store.add_observation(
-                        asset_id,"person",label=f"可能是{ref['name']}",entity_id=ref["person_id"],status="possible",
+                        asset_id,"person",label=f"可能是{ref['name']}",entity_id=ref["person_id"],status="probable",
                         confidence=confidence,source=source,
                         evidence={"text":str(match.get("evidence") or "")[:1000],"requires_user_confirmation":True},
                     )
@@ -139,7 +153,7 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
     except fal.FalError as exc:
         partial = "needs_vision_config" if exc.code == "vision_not_configured" else "analysis_failed"
         store.mark_analysis_status(asset_id,partial)
-        store.update_job(job_id,status="failed",stage="vision",progress=100,error_code=exc.code,error_message=str(exc))
+        store.update_job(job_id,status="failed",stage="vision",progress=100,error_code="BLOCKED_BY_EXTERNAL_DEPENDENCY",error_message=f"{exc.code}: {exc}")
         store.record_learning(user_id,"tool_failed",asset_id=asset_id,payload={"tool":"vision","error_code":exc.code},outcome="failed")
         raise
     except Exception as exc:

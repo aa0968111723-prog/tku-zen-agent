@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Hashable, Iterable
 
 from . import semantic
 from .query import ParsedQuery, parse
@@ -32,6 +32,21 @@ class Scored:
 
 def _rrf(rank: int) -> float:
     return 1.0 / (RRF_K + rank)
+
+
+def reciprocal_rank_fusion(
+    rankings: Iterable[Iterable[Hashable]], *, k: int = RRF_K,
+) -> dict[Hashable, float]:
+    """Fuse arbitrary ranked IDs using the same scale-independent RRF as RAG.
+
+    The visual library deliberately shares this primitive instead of copying a
+    second hybrid-search formula whose BM25/embedding scales would drift.
+    """
+    scores: dict[Hashable, float] = {}
+    for ranking in rankings:
+        for rank, item_id in enumerate(ranking, start=1):
+            scores[item_id] = scores.get(item_id, 0.0) + 1.0 / (k + rank)
+    return scores
 
 
 def _metadata_boost(chunk: "Chunk", q: ParsedQuery, current_year: str | None) -> tuple[float, list[str]]:

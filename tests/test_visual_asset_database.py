@@ -99,7 +99,7 @@ def test_poster_analysis_ocr_date_activity_scene_and_conflict(visual_env,monkeyp
         item = analyzed.json()["items"][0]
         assert "期初茶會" in item["ocr_text"]
         assert any(d["value"] == "2025-09-18" and d["source"] == "ocr" for d in item["date_candidates"])
-        assert any(o["entity_type"] == "event" and o["status"] == "possible" for o in item["observations"])
+        assert any(o["entity_type"] == "event" and o["status"] == "probable" for o in item["observations"])
         event = client.get("/api/events?q=期初茶會").json()["items"][0]
         assert event["start_time"] == "18:30" and event["end_time"] == "20:30"
         # 人工輸入不同日期不會覆寫 OCR；兩個候選並列並標示衝突。
@@ -108,7 +108,7 @@ def test_poster_analysis_ocr_date_activity_scene_and_conflict(visual_env,monkeyp
             "values":{},"reason":"活動承辦人確認",
         })
         assert fixed.status_code == 200
-        assert fixed.json()["date_status"] == "conflict"
+        assert fixed.json()["date_status"] == "conflicted"
         assert {d["value"] for d in fixed.json()["date_candidates"]} >= {"2025-09-18","2025-09-19"}
 
 
@@ -189,7 +189,7 @@ def test_person_comparison_uses_only_confirmed_reference_and_stays_possible(visu
         result = client.post("/api/visual-assets/analyze",json={"asset_ids":[target["asset_id"]]}).json()["items"][0]
         candidate = next(o for o in result["observations"] if o["entity_type"] == "person" and o["entity_id"] == person_id)
         assert candidate["label"] == "可能是薰儀"
-        assert candidate["status"] == "possible"
+        assert candidate["status"] == "probable"
         assert candidate["evidence"]["requires_user_confirmation"] is True
 
 
@@ -201,7 +201,7 @@ def test_confirm_correction_learning_export_and_immutable_original(visual_env):
             "values":{"name":"115 上學期期初茶會","school":"淡江大學","date":"2026-09-18","location":"商管大樓"},"reason":"活動負責人修正",
         })
         assert corrected.status_code == 200
-        assert any(o["label"] == "115 上學期期初茶會" and o["status"] == "confirmed" for o in corrected.json()["observations"])
+        assert any(o["label"] == "115 上學期期初茶會" and o["status"] == "verified" for o in corrected.json()["observations"])
         assert client.post(f"/api/visual-assets/{asset['asset_id']}/usage",json={"action":"selected","context":{"use":"Instagram"}}).status_code == 200
         storyboard = client.post(f"/api/visual-assets/{asset['asset_id']}/usage",json={"action":"storyboard","context":{"note":"開場畫面","rendition":"16:9"}})
         assert storyboard.status_code == 200
@@ -244,7 +244,7 @@ def test_mobile_visual_workspace_contract(project_root):
     html = (project_root / "app/static/visual-assets.html").read_text(encoding="utf-8")
     js = (project_root / "app/static/visual-assets.js").read_text(encoding="utf-8")
     css = (project_root / "app/static/visual-assets.css").read_text(encoding="utf-8")
-    for text in ("multiple", "拖曳圖片", "paste", "clipboardData", "以圖搜圖", "分析進度", "加入貼文", "加入分鏡"):
+    for text in ("multiple", "capture=\"environment\"", "webkitdirectory", "拖曳素材", "paste", "clipboardData", "以圖搜圖", "分析進度", "加入貼文", "加入分鏡", "批次確認"):
         assert text in html or text in js
     for ratio in ("1:1","4:5","9:16","16:9"):
         assert ratio in html and ratio in js

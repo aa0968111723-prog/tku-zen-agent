@@ -58,13 +58,16 @@
     </section>
 
     <section id="panel-upload" class="visual-panel" hidden>
-      <div class="panel-heading"><div><p class="eyebrow">Ingest</p><h1>上傳並自動分析</h1><p>支援多選、拖曳、手機相簿與貼上剪貼簿；分析進度會逐張更新，原圖不會被覆寫。</p></div></div>
+      <div class="panel-heading"><div><p class="eyebrow">Ingest</p><h1>上傳並自動分析</h1><p>支援圖片、影片、文件、手機拍照與資料夾 manifest；中斷後可用同一批檔案續傳，原檔不會覆寫。</p></div></div>
       <form id="upload-form" class="upload-layout">
         <label id="drop-zone" class="drop-zone" for="visual-files" tabindex="0">
-          <span class="drop-icon" aria-hidden="true">＋</span><strong>拖曳圖片到這裡</strong>
-          <span>或點一下選取 JPEG、PNG、WebP</span><span class="muted">一次最多 30 張、每張 20MB</span>
+          <span class="drop-icon" aria-hidden="true">＋</span><strong>拖曳素材到這裡</strong>
+          <span>圖片、影片、PDF、Word、PowerPoint 或文字文件</span><span class="muted">一次最多 30 個、每個 20MB</span>
         </label>
-        <input id="visual-files" type="file" accept="image/jpeg,image/png,image/webp" multiple>
+        <input id="visual-files" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm,application/pdf,.docx,.pptx,text/plain,text/markdown,text/csv" multiple>
+        <input id="camera-files" type="file" accept="image/*" capture="environment">
+        <input id="folder-files" type="file" accept="image/*,video/*,application/pdf,.docx,.pptx,.txt,.md,.csv" webkitdirectory directory multiple>
+        <div class="upload-source-actions"><label class="ghost" for="camera-files">手機拍照上傳</label><label class="ghost" for="folder-files">匯入資料夾</label><span id="import-mode" class="muted">一般批次上傳</span></div>
         <div id="upload-preview" class="upload-preview"></div>
         <div class="metadata-grid">
           <label><span>學校</span><input id="upload-school" value="淡江大學" maxlength="120"></label>
@@ -74,7 +77,7 @@
           <label><span>商用權限</span><select id="upload-commercial"><option value="unknown">未知／待確認</option><option value="allowed">可商用</option><option value="not_allowed">不可商用</option></select></label>
         </div>
         <div class="upload-actions"><button type="submit" class="primary">開始上傳與分析</button><button type="button" id="clear-upload" class="ghost">清除</button></div>
-        <div id="upload-progress" class="upload-progress" hidden><span id="upload-progress-bar"></span><strong id="upload-progress-text">準備上傳</strong></div>
+        <div id="upload-progress" class="upload-progress" hidden aria-label="分析進度"><span id="upload-progress-bar"></span><strong id="upload-progress-text">準備上傳</strong></div>
       </form>
       <div id="analysis-results" class="analysis-list"></div>
     </section>
@@ -102,7 +105,7 @@
 
     <section id="panel-review" class="visual-panel" hidden>
       <div class="panel-heading"><div><p class="eyebrow">Human review</p><h1>待確認與衝突</h1><p>AI 建議不會自動變成事實；在這裡逐筆確認、修正或忽略。</p></div></div>
-      <div class="review-filters"><button class="is-active" data-review="pending">待確認</button><button data-review="duplicate">重複圖片</button><button data-review="high-quality">高品質素材</button></div>
+      <div class="review-filters"><button class="is-active" data-review="pending_review">待確認</button><button data-review="verified">已確認</button><button data-review="failed">分析失敗</button><button data-review="duplicate">重複素材</button><button data-review="high-quality">高品質素材</button><button id="batch-confirm" class="primary" type="button" disabled>批次確認</button></div>
       <div id="review-results" class="asset-grid"></div>
     </section>
   </main>

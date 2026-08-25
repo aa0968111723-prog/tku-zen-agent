@@ -77,7 +77,7 @@ async def security_middleware(request: Request, call_next):
             content_length = int(request.headers.get("content-length") or 0)
         except ValueError:
             content_length = 0
-        if request.url.path == "/api/visual-assets/upload":
+        if request.url.path in {"/api/visual-assets/upload", "/api/visual-assets/import"}:
             body_limit = config.VISUAL_MAX_FILE_BYTES * config.VISUAL_MAX_BATCH + 2_000_000
         elif request.url.path == "/api/visual-assets/search-by-image":
             body_limit = config.VISUAL_MAX_FILE_BYTES + 1_000_000
@@ -117,7 +117,7 @@ async def security_middleware(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault(
-        "Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"
+        "Permissions-Policy", "camera=(self), microphone=(), geolocation=(), payment=()"
     )
     response.headers.setdefault("Content-Security-Policy", _CSP)
     if config.auth_mode() == "token":
