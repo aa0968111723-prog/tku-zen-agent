@@ -114,7 +114,10 @@ function assetCard(asset, { selectable = false } = {}) {
     const storyboard = node("button", null, "加入分鏡");
     storyboard.type = "button";
     storyboard.addEventListener("click", async () => { await recordUsage(asset.asset_id, "storyboard", { source: "search" }); setStatus("已記錄為影片分鏡素材", "green"); });
-    actions.appendChild(storyboard);
+    const social = node("button", null, "加入貼文");
+    social.type = "button";
+    social.addEventListener("click", async () => { await recordUsage(asset.asset_id, "social_post", { source: "search" }); setStatus("已加入目前社群貼文素材集合", "green"); });
+    actions.append(storyboard, social);
   }
   body.appendChild(actions);
   card.appendChild(body);
@@ -144,7 +147,7 @@ function toggleSelection(asset, card, button) {
 }
 
 async function recordUsage(assetId, action, context = {}) {
-  try { await requestJSON(`/api/visual-assets/${encodeURIComponent(assetId)}/usage`, { method: "POST", body: JSON.stringify({ action, context }) }); } catch { /* telemetry must not block UI */ }
+  try { return await requestJSON(`/api/visual-assets/${encodeURIComponent(assetId)}/usage`, { method: "POST", body: JSON.stringify({ action, context }) }); } catch { return null; }
 }
 
 async function loadDashboard() {

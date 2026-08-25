@@ -116,7 +116,7 @@ async def analyze_visual_asset(data_url: str) -> dict[str, Any]:
             "每項辨識都要給 0 到 1 confidence 與 evidence（圖片中可指認的依據）。JSON schema："
             '{"summary":"","ocr_text":"","dates":[{"value":"YYYY-MM-DD或原文","confidence":0,"evidence":""}],'
             '"scenes":[{"label":"校園/教室/禪堂/舞台/報到區/戶外/茶會/講座/社課/聚餐/活動現場/海報/文件或其他","confidence":0,"evidence":""}],'
-            '"event":{"name":"","type":"","location":"","confidence":0,"evidence":""},'
+            '"event":{"name":"","type":"","location":"","start_time":"HH:MM或空字串","end_time":"HH:MM或空字串","confidence":0,"evidence":""},'
             '"clubs":[{"name":"","school":"","confidence":0,"evidence":"文字或Logo"}],'
             '"people":{"count":0,"descriptions":[{"label":"人物1","confidence":0,"evidence":"可見特徵，不含姓名"}]},'
             '"objects":[""],"logos":[{"text":"","confidence":0,"evidence":""}],'

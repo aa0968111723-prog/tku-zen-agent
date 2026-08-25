@@ -47,6 +47,8 @@ API 會回 `school_conflict`，不建立關聯。
 | `visual_analysis_jobs` | 分析階段、進度與安全錯誤碼 |
 | `visual_learning_events` | 搜尋、推薦、選用、排除、下載、工具成敗與用途 |
 | `visual_corrections` | 使用者修正、原值、新值、原因與管理審核 |
+| `visual_collections` | 素材包、影片分鏡、社群貼文與海報素材集合 |
+| `visual_collection_items` | 集合內圖片順序、說明與建議比例 |
 
 ## 圖片分析
 
@@ -94,6 +96,9 @@ append-only audit；列表端點有 page/limit 並受 `VISUAL_SEARCH_LIMIT` 限�
 | GET | `/api/visual-assets/{id}/file` | 原圖、縮圖與比例衍生圖 |
 | POST | `/api/visual-assets/{id}/usage` | 選用、排除、分鏡、貼文、下載紀錄 |
 | POST | `/api/visual-assets/export` | 素材包 ZIP＋JSON＋CSV |
+| GET | `/api/visual-collections` | 目前使用者的素材包／分鏡／貼文／海報集合 |
+| GET | `/api/visual-collections/{id}` | 集合與依序排列的圖片 |
+| POST | `/api/visual-collections/{id}/assets` | 將圖片加入既有集合 |
 | POST | `/api/entities/confirm` | 確認、修正或忽略 observation |
 | GET | `/api/people` | 人物列表 |
 | GET | `/api/clubs` | 社團列表 |

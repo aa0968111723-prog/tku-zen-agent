@@ -228,6 +228,27 @@ CREATE TABLE IF NOT EXISTS visual_corrections (
     approved_by TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_visual_corrections_created ON visual_corrections(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS visual_collections (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_visual_collections_user ON visual_collections(user_id,kind,updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS visual_collection_items (
+    collection_id TEXT NOT NULL REFERENCES visual_collections(id) ON DELETE CASCADE,
+    asset_id TEXT NOT NULL REFERENCES visual_assets(id),
+    position INTEGER NOT NULL DEFAULT 0,
+    note TEXT NOT NULL DEFAULT '',
+    rendition TEXT NOT NULL DEFAULT 'original',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(collection_id,asset_id)
+);
 """
 
 
@@ -716,7 +737,8 @@ class VisualAssetStore:
 
     def ensure_event(
         self, *, school_id: str | None, club_id: str | None, name: str, event_type: str = "",
-        event_date: str = "", location: str = "", status: str = "possible", evidence: list[dict[str, Any]] | None = None,
+        event_date: str = "", start_time: str = "", end_time: str = "", location: str = "",
+        status: str = "possible", evidence: list[dict[str, Any]] | None = None,
     ) -> str:
         label = (name or "待確認活動").strip()[:200]
         date_value = normalize_date(event_date)
@@ -730,9 +752,9 @@ class VisualAssetStore:
             eid = new_id("event")
             stamp = now()
             self._conn.execute(
-                """INSERT INTO visual_events(id,school_id,club_id,name,event_type,event_date,location,status,evidence,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                (eid,school_id,club_id,label,event_type[:100],date_value,location[:300],status,dumps(evidence or []),stamp,stamp),
+                """INSERT INTO visual_events(id,school_id,club_id,name,event_type,event_date,start_time,end_time,location,status,evidence,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (eid,school_id,club_id,label,event_type[:100],date_value,normalize_time(start_time),normalize_time(end_time),location[:300],status,dumps(evidence or []),stamp,stamp),
             )
             self._conn.commit()
         return eid
@@ -973,6 +995,7 @@ class VisualAssetStore:
                 final_id = self.ensure_event(
                     school_id=chosen_school,club_id=asset.get("club_id"),name=label,
                     event_type=str(values.get("event_type") or ""),event_date=str(values.get("date") or ""),
+                    start_time=str(values.get("start_time") or values.get("time") or ""),end_time=str(values.get("end_time") or ""),
                     location=str(values.get("location") or ""),status="confirmed",evidence=[{"source":"user_confirmation","asset_id":asset_id}],
                 )
             with self._lock:
@@ -1115,6 +1138,69 @@ class VisualAssetStore:
             )
             self._conn.commit()
 
+    def add_to_collection(
+        self, user_id: str, asset_id: str, *, kind: str, name: str = "", note: str = "", rendition: str = "original",
+    ) -> dict[str, Any]:
+        if kind not in {"material_pack","storyboard","social_post","poster"}:
+            raise VisualAssetError("不支援的素材集合類型")
+        if not self.visible_asset(asset_id,user_id):
+            raise VisualAssetError("找不到圖片或沒有權限",code="not_found")
+        default_names = {
+            "material_pack":"目前素材包","storyboard":"目前影片分鏡",
+            "social_post":"目前社群貼文","poster":"目前海報素材",
+        }
+        collection_name = (name or default_names[kind]).strip()[:200]
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM visual_collections WHERE user_id=? AND kind=? AND name=? AND status='active' ORDER BY updated_at DESC LIMIT 1",
+                (user_id,kind,collection_name),
+            ).fetchone()
+            stamp = now()
+            if row:
+                collection_id = str(row[0])
+            else:
+                collection_id = new_id("collection")
+                self._conn.execute(
+                    "INSERT INTO visual_collections(id,user_id,name,kind,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                    (collection_id,user_id,collection_name,kind,"active",stamp,stamp),
+                )
+            position = int(self._conn.execute(
+                "SELECT COALESCE(MAX(position),-1)+1 FROM visual_collection_items WHERE collection_id=?",(collection_id,),
+            ).fetchone()[0])
+            self._conn.execute(
+                "INSERT OR IGNORE INTO visual_collection_items(collection_id,asset_id,position,note,rendition,created_at) VALUES(?,?,?,?,?,?)",
+                (collection_id,asset_id,position,note[:1000],rendition[:20],stamp),
+            )
+            self._conn.execute("UPDATE visual_collections SET updated_at=? WHERE id=?",(stamp,collection_id))
+            self._conn.commit()
+        return self.get_collection(collection_id,user_id) or {}
+
+    def get_collection(self, collection_id: str, user_id: str) -> dict[str, Any] | None:
+        rows = self._rows("SELECT * FROM visual_collections WHERE id=? AND user_id=?",(collection_id,user_id))
+        if not rows:
+            return None
+        collection = rows[0]
+        collection["items"] = self._rows(
+            """SELECT i.position,i.note,i.rendition,a.id AS asset_id,a.original_filename,a.width,a.height,a.quality_score
+               FROM visual_collection_items i JOIN visual_assets a ON a.id=i.asset_id
+               WHERE i.collection_id=? ORDER BY i.position""",(collection_id,),
+        )
+        for item in collection["items"]:
+            item["thumbnail_url"] = f"/api/visual-assets/{item['asset_id']}/file?variant=thumbnail"
+        return collection
+
+    def list_collections(self, user_id: str, *, kind: str = "", page: int = 1, limit: int = 30) -> tuple[list[dict[str, Any]],int]:
+        where = "user_id=?" + (" AND kind=?" if kind else "")
+        params: tuple[Any,...] = (user_id,kind) if kind else (user_id,)
+        with self._lock:
+            total = int(self._conn.execute(f"SELECT COUNT(*) FROM visual_collections WHERE {where}",params).fetchone()[0])
+            rows = self._conn.execute(
+                f"""SELECT c.*,(SELECT COUNT(*) FROM visual_collection_items i WHERE i.collection_id=c.id) AS item_count
+                    FROM visual_collections c WHERE {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?""",
+                (*params,limit,(page-1)*limit),
+            ).fetchall()
+        return [dict(row) for row in rows],total
+
     def add_correction(self, user_id: str, asset_id: str, field_name: str, old_value: Any, new_value: Any, reason: str = "") -> str:
         cid = new_id("correction")
         with self._lock:
@@ -1181,6 +1267,15 @@ def normalize_date(value: str | None) -> str:
         return datetime(year, month, day).date().isoformat()
     except ValueError:
         return ""
+
+
+def normalize_time(value: str | None) -> str:
+    raw = (value or "").strip().replace("：",":")
+    match = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)",raw)
+    if not match:
+        return ""
+    hour,minute = int(match.group(1)),int(match.group(2))
+    return f"{hour:02d}:{minute:02d}" if 0 <= hour <= 23 and 0 <= minute <= 59 else ""
 
 
 _visual_store: VisualAssetStore | None = None

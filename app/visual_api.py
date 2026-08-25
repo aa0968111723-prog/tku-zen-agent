@@ -67,6 +67,12 @@ class ExportRequest(StrictRequest):
     rendition: Literal["original","thumbnail","1:1","4:5","9:16","16:9"] = "original"
 
 
+class CollectionAssetRequest(StrictRequest):
+    asset_id: str = Field(min_length=8,max_length=80)
+    note: str = Field(default="",max_length=1000)
+    rendition: Literal["original","thumbnail","1:1","4:5","9:16","16:9"] = "original"
+
+
 class ApproveLearningRequest(StrictRequest):
     correction_id: str = Field(min_length=8,max_length=80)
 
@@ -230,11 +236,51 @@ async def visual_asset_file(
 
 
 @router.post("/visual-assets/{asset_id}/usage")
-async def record_visual_usage(asset_id: str,req: UsageRequest,user_id: str = Depends(auth.require_user)) -> dict[str,bool]:
+async def record_visual_usage(asset_id: str,req: UsageRequest,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
     if not get_visual_store().visible_asset(asset_id,user_id):
         raise HTTPException(status_code=404,detail="找不到圖片或沒有權限")
     get_visual_store().record_learning(user_id,req.action,asset_id=asset_id,payload=req.context,outcome="recorded")
-    return {"ok":True}
+    collection = None
+    if req.action in {"storyboard","social_post","poster"}:
+        collection = get_visual_store().add_to_collection(
+            user_id,asset_id,kind=req.action,note=str(req.context.get("note") or ""),
+            rendition=str(req.context.get("rendition") or "original"),
+        )
+    return {"ok":True,"collection":collection}
+
+
+@router.get("/visual-collections")
+async def list_visual_collections(
+    kind: str = Query(default="",pattern=r"^(|material_pack|storyboard|social_post|poster)$"),
+    page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),
+    user_id: str = Depends(auth.require_user),
+) -> dict[str,Any]:
+    capped = min(limit,config.VISUAL_SEARCH_LIMIT)
+    items,total = get_visual_store().list_collections(user_id,kind=kind,page=page,limit=capped)
+    return {"items":items,"total":total,"page":page,"limit":capped}
+
+
+@router.get("/visual-collections/{collection_id}")
+async def get_visual_collection(collection_id: str,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    item = get_visual_store().get_collection(collection_id,user_id)
+    if not item:
+        raise HTTPException(status_code=404,detail="找不到素材集合")
+    return item
+
+
+@router.post("/visual-collections/{collection_id}/assets")
+async def add_visual_collection_asset(
+    collection_id: str,req: CollectionAssetRequest,user_id: str = Depends(auth.require_user),
+) -> dict[str,Any]:
+    current = get_visual_store().get_collection(collection_id,user_id)
+    if not current:
+        raise HTTPException(status_code=404,detail="找不到素材集合")
+    try:
+        return get_visual_store().add_to_collection(
+            user_id,req.asset_id,kind=current["kind"],name=current["name"],note=req.note,rendition=req.rendition,
+        )
+    except VisualAssetError as exc:
+        raise _http_error(exc) from exc
 
 
 @router.post("/visual-assets/export")

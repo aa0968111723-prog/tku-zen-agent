@@ -100,6 +100,7 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
             event_id = store.ensure_event(
                 school_id=asset.get("school_id"),club_id=asset.get("club_id"),name=event_name,
                 event_type=str(event.get("type") or ""),event_date=event_date,
+                start_time=str(event.get("start_time") or ""),end_time=str(event.get("end_time") or ""),
                 location=str(event.get("location") or ""),status="possible",
                 evidence=[{"source":source,"asset_id":asset_id,"text":event.get("evidence")}],
             )

@@ -71,7 +71,7 @@ from .services.clientip import client_ip  # noqa: E402
 async def security_middleware(request: Request, call_next):
     # 視覺 API 在 multipart 解析前先用 Content-Length 擋掉明顯超量請求；
     # 端點內仍會逐檔再次檢查，因為 chunked request 可能沒有這個標頭。
-    visual_api = request.url.path.startswith(("/api/visual-assets", "/api/entities", "/api/learning"))
+    visual_api = request.url.path.startswith(("/api/visual-assets", "/api/visual-collections", "/api/entities", "/api/learning"))
     if visual_api and request.method in _STATE_CHANGING:
         try:
             content_length = int(request.headers.get("content-length") or 0)
