@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import Request
 
 from . import roles
+from .audit import mask_secrets
 from .session_store import get_store
 
 logger = logging.getLogger(__name__)
@@ -38,20 +39,28 @@ def audit(
     resource_id: str = "",
     success: bool = True,
     detail: dict[str, Any] | None = None,
-) -> None:
-    """寫入 audit_logs；失敗只打 log，不影響主流程。"""
+) -> bool:
+    """Write one audit row using SessionStore.append_audit's real signature.
+
+    Strategy: user-facing operations stay available if audit I/O fails, but
+    the failure is logged and callers receive False. Never swallow TypeError
+    from a mismatched contract.
+    """
     role_value = role.value if isinstance(role, roles.Role) else (role or "")
-    ip = client_ip(request)
+    resource = "/".join(part for part in (resource_type, resource_id) if part)[:240]
+    payload = dict(detail or {})
+    if role_value:
+        payload.setdefault("role", role_value)
     try:
         get_store().append_audit(
-            action=action,
-            actor_user_id=actor_user_id,
-            role=role_value,
-            resource_type=resource_type,
-            resource_id=resource_id,
-            ip=ip,
-            success=success,
-            detail=detail,
+            actor_user_id=actor_user_id or "",
+            action=action[:120],
+            resource=resource,
+            detail=mask_secrets(str(payload))[:2000],
+            ip=client_ip(request),
+            ok=bool(success),
         )
-    except Exception:  # noqa: BLE001
+        return True
+    except Exception:
         logger.exception("audit write failed action=%s", action)
+        return False

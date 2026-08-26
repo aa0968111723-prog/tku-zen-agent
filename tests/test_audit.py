@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import config
-from app.services import audit, auth
+from app.services import audit, auth, security
 from app.services.roles import Role, has_at_least, is_forbidden_autonomous
 from app.services.session_store import get_store
 
@@ -35,6 +35,26 @@ def token_client(tmp_db, tmp_output_dir, monkeypatch):
 
     with TestClient(app, base_url="https://testserver") as c:
         yield c
+
+
+def test_security_audit_matches_session_store_contract(tmp_db):
+    assert security.audit(
+        "acl.denied",
+        actor_user_id="u_local",
+        role="user",
+        resource_type="visual_assets",
+        resource_id="asset_1",
+        success=False,
+        detail={"reason": "owner_mismatch"},
+    ) is True
+    rows = tmp_db.list_audit(limit=5)
+    assert rows
+    row = rows[0]
+    assert row["action"] == "acl.denied"
+    assert row["ok"] is False
+    assert "visual_assets/asset_1" in row["resource"]
+    assert "owner_mismatch" in row["detail"]
+    assert "nvapi" not in row["detail"]
 
 
 def test_login_success_writes_audit(token_client):

@@ -283,6 +283,33 @@ def test_external_media_import_keeps_original_path_and_only_writes_derivatives(o
     assert rendition and Path(rendition[0]).parent.is_relative_to(Path(config.VISUAL_ASSET_DIR).resolve())
 
 
+def test_same_path_new_sha_is_inventoried_and_does_not_overwrite_previous_asset(organization_env, monkeypatch):
+    sessions, store, service = organization_env
+    user_id = sessions.ensure_user("replace_content", is_local=True)
+    source_root = Path(config.VISUAL_ASSET_DIR).parent / "replace-media"
+    source_root.mkdir(parents=True, exist_ok=True)
+    image_path = source_root / "入口.png"
+    first_bytes = picture(size=(320, 180), color=(20, 80, 160))
+    image_path.write_bytes(first_bytes)
+    monkeypatch.setattr(config, "DATA_ORGANIZATION_IMPORT_ROOTS", (source_root,))
+    first = service.run(user_id, idempotency_key="replace-content-1")
+    assert first["status"] == "completed", first.get("error_log")
+    original_id = store._conn.execute("SELECT id FROM visual_assets WHERE user_id=?", (user_id,)).fetchone()[0]
+    original_sha = store._conn.execute("SELECT sha256 FROM visual_assets WHERE id=?", (original_id,)).fetchone()[0]
+    image_path.write_bytes(picture(size=(320, 180), color=(180, 40, 40)))
+    preview = service.inventory(user_id, persist=False)
+    assert preview["manifest"]["unregistered_candidates"] >= 1
+    second = service.run(user_id, idempotency_key="replace-content-2")
+    assert second["status"] == "completed", second.get("error_log")
+    rows = store._rows("SELECT id,sha256,supersedes_asset_id FROM visual_assets WHERE user_id=? ORDER BY created_at", (user_id,))
+    assert len(rows) == 2
+    assert any(row["id"] == original_id and row["sha256"] == original_sha for row in rows)
+    newest = rows[-1]
+    assert newest["id"] != original_id
+    assert newest["supersedes_asset_id"] == original_id
+    assert newest["sha256"] != original_sha
+
+
 def test_curated_scene_tree_becomes_reviewable_taxonomy_and_searchable(organization_env, monkeypatch):
     sessions, store, service = organization_env
     user_id = sessions.ensure_user("curated_scene_tree", is_local=True)
