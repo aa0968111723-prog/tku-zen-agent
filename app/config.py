@@ -163,6 +163,13 @@ VISUAL_EXPORT_DIR = _path("VISUAL_EXPORT_DIR", "outputs/visual-exports")
 VISUAL_MAX_FILE_BYTES = max(1_000_000, int(os.getenv("VISUAL_MAX_FILE_BYTES") or 20_000_000))
 VISUAL_MAX_BATCH = max(1, min(100, int(os.getenv("VISUAL_MAX_BATCH") or 30)))
 VISUAL_SEARCH_LIMIT = max(1, min(200, int(os.getenv("VISUAL_SEARCH_LIMIT") or 60)))
+# 本機資料整理的額外素材根目錄。只會擷取支援的圖片／影片／文件格式；
+# 程式碼、虛擬環境、Git、SQLite 與憑證不會因為加入根目錄而被匯入。
+_organization_roots = (os.getenv("DATA_ORGANIZATION_IMPORT_ROOTS") or "data,output,outputs,mobile-shots").split(",")
+DATA_ORGANIZATION_IMPORT_ROOTS = tuple(
+    (Path(value.strip()) if Path(value.strip()).is_absolute() else ROOT / value.strip())
+    for value in _organization_roots if value.strip()
+)
 
 # ── InsForge 視覺資料層（可選、server-only）────────────────────
 # 預設停用；本地 SQLite/檔案儲存仍是 source-of-truth。API key 絕不送到瀏覽器。

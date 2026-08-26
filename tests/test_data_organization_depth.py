@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 import io
+import json
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ def organization_env(tmp_db, monkeypatch):
     monkeypatch.setattr(config, "VISUAL_ASSET_DIR", root / "assets")
     monkeypatch.setattr(config, "VISUAL_EXPORT_DIR", root / "exports")
     monkeypatch.setattr(config, "OUTPUT_DIR", root / "outputs")
+    monkeypatch.setattr(config, "DATA_ORGANIZATION_IMPORT_ROOTS", ())
     monkeypatch.setattr(config, "VISUAL_MAX_FILE_BYTES", 2_000_000)
     store = VisualAssetStore(tmp_db.path)
     monkeypatch.setattr(visual_assets, "_visual_store", store)
@@ -109,6 +111,8 @@ def test_inventory_and_mapping_are_real_idempotent_non_destructive_and_owner_sco
     monkeypatch.setattr(service, "_map_resource", real_map)
     resumed = service.retry(partial["id"], user_a)
     assert resumed and resumed["status"] == "completed" and resumed["resumed_from"] == partial["id"]
+    after = service.inventory(user_a, persist=False)
+    assert after["manifest"]["unregistered_candidates"] == 0
 
 
 def test_context_resolver_is_acl_first_and_does_not_promote_probable_people(organization_env):
@@ -193,3 +197,50 @@ def test_existing_xlsx_and_apps_script_are_imported_as_searchable_documents(orga
     assert {row["original_filename"] for row in rows} == {"活動表.xlsx", "報名通知.gs"}
     assert any("期初茶會" in row["ocr_text"] for row in rows)
     assert any("淡江茶會" in row["ocr_text"] for row in rows)
+
+
+def test_configured_additional_roots_are_scanned_without_exposing_absolute_paths(organization_env, monkeypatch):
+    sessions, _store, service = organization_env
+    user_id = sessions.ensure_user("expanded_local", is_local=True)
+    extra = Path(config.VISUAL_ASSET_DIR).parent / "mobile-shots"
+    extra.mkdir(parents=True, exist_ok=True)
+    (extra / "phone-shot.png").write_bytes(picture(color=(220, 220, 220)))
+    monkeypatch.setattr(config, "DATA_ORGANIZATION_IMPORT_ROOTS", (extra,))
+    report = service.inventory(user_id, persist=False)
+    assert report["breakdown"]["unregistered_filesystem_candidates"]["image"] == 1
+    assert "phone-shot.png" in json.dumps(report["manifest"], ensure_ascii=False)
+    assert str(extra.resolve()) not in json.dumps(report, ensure_ascii=False)
+
+
+def test_parent_import_root_does_not_reimport_canonical_visual_renditions(organization_env, monkeypatch):
+    sessions, _store, service = organization_env
+    user_id = sessions.ensure_user("parent_root", is_local=True)
+    visual_root = Path(config.VISUAL_ASSET_DIR).resolve()
+    derived = visual_root / user_id / "asset_existing" / "thumbnail.jpg"
+    derived.parent.mkdir(parents=True, exist_ok=True)
+    derived.write_bytes(picture(size=(64, 64), color=(20, 30, 40)))
+    # A broad parent such as ``data`` is a supported convenience root, but
+    # canonical visual-assets are already scanned separately and must not be
+    # counted again (especially generated thumbnails/renditions).
+    monkeypatch.setattr(config, "DATA_ORGANIZATION_IMPORT_ROOTS", (visual_root.parent,))
+    report = service.inventory(user_id, persist=False)
+    assert report["breakdown"]["unregistered_filesystem_candidates"] == {}
+
+
+def test_legacy_thumbnail_is_retained_but_not_counted_or_searchable(organization_env):
+    sessions, store, service = organization_env
+    user_id = sessions.ensure_user("legacy_thumbnail", is_local=True)
+    parent = store.create_asset(user_id=user_id, filename="活動說明.txt", mime_type="text/plain", content=b"activity")
+    derived = store.create_asset(user_id=user_id, filename="thumbnail.jpg", mime_type="image/png", content=picture(size=(64, 64)))
+    relative = f"visual-assets/{user_id}/{parent['asset_id']}/thumbnail.jpg"
+    store._conn.execute(
+        "UPDATE visual_assets SET relative_path=?,source='existing_data_import',source_metadata=? WHERE id=?",
+        (relative, dumps({"root": "data", "relative_path": relative}), derived["asset_id"]),
+    )
+    store._conn.commit()
+    report = service.inventory(user_id, persist=True)
+    row = store._conn.execute("SELECT source,duplicate_of FROM visual_assets WHERE id=?", (derived["asset_id"],)).fetchone()
+    assert row["source"] == "derived_thumbnail" and row["duplicate_of"] == parent["asset_id"]
+    assert report["statistics"]["images"] == 0
+    items, total, _ = store.search(user_id, query="thumbnail")
+    assert all(item["asset_id"] != derived["asset_id"] for item in items)

@@ -911,7 +911,9 @@ class VisualAssetStore:
     ) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
         q = query.strip().lower()
         school_filter = school or infer_school(query)
-        where = ["(a.user_id=? OR a.privacy IN ('shared','public'))"]
+        # Generated thumbnails/renditions are retained for lineage but are not
+        # independent search results.  They were never user-authored assets.
+        where = ["COALESCE(a.source,'')!='derived_thumbnail'", "(a.user_id=? OR a.privacy IN ('shared','public'))"]
         params: list[Any] = [user_id]
         if school_filter:
             where.append("a.school_id IN (SELECT id FROM visual_schools WHERE canonical_name LIKE ? OR aliases LIKE ?)")
@@ -1381,11 +1383,11 @@ class VisualAssetStore:
     def dashboard(self, user_id: str) -> dict[str, Any]:
         visible = "(user_id=? OR privacy IN ('shared','public'))"
         with self._lock:
-            total = int(self._conn.execute(f"SELECT COUNT(*) FROM visual_assets WHERE {visible}",(user_id,)).fetchone()[0])
+            total = int(self._conn.execute(f"SELECT COUNT(*) FROM visual_assets WHERE {visible} AND COALESCE(source,'')!='derived_thumbnail'",(user_id,)).fetchone()[0])
             counts = {
-                "pending": int(self._conn.execute(f"SELECT COUNT(*) FROM visual_assets WHERE {visible} AND review_status IN ('pending_review','probable','conflicted','failed')",(user_id,)).fetchone()[0]),
-                "duplicates": int(self._conn.execute(f"SELECT COUNT(*) FROM visual_assets WHERE {visible} AND duplicate_of IS NOT NULL",(user_id,)).fetchone()[0]),
-                "high_quality": int(self._conn.execute(f"SELECT COUNT(*) FROM visual_assets WHERE {visible} AND quality_score>=75",(user_id,)).fetchone()[0]),
+                "pending": int(self._conn.execute(f"SELECT COUNT(*) FROM visual_assets WHERE {visible} AND COALESCE(source,'')!='derived_thumbnail' AND review_status IN ('pending_review','probable','conflicted','failed')",(user_id,)).fetchone()[0]),
+                "duplicates": int(self._conn.execute(f"SELECT COUNT(*) FROM visual_assets WHERE {visible} AND COALESCE(source,'')!='derived_thumbnail' AND duplicate_of IS NOT NULL",(user_id,)).fetchone()[0]),
+                "high_quality": int(self._conn.execute(f"SELECT COUNT(*) FROM visual_assets WHERE {visible} AND COALESCE(source,'')!='derived_thumbnail' AND quality_score>=75",(user_id,)).fetchone()[0]),
                 "people": int(self._conn.execute("SELECT COUNT(DISTINCT o.entity_id) FROM visual_observations o JOIN visual_assets a ON a.id=o.asset_id WHERE a.user_id=? AND o.entity_type='person' AND o.entity_id!=''",(user_id,)).fetchone()[0]),
                 "clubs": int(self._conn.execute("SELECT COUNT(DISTINCT id) FROM visual_clubs WHERE id IN (SELECT club_id FROM visual_assets WHERE user_id=? AND club_id IS NOT NULL UNION SELECT o.entity_id FROM visual_observations o JOIN visual_assets a ON a.id=o.asset_id WHERE a.user_id=? AND o.entity_type='club' AND o.entity_id!='')",(user_id,user_id)).fetchone()[0]),
                 "events": int(self._conn.execute("SELECT COUNT(DISTINCT o.entity_id) FROM visual_observations o JOIN visual_assets a ON a.id=o.asset_id WHERE a.user_id=? AND o.entity_type='event' AND o.entity_id!=''",(user_id,)).fetchone()[0]),

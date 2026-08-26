@@ -25,29 +25,39 @@ SQLite source-of-truth、FastAPI、server-only InsForge Adapter 與既有素材�
 - 人物 reference、明確確認與 review queue；未確認 observation 不可作姓名搜尋事實。
 - keyword + deterministic semantic vector + RRF hybrid search、以圖搜圖與 ACL filter。
 - 校別 Entity Resolution、同校社團 unique key、來源證據、修正與學習事件。
-- InsForge database/storage/search/function/sync adapters，以及 001/002 遠端 migrations。
+- InsForge database/storage/search/function/sync adapters，以及 001/002/003 遠端 migrations。
 
 ## 真實本機盤點與執行結果
 
-第一次執行前（`u_local`）：
+歷史首次執行（`u_local`）先完成了知識庫、既有視覺資產與 `outputs` 的非破壞匯入；
+之後才把內部專用的 `data`、`output`、`mobile-shots` 也加入白名單。這樣可以完整涵蓋
+專案內的使用者素材，同時不會把程式碼、SQLite、Playwright 暫存或憑證當成素材。
+
+擴大白名單後的最新持久化盤點（`inventory_qfpcnYimuMynU4_4`，`u_local`）：
 
 | 項目 | 數量 |
 |---|---:|
-| 圖片 | 1 |
+| 圖片（可搜尋素材） | 13 |
 | 影片 | 0 |
-| 文件（含知識與鬆散輸出） | 523 |
+| 文件（含知識與已匯入輸出） | 523 |
 | Artifact | 0 |
 | 知識來源 | 517 |
 | 社團／學校 | 1／1 |
 | 人物／活動／日期 | 0／0／0 |
-| 重複素材 | 0 |
+| 重複素材（保留原始副本） | 18 |
 | 缺少來源 | 0 |
+| 待確認資料 | 121 |
 | 無法分析素材（distinct asset） | 1 |
 
-`sync_BagwU6QyBcku1Vqk` 非破壞地完成 524 筆、2 筆格式待處理；加入 XLSX 與 Apps
-Script 文件擷取後，`sync_KuSKa5U4BpMk0JF6` 只重試這 2 筆並全部完成。原始輸出檔未
-移動或覆蓋。最終盤點為圖片 1、影片 0、文件實體 529、知識來源 517、重複素材 6、
-待確認 91、無法分析素材 1。重複數包含保留的原始輸出與素材庫副本，不代表原檔被刪除。
+`sync_BagwU6QyBcku1Vqk` 與 `sync_KuSKa5U4BpMk0JF6` 是舊白名單的歷史 run；擴大後的
+`sync_mT8lfOq9l9hjACSp` 實際完成 551 筆、0 筆失敗（visual asset 7、school 1、club 1、
+knowledge document 517、filesystem asset 25）。所有 6 份輸出文件與 19 份手機／本機圖片
+都以 SHA-256 與來源 key 做 idempotent mapping，原始路徑保留，沒有移動或覆蓋原檔。
+
+早期 run 曾把 6 個 `data/visual-assets/**/thumbnail.jpg` 當成鬆散圖片；本次盤點已將它們
+標記為 `derived_thumbnail`、保留 lineage 與檔案，但從素材搜尋與統計排除。這是可回溯的
+metadata 修正，不是刪除。最新 manifest 掃描 560 個支援格式檔案，`unregistered_candidates=0`；
+18 組重複是檔案系統原始副本與素材庫副本並存的真實結果。
 
 ## 本階段 mapping 與 migration
 
@@ -88,8 +98,9 @@ MCP 管理 API key 沒有被誤寫成前端或 runtime key，private binary 也�
 
 ## 保留風險
 
+- 目前沒有新影片檔；影片格式仍可匯入並保留原檔，沒有影格解碼器時只提供安全占位縮圖，
+  不會虛構人物／場景標籤。
 - 現有唯一圖片的外部 vision 分析仍是 `needs_vision_config`，不是 PASS。
 - 專用 OCR/vision 與高維 image embedding 仍取決於外部模型；不可用時維持明確 blocker。
 - Runtime InsForge owner mapping 與最小權限 server key 完成前，只能 dry-run／本機整理。
-- 91 筆 probable/pending mapping 需要人在資料整理中心審核，不會自動升級為 verified。
-
+- 121 筆 probable/pending mapping 需要人在資料整理中心審核，不會自動升級為 verified。

@@ -210,6 +210,13 @@ FAL_KEY=...
 Zeabur 必須把 SQLite、原圖與衍生圖放在持久化磁碟；只設 DB_PATH 而沒有持久化
 `VISUAL_ASSET_DIR` 會留下資料列但在容器重啟後失去檔案。備份時兩者要一起備份。
 
+本機資料整理可用 `DATA_ORGANIZATION_IMPORT_ROOTS` 擴大素材白名單，預設為
+`data,output,outputs,mobile-shots`。服務只讀取支援的圖片／影片／文件副檔名，並排除
+SQLite、playwright 暫存、`.git`、`.venv`、程式碼與憑證；相對路徑和 SHA-256 會保存於
+manifest/lineage，原始檔不會被搬移或覆蓋。已匯入檔案會以 `root:relative_path` 與
+SHA-256 做雙重 idempotency 判定；`data/visual-assets` 內的 thumbnail/rendition 只作
+衍生檔 lineage，不會被重新當成獨立素材。
+
 目前 embedding 是不需外部金鑰的可重現文字特徵、色彩向量與感知雜湊，適合社團
 規模的 SQLite 內排序。未來可在保留相同欄位與來源證據的前提下，換成專用向量
 服務；不得用未審核修正直接訓練或改模型權重。
