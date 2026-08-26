@@ -12,6 +12,8 @@ from app import config, main, retrieval
 from app.services import auth, visual_assets
 from app.services.insforge_adapters import InsForgeAdapters, InsForgeUnavailable
 from app.services.insforge_data_sync import InsForgeDataSyncAdapter
+from app.services.data_organization import DataOrganizationService
+from app.services.insforge_sync import InsForgeSyncAdapter
 
 
 class FakeDatabase:
@@ -26,6 +28,10 @@ class FakeDatabase:
             self.fail_once_table = ""
             raise InsForgeUnavailable("temporary remote failure")
         return body
+
+    def update(self, table, filters, values):
+        self.calls.append((table,[{"filters":filters,"values":values}]))
+        return []
 
 
 class FakeStorage:
@@ -188,3 +194,42 @@ def test_backend_sync_api_rejects_unauthenticated_access(sync_env,monkeypatch):
             "dry_run":True,
         })
     assert response.status_code == 401
+
+
+def test_organization_mapping_syncs_lineage_graph_and_never_exports_absolute_paths(sync_env):
+    visual_store = visual_assets.get_visual_store()
+    organizer = DataOrganizationService(sync_env["store"], visual_store)
+    organized = organizer.run(sync_env["user_id"], idempotency_key="organize-before-remote", project_id=sync_env["project_id"])
+    assert organized["status"] == "completed", organized.get("error_log")
+    current, db, _files = service(sync_env)
+    preview = current.preview(sync_env["user_id"], groups={"organization"}, project_id=sync_env["project_id"])
+    assert preview["counts"]["organization_data_lineage"] >= 1
+    result = current.run(
+        sync_env["user_id"], groups={"organization"}, project_id=sync_env["project_id"],
+        idempotency_key="organization-remote-001",
+    )
+    assert result["status"] == "completed"
+    payload_text = json.dumps(db.calls, ensure_ascii=False)
+    assert str(config.OUTPUT_DIR.resolve()) not in payload_text
+    assert str(config.KNOWLEDGE_DIR.resolve()) not in payload_text
+    assert any(table == "data_lineage" for table, _rows in db.calls)
+
+
+def test_visual_and_core_sync_idempotency_namespaces_do_not_collide(sync_env):
+    current, _db, _files = service(sync_env)
+    core_id, created = current._create_run(
+        sync_env["user_id"], sync_env["project_id"], "same-client-key", {"projects"}, [], "",
+    )
+    assert created is True
+    visual = InsForgeSyncAdapter(visual_assets.get_visual_store(), current.adapters)
+    visual_run = visual._create_run(
+        sync_env["user_id"], project_id=sync_env["project_id"],
+        idempotency_key="same-client-key", asset_ids=[],
+    )
+    assert visual_run["id"] != core_id
+    assert visual_run["idempotency_scope"].startswith("insforge_visual:")
+    repeated = visual._create_run(
+        sync_env["user_id"], project_id=sync_env["project_id"],
+        idempotency_key="same-client-key", asset_ids=[],
+    )
+    assert repeated["id"] == visual_run["id"]

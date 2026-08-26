@@ -6,7 +6,7 @@ import inspect
 import logging
 from typing import Any, Callable
 
-from . import activity, artifact, document, examples, gform, knowledge, slides, social, spreadsheet, term
+from . import activity, artifact, document, examples, gform, knowledge, slides, social, spreadsheet, term, visual_library
 
 logger = logging.getLogger(__name__)
 Permission = str  # general | admin_confirm
@@ -37,6 +37,7 @@ _REGISTRY: dict[str, tuple[Callable[..., dict], dict, Permission]] = {
     "get_activity_status": (activity.get_activity_status, activity.STATUS_SCHEMA, "general"),
     "list_activities": (activity.list_activities, activity.LIST_SCHEMA, "general"),
     "read_artifact": (artifact.read_artifact, artifact.SCHEMA, "general"),
+    "search_visual_library": (visual_library.search_visual_library, visual_library.SCHEMA, "general"),
 }
 
 SCHEMAS: list[dict] = [schema for _, schema, _ in _REGISTRY.values()]
@@ -58,6 +59,7 @@ LABELS = {
     "get_activity_status": "檢查活動進度",
     "list_activities": "列出活動",
     "read_artifact": "讀取上一份產出",
+    "search_visual_library": "搜尋視覺素材庫",
     "search_social_references": "搜尋外校公開參考",
     "compare_social_strategies": "比較外校社群策略",
     "analyze_social_positioning": "分析社群定位",

@@ -8,6 +8,7 @@ import mimetypes
 from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,6 +19,8 @@ from .services.visual_assets import VisualAssetError, get_visual_store
 from .services.insforge_adapters import BLOCKED_BY_EXTERNAL_DEPENDENCY, InsForgeUnavailable, get_insforge_adapters
 from .services.insforge_sync import InsForgeSyncAdapter
 from .services.insforge_data_sync import InsForgeDataSyncAdapter
+from .services.data_organization import DataOrganizationService
+from .services.library_context import LibraryContextResolver
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(auth.require_user)], tags=["visual-assets"])
@@ -98,13 +101,40 @@ class VisualSyncRetryRequest(StrictRequest):
 
 
 class BackendSyncRequest(StrictRequest):
-    resource_types: list[Literal["projects","artifacts","activities","research_sources","knowledge","visual_assets"]] = Field(
-        default_factory=lambda: ["projects","artifacts","activities","research_sources","knowledge","visual_assets"],
-        min_length=1,max_length=6,
+    resource_types: list[Literal["projects","artifacts","activities","research_sources","knowledge","visual_assets","organization"]] = Field(
+        default_factory=lambda: ["projects","artifacts","activities","research_sources","knowledge","visual_assets","organization"],
+        min_length=1,max_length=7,
     )
     project_id: str = Field(default="",max_length=160)
     idempotency_key: str = Field(min_length=8,max_length=160)
     dry_run: bool = False
+
+
+class InventoryRequest(StrictRequest):
+    project_id: str = Field(default="",max_length=160)
+
+
+class OrganizeRequest(StrictRequest):
+    project_id: str = Field(default="",max_length=160)
+    idempotency_key: str = Field(min_length=8,max_length=120)
+
+
+class ContextNodeRequest(StrictRequest):
+    project_id: str = Field(min_length=1,max_length=160)
+    node_type: Literal["story","scene","shot","output"]
+    title: str = Field(min_length=1,max_length=240)
+    position: int = Field(default=0,ge=0,le=10000)
+    parent_id: str = Field(default="",max_length=160)
+    requirements: dict[str,Any] = Field(default_factory=dict)
+
+
+class ContextSearchRequest(StrictRequest):
+    query: str = Field(min_length=1,max_length=1000)
+    project_id: str = Field(default="",max_length=160)
+    scene_position: int = Field(default=0,ge=0,le=10000)
+    shot_position: int = Field(default=0,ge=0,le=10000)
+    page: int = Field(default=1,ge=1)
+    limit: int = Field(default=30,ge=1,le=60)
 
 
 def _media_type(upload: UploadFile) -> str:
@@ -268,6 +298,9 @@ async def search_visual_assets(
     commercial_use: str = Query(default="",pattern=r"^(|allowed|not_allowed|unknown)$"),
     privacy: str = Query(default="",pattern=r"^(|private|shared|public)$"),
     duplicate: str = Query(default="",pattern=r"^(|only|exclude)$"),
+    people_min: int = Query(default=0,ge=0,le=1000),
+    brightness_min: float = Query(default=0,ge=0,le=100),
+    verification_status: str = Query(default="",pattern=r"^(|verified|probable|pending_review|conflicted|failed)$"),
     page: int = Query(default=1,ge=1,le=10000), limit: int = Query(default=30,ge=1),
     user_id: str = Depends(auth.require_user),
 ) -> dict[str,Any]:
@@ -276,7 +309,8 @@ async def search_visual_assets(
     items,total,parsed = store.search(
         user_id,query=q,page=page,limit=capped,school=school,club=club,person=person,scene=scene,event=event,
         date_from=date_from,date_to=date_to,ratio=ratio,quality_min=quality_min,commercial_use=commercial_use,
-        privacy=privacy,duplicate=duplicate,
+        privacy=privacy,duplicate=duplicate,people_min=people_min,brightness_min=brightness_min,
+        verification_status=verification_status,
     )
     store.record_learning(user_id,"search",query=q,payload={"filters":parsed,"result_ids":[i["asset_id"] for i in items]},outcome=str(total))
     audit.write_audit(action="visual.search",actor_user_id=user_id,resource="visual-assets",detail={"query":q[:200],"count":total},request=request)
@@ -548,8 +582,9 @@ async def run_visual_sync(req: VisualSyncRequest, request: Request, user_id: str
     committed independently, so a failed remote request never loses local data.
     """
     try:
-        result = InsForgeSyncAdapter(get_visual_store()).run(
-            user_id, asset_ids=req.asset_ids, project_id=req.project_id,
+        result = await run_in_threadpool(
+            InsForgeSyncAdapter(get_visual_store()).run, user_id,
+            asset_ids=req.asset_ids, project_id=req.project_id,
             idempotency_key=req.idempotency_key, resumed_from=req.resumed_from,
         )
     except ValueError as exc:
@@ -568,7 +603,7 @@ async def get_visual_sync(run_id: str, user_id: str = Depends(auth.require_user)
 
 @router.post("/visual-sync/{run_id}/retry", status_code=202)
 async def retry_visual_sync(run_id: str, req: VisualSyncRetryRequest, request: Request, user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
-    result = InsForgeSyncAdapter(get_visual_store()).retry(run_id, user_id, req.asset_ids)
+    result = await run_in_threadpool(InsForgeSyncAdapter(get_visual_store()).retry,run_id,user_id,req.asset_ids)
     if not result:
         raise HTTPException(status_code=404, detail="找不到同步紀錄")
     audit.write_audit(action="visual.sync_retry", actor_user_id=user_id, resource=run_id, detail={"new_run_id": result.get("id")}, request=request)
@@ -590,9 +625,9 @@ async def run_backend_sync(req: BackendSyncRequest, request: Request, user_id: s
     groups = set(req.resource_types)
     try:
         if req.dry_run:
-            return service.preview(user_id, groups=groups, project_id=req.project_id)
-        result = service.run(
-            user_id, groups=groups, project_id=req.project_id,
+            return await run_in_threadpool(service.preview,user_id,groups=groups,project_id=req.project_id)
+        result = await run_in_threadpool(
+            service.run, user_id, groups=groups, project_id=req.project_id,
             idempotency_key=req.idempotency_key,
         )
     except ValueError as exc:
@@ -615,7 +650,7 @@ async def get_backend_sync(run_id: str, user_id: str = Depends(auth.require_user
 
 @router.post("/backend-sync/{run_id}/retry", status_code=202)
 async def retry_backend_sync(run_id: str, request: Request, user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
-    result = InsForgeDataSyncAdapter().retry(run_id,user_id)
+    result = await run_in_threadpool(InsForgeDataSyncAdapter().retry,run_id,user_id)
     if not result:
         raise HTTPException(status_code=404,detail="找不到核心資料同步紀錄")
     audit.write_audit(action="backend.sync_retry",actor_user_id=user_id,resource=run_id,detail={"new_run_id":result.get("id")},request=request)
@@ -629,3 +664,78 @@ async def rollback_backend_sync(run_id: str, request: Request, user_id: str = De
         raise HTTPException(status_code=404,detail="找不到核心資料同步紀錄")
     audit.write_audit(action="backend.sync_rollback",actor_user_id=user_id,resource=run_id,detail={"remote_delete":False},request=request)
     return {"warning":"只回滾本地同步參照；不刪除本機或 InsForge 原始資料",**result}
+
+
+@router.get("/data-organization/inventory")
+async def get_data_inventory(refresh: bool = Query(default=False), project_id: str = Query(default="",max_length=160), user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    service = DataOrganizationService()
+    if not refresh:
+        existing = service.latest_inventory(user_id,project_id)
+        if existing:
+            return existing
+    try:
+        return await run_in_threadpool(service.inventory,user_id,project_id=project_id,persist=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from exc
+
+
+@router.post("/data-organization/inventory",status_code=201)
+async def run_data_inventory(req: InventoryRequest, request: Request, user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    try:
+        result = await run_in_threadpool(DataOrganizationService().inventory,user_id,project_id=req.project_id,persist=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from exc
+    audit.write_audit(action="data.inventory",actor_user_id=user_id,resource=result["id"],detail={"statistics":result["statistics"]},request=request)
+    return result
+
+
+@router.post("/data-organization/organize",status_code=202)
+async def organize_existing_data(req: OrganizeRequest, request: Request, user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    try:
+        result = await run_in_threadpool(DataOrganizationService().run,user_id,idempotency_key=req.idempotency_key,project_id=req.project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from exc
+    audit.write_audit(action="data.organize",actor_user_id=user_id,resource=result.get("id", ""),detail={"status":result.get("status"),"failed":result.get("failed_count",0)},request=request,ok=result.get("status") in {"completed","partial"})
+    return result
+
+
+@router.get("/data-organization/runs/{run_id}")
+async def get_data_organization_run(run_id: str,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    result = DataOrganizationService().get_run(run_id,user_id)
+    if not result:
+        raise HTTPException(status_code=404,detail="找不到資料整理同步紀錄")
+    return result
+
+
+@router.post("/data-organization/runs/{run_id}/retry",status_code=202)
+async def retry_data_organization_run(run_id: str,request: Request,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    result = await run_in_threadpool(DataOrganizationService().retry,run_id,user_id)
+    if not result:
+        raise HTTPException(status_code=404,detail="找不到資料整理同步紀錄")
+    audit.write_audit(action="data.organize_retry",actor_user_id=user_id,resource=run_id,detail={"new_run_id":result.get("id","")},request=request)
+    return result
+
+
+@router.get("/data-organization/queue")
+async def data_organization_queue(category: str = Query(default="pending_review",max_length=30),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    capped = min(limit,config.VISUAL_SEARCH_LIMIT)
+    items,total = DataOrganizationService().list_queue(user_id,category=category,page=page,limit=capped)
+    return {"items":items,"total":total,"page":page,"limit":capped,"category":category}
+
+
+@router.post("/library/context-nodes",status_code=201)
+async def save_library_context_node(req: ContextNodeRequest,request: Request,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    try:
+        result = LibraryContextResolver().upsert_node(user_id,project_id=req.project_id,node_type=req.node_type,title=req.title,position=req.position,parent_id=req.parent_id,requirements=req.requirements)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from exc
+    audit.write_audit(action="library.context_save",actor_user_id=user_id,resource=result.get("id", ""),detail={"project_id":req.project_id,"node_type":req.node_type},request=request)
+    return result
+
+
+@router.post("/library/context-search")
+async def search_library_context(req: ContextSearchRequest,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    try:
+        return await run_in_threadpool(LibraryContextResolver().search,user_id,query=req.query,project_id=req.project_id,scene_position=req.scene_position,shot_position=req.shot_position,page=req.page,limit=req.limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail=str(exc)) from exc

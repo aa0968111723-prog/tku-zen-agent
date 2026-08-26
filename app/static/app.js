@@ -47,6 +47,7 @@ const TOOL_LABELS = {
   // 必須排在其前綴（update_activity）之前，否則會被切壞。
   search_knowledge: "搜尋社團知識庫",
   search_previous_examples: "搜尋歷年範例",
+  search_visual_library: "搜尋視覺素材庫",
   get_current_term: "查本學期資料",
   create_spreadsheet: "建立試算表",
   create_document: "建立文件",
@@ -79,6 +80,7 @@ const TOOL_LABELS = {
 const CARD_MARKS = { "ig-post": "IG", "ig-carousel": "輪", "ig-story": "限", "reels-script": "▶", "content-calendar": "曆", "ab-test": "AB", "image-prompt": "圖", "video-prompt": "影" };
 const TOOL_PHASES = {
   search_knowledge: ["research", "查詢社團資料"],
+  search_visual_library: ["research", "搜尋可用視覺素材"],
   get_current_term: ["facts", "確認必要資料"],
   search_social_references: ["research", "查詢公開參考資料"],
   compare_social_strategies: ["research", "整理公開參考資料"],

@@ -56,6 +56,7 @@ ACTIVITY_TOOLS = {
 }
 READ_ONLY_CACHEABLE_TOOLS = {
     "search_knowledge", "search_previous_examples", "get_current_term",
+    "search_visual_library",
     "search_social_references", "compare_social_strategies", "analyze_social_positioning",
     "get_activity_status", "list_activities", "read_artifact",
 }
@@ -68,7 +69,7 @@ RESEARCH_TOOLS = {
 # 只有淡江內部資料的檢索工具 —— 外部研究模式下不得使用（不能拿淡江資料當外校證據）。
 # get_current_term 也在列：淡江本學期的社長／社課時間一旦在外校研究回合流進
 # context，「北醫現在的社長是誰」就可能被答成淡江社長（grok 審查抓到的通道）。
-INTERNAL_RETRIEVAL_TOOLS = {"search_knowledge", "search_previous_examples", "get_current_term"}
+INTERNAL_RETRIEVAL_TOOLS = {"search_knowledge", "search_previous_examples", "get_current_term", "search_visual_library"}
 
 
 def _scope_tool_guard(scope: ResearchScope, name: str) -> dict[str, Any] | None:

@@ -84,7 +84,7 @@ SKILLS: tuple[Skill, ...] = (
         ),
         weak=("活動", "企劃", "企畫", "流程"),
         tools=(
-            "create_activity", "get_activity_status", "create_document", "create_spreadsheet", "create_slides",
+            "create_activity", "get_activity_status", "search_visual_library", "create_document", "create_spreadsheet", "create_slides",
         ),
         task_type="event_planning",
         artifacts_expected=("document",),
@@ -125,6 +125,7 @@ SKILLS: tuple[Skill, ...] = (
             "網宣", "IG", "ig", "貼文", "限動", "輪播", "Reels", "社群", "招生文宣", "文宣",
         ),
         tools=(
+            "search_visual_library",
             "create_social_post", "create_social_carousel", "create_social_story",
             "create_reels_script", "create_social_content_calendar",
         ),
@@ -141,7 +142,7 @@ SKILLS: tuple[Skill, ...] = (
         keywords=("新生", "入社", "ig", "instagram", "臉書", "社群", "宣傳", "擺攤"),
         weak=("fb",),
         tools=(
-            "search_previous_examples", "create_document", "create_spreadsheet", "create_google_form",
+            "search_previous_examples", "search_visual_library", "create_document", "create_spreadsheet", "create_google_form",
         ),
         task_type="recruitment",
         artifacts_expected=("document",),
@@ -205,7 +206,7 @@ SKILLS: tuple[Skill, ...] = (
         keywords=("簡報", "投影片", "ppt", "邀請函", "公文"),
         weak=("文件", "報告", "word", "excel", "表格", "清單", "排程"),
         tools=(
-            "get_activity_status", "create_document", "create_spreadsheet", "create_slides",
+            "get_activity_status", "search_visual_library", "create_document", "create_spreadsheet", "create_slides",
         ),
         task_type="documents",
         artifacts_expected=("document",),

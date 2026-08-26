@@ -267,6 +267,8 @@ DOCUMENT_MIME = {
     "application/pdf": ".pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "text/x-google-apps-script": ".gs",
     "text/plain": ".txt", "text/markdown": ".md", "text/csv": ".csv",
 }
 ALLOWED_MIME = {**IMAGE_MIME, **VIDEO_MIME, **DOCUMENT_MIME}
@@ -394,6 +396,19 @@ def _document_text(content: bytes, mime_type: str) -> str:
     if mime_type.endswith("presentationml.presentation"):
         deck = Presentation(stream)
         return "\n".join(shape.text for slide in deck.slides for shape in slide.shapes if hasattr(shape, "text"))
+    if mime_type.endswith("spreadsheetml.sheet"):
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(stream, read_only=True, data_only=True)
+        lines: list[str] = []
+        for sheet in workbook.worksheets:
+            lines.append(f"[{sheet.title}]")
+            for row in sheet.iter_rows(values_only=True):
+                values = [str(value) for value in row if value not in (None, "")]
+                if values:
+                    lines.append("\t".join(values))
+        workbook.close()
+        return "\n".join(lines)
     return content.decode("utf-8-sig", errors="replace")
 
 
@@ -403,7 +418,7 @@ def inspect_media(content: bytes, mime_type: str, filename: str = "") -> ImageIn
         return inspect_image(content, mime_type)
     if mime_type not in ALLOWED_MIME:
         raise VisualAssetError(
-            "只支援 JPEG、PNG、WebP、MP4、MOV、WebM、PDF、DOCX、PPTX 與文字文件",
+            "只支援 JPEG、PNG、WebP、MP4、MOV、WebM、PDF、DOCX、PPTX、XLSX 與文字文件",
             code="unsupported_media_type",
         )
     if not content:
@@ -892,6 +907,7 @@ class VisualAssetStore:
         school: str = "", club: str = "", person: str = "", scene: str = "", event: str = "",
         date_from: str = "", date_to: str = "", ratio: str = "", quality_min: float = 0,
         commercial_use: str = "", privacy: str = "", duplicate: str = "",
+        people_min: int = 0, brightness_min: float = 0, verification_status: str = "",
     ) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
         q = query.strip().lower()
         school_filter = school or infer_school(query)
@@ -904,7 +920,9 @@ class VisualAssetStore:
             where.append("a.id IN (SELECT asset_id FROM visual_observations WHERE entity_type='club' AND label LIKE ? AND review_action!='ignored') OR a.club_id IN (SELECT id FROM visual_clubs WHERE name LIKE ? OR aliases LIKE ?)")
             params.extend([f"%{club}%",f"%{club}%",f"%{club}%"])
         if person:
-            where.append("a.id IN (SELECT o.asset_id FROM visual_observations o LEFT JOIN visual_people p ON p.id=o.entity_id WHERE o.entity_type='person' AND o.review_action!='ignored' AND (p.name LIKE ? OR p.nickname LIKE ? OR o.label LIKE ?))")
+            # A real name is a hard identity filter: only user-confirmed
+            # observations tied to a verified person are eligible.
+            where.append("a.id IN (SELECT o.asset_id FROM visual_observations o JOIN visual_people p ON p.id=o.entity_id AND p.status='verified' WHERE o.entity_type='person' AND o.status='verified' AND o.review_action!='ignored' AND (p.name LIKE ? OR p.nickname LIKE ? OR o.label LIKE ?))")
             params.extend([f"%{person}%",f"%{person}%",f"%{person}%"])
         if scene:
             where.append("a.id IN (SELECT asset_id FROM visual_observations WHERE entity_type='scene' AND label LIKE ? AND review_action!='ignored')")
@@ -921,6 +939,20 @@ class VisualAssetStore:
         if quality_min:
             where.append("a.quality_score>=?")
             params.append(float(quality_min))
+        inferred_people_min = max(int(people_min or 0), 2 if any(term in q for term in ("多人", "合照", "團體照")) else 0)
+        inferred_quality_min = max(float(quality_min or 0), 70.0 if any(term in q for term in ("高清", "高畫質", "畫質最好", "人物清楚", "清晰")) else 0.0)
+        if inferred_quality_min > float(quality_min or 0):
+            where.append("a.quality_score>=?")
+            params.append(inferred_quality_min)
+        if inferred_people_min:
+            where.append("a.people_count>=?")
+            params.append(inferred_people_min)
+        if brightness_min:
+            where.append("a.brightness_score>=?")
+            params.append(float(brightness_min))
+        if verification_status:
+            where.append("a.review_status=?")
+            params.append(verification_status)
         if commercial_use:
             where.append("a.commercial_use=?")
             params.append(commercial_use)
@@ -1002,11 +1034,30 @@ class VisualAssetStore:
             item["recommendation_reasons"] = reasons
             item["school_name"] = row.get("school_name", "")
             item["club_name"] = row.get("club_name", "")
+            observations = self._rows(
+                "SELECT entity_type,label,entity_id,status,confidence,source,evidence FROM visual_observations WHERE asset_id=? AND review_action!='ignored' ORDER BY status='verified' DESC,confidence DESC",
+                (row["id"],),
+            )
+            for observation in observations:
+                observation["evidence"] = loads(observation.get("evidence"), {})
+            dates = self._rows(
+                "SELECT value,source,confidence,status,evidence FROM visual_date_candidates WHERE asset_id=? AND status!='failed' ORDER BY status='verified' DESC,confidence DESC",
+                (row["id"],),
+            )
+            item["matched_entities"] = observations
+            item["matched_dates"] = dates
+            item["confidence_score"] = round(float(row.get("overall_confidence") or 0), 4)
+            item["evidence"] = {
+                "asset_id": row["id"], "source": row.get("source") or "",
+                "detail_url": f"/api/visual-assets/{row['id']}",
+            }
             items.append(item)
         parsed = {
             "query": query, "school": school_filter, "club": club, "person": person,
             "scene": inferred_scene, "event": event, "date_from": date_from, "date_to": date_to,
-            "ratio": ratio_alias, "quality_min": quality_min, "commercial_use": commercial_use,
+            "ratio": ratio_alias, "quality_min": inferred_quality_min, "commercial_use": commercial_use,
+            "people_min": inferred_people_min, "brightness_min": brightness_min,
+            "verification_status": verification_status,
         }
         return items,total,parsed
 

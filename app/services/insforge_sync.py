@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -45,15 +46,16 @@ class InsForgeSyncAdapter:
         return config.INSFORGE_OWNER_ID or (user_id if user_id.count("-") == 4 else "")
 
     def _create_run(self, user_id: str, *, project_id: str, idempotency_key: str, asset_ids: list[str], resumed_from: str = "") -> dict[str, Any]:
+        scoped_key = f"insforge_visual:{idempotency_key}"[:160]
         with self.store._lock:
-            existing = self.store._conn.execute("SELECT * FROM sync_runs WHERE owner_id=? AND idempotency_key=?", (user_id, idempotency_key)).fetchone()
+            existing = self.store._conn.execute("SELECT * FROM sync_runs WHERE owner_id=? AND source=? AND idempotency_key=?", (user_id, self.backend_name, scoped_key)).fetchone()
             if existing:
                 return dict(existing)
             stamp = now()
             run_id = new_id("sync")
             self.store._conn.execute(
-                "INSERT INTO sync_runs(id,source,owner_id,project_id,manifest,status,resumed_from,idempotency_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (run_id, self.backend_name, user_id, project_id[:160], dumps({"asset_ids": asset_ids}), "running", resumed_from[:80], idempotency_key[:160], stamp, stamp),
+                "INSERT INTO sync_runs(id,source,owner_id,project_id,manifest,status,resumed_from,idempotency_key,idempotency_scope,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, self.backend_name, user_id, project_id[:160], dumps({"asset_ids": asset_ids}), "running", resumed_from[:80], scoped_key, scoped_key, stamp, stamp),
             )
             for asset_id in asset_ids:
                 self.store._conn.execute("INSERT OR IGNORE INTO sync_run_items(id,sync_run_id,asset_id,status,updated_at) VALUES(?,?,?,?,?)", (new_id("syncitem"), run_id, asset_id, "pending", stamp))
@@ -78,13 +80,18 @@ class InsForgeSyncAdapter:
         entities: list[dict[str, Any]] = []
         relations: list[dict[str, Any]] = []
         for obs in observations:
-            entity_id = str(obs.get("entity_id") or "")
+            original_entity_id = str(obs.get("entity_id") or "")
             label = str(obs.get("candidate_label") or obs.get("label") or "").strip()
             entity_type = str(obs.get("entity_type") or "object")
-            if not entity_id or not label:
+            if not original_entity_id or not label:
                 continue
-            entities.append({"id": entity_id, "type": entity_type if entity_type in {"person", "club", "school", "event", "scene", "place", "object"} else "object", "name": label, "aliases": [], "description": "", "confidence": float(obs.get("confidence") or 0), "verification_status": obs.get("status") or "pending_review", "owner_id": remote_owner, "source_id": None})
-            relations.append({"asset_id": asset_id, "entity_id": entity_id, "relation_type": entity_type, "confidence": float(obs.get("confidence") or 0), "evidence": _json(obs.get("evidence"), {}), "verified_by": str(obs.get("verified_by") or "")})
+            normalized_type = entity_type if entity_type in {"person", "club", "school", "event", "scene", "place", "object"} else "object"
+            identity = "\x1f".join((str(asset.get("user_id") or remote_owner), normalized_type, original_entity_id))
+            entity_id = "mapped_entity_" + hashlib.sha256(identity.encode()).hexdigest()[:24]
+            evidence = _json(obs.get("evidence"), {})
+            evidence = {**(evidence if isinstance(evidence, dict) else {}), "original_entity_id": original_entity_id}
+            entities.append({"id": entity_id, "type": normalized_type, "name": label, "aliases": [], "description": "", "confidence": float(obs.get("confidence") or 0), "verification_status": obs.get("status") or "pending_review", "owner_id": remote_owner, "source_id": None})
+            relations.append({"asset_id": asset_id, "entity_id": entity_id, "relation_type": entity_type, "confidence": float(obs.get("confidence") or 0), "evidence": evidence, "verified_by": str(obs.get("verified_by") or "")})
         remote_asset = {
             "id": asset_id,
             "project_id": project_id,

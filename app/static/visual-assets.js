@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const visualState = { panel: "dashboard", uploadFiles: [], uploadMode: "batch", selected: new Set(), lastItems: [], pollers: new Map() };
+const visualState = { panel: "dashboard", uploadFiles: [], uploadMode: "batch", selected: new Set(), lastItems: [], pollers: new Map(), organizationRun: null };
 
 function node(tag, cls, text) {
   const item = document.createElement(tag);
@@ -55,6 +55,7 @@ function showPanel(name) {
   window.scrollTo({ top: 0, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   if (name === "dashboard") loadDashboard();
   if (name === "review") loadReview("pending_review");
+  if (name === "organize") loadOrganization();
 }
 
 function statusLabel(value) {
@@ -190,7 +191,7 @@ async function loadDashboard() {
 }
 
 function setUploadFiles(files, mode = "batch") {
-  const extensions = /\.(jpe?g|png|webp|mp4|mov|webm|pdf|docx|pptx|txt|md|csv)$/i;
+  const extensions = /\.(jpe?g|png|webp|mp4|mov|webm|pdf|docx|pptx|xlsx|gs|txt|md|csv)$/i;
   const accepted = [...files].filter((file) => file.type.startsWith("image/") || file.type.startsWith("video/") || extensions.test(file.name));
   visualState.uploadFiles = accepted.slice(0, mode === "folder" ? 300 : 30);
   visualState.uploadMode = mode;
@@ -374,6 +375,49 @@ async function loadReview(kind) {
   } catch (error) { setStatus(error.message, "red"); }
 }
 
+const INVENTORY_LABELS = {
+  images: "圖片", videos: "影片", documents: "文件", artifacts: "Artifact", knowledge_sources: "知識來源",
+  clubs: "社團", schools: "學校", people: "人物", events: "活動", dates: "日期",
+  duplicate_assets: "重複素材", missing_sources: "缺少來源", pending_review: "待確認", analysis_failed: "無法分析",
+};
+
+async function loadOrganization(refresh = false) {
+  setStatus(refresh ? "正在重新掃描現有資料與 SHA-256…" : "正在讀取資料盤點…");
+  try {
+    const report = await requestJSON(`/api/data-organization/inventory?refresh=${refresh ? "true" : "false"}`);
+    const host = $("inventory-stats"); host.replaceChildren();
+    Object.entries(INVENTORY_LABELS).forEach(([key, label]) => {
+      const card = node("article", "inventory-card");
+      card.append(node("span", null, label), node("strong", null, String((report.statistics || {})[key] || 0)));
+      host.appendChild(card);
+    });
+    $("organization-run-status").textContent = `最近盤點：${report.created_at || "剛剛"} · 同步失敗 ${(report.breakdown || {}).sync_failed || 0}`;
+    await loadOrganizationQueue("verified");
+    setStatus("資料盤點完成；統計來自目前資料庫與實際檔案", "green");
+  } catch (error) { setStatus(error.message, "red"); }
+}
+
+async function loadOrganizationQueue(category) {
+  document.querySelectorAll("[data-organization]").forEach((button) => button.classList.toggle("is-active", button.dataset.organization === category));
+  try {
+    const data = await requestJSON(`/api/data-organization/queue?category=${encodeURIComponent(category)}&limit=60`);
+    renderAssetGrid($("organization-results"), data.items || [], { empty: "目前沒有這類資料", selectable: true, confirmable: category !== "verified", retryable: category === "failed" });
+  } catch (error) { setStatus(error.message, "red"); }
+}
+
+async function organizeExisting() {
+  setStatus("正在建立來源、lineage、Entity Graph 與 review queue…");
+  $("organize-existing").disabled = true;
+  try {
+    const result = await requestJSON("/api/data-organization/organize", { method: "POST", body: JSON.stringify({ idempotency_key: `organize-${Date.now()}`, project_id: "" }) });
+    visualState.organizationRun = result.id;
+    await loadOrganization(true);
+    $("organization-run-status").textContent = `最近同步：${result.status} · 成功 ${result.imported_count || 0} · 失敗 ${result.failed_count || 0}`;
+    setStatus(result.failed_count ? "部分資料整理失敗；成功項目已保留，可只重試失敗項目" : "現有資料已完成非破壞式整理", result.failed_count ? "yellow" : "green");
+  } catch (error) { setStatus(error.message, "red"); }
+  finally { $("organize-existing").disabled = false; }
+}
+
 function evidenceText(value) {
   if (!value) return "未提供額外證據";
   if (typeof value === "string") return value;
@@ -533,6 +577,9 @@ $("search-form").addEventListener("submit", (event) => { event.preventDefault();
 $("query-image").addEventListener("change", (event) => { const file = event.target.files && event.target.files[0]; $("query-image-name").textContent = file ? file.name : "未選擇查詢圖片"; });
 document.querySelectorAll("[data-search]").forEach((button) => button.addEventListener("click", () => { $("search-query").value = button.dataset.search; runSearch(); }));
 document.querySelectorAll("[data-review]").forEach((button) => button.addEventListener("click", () => loadReview(button.dataset.review)));
+document.querySelectorAll("[data-organization]").forEach((button) => button.addEventListener("click", () => loadOrganizationQueue(button.dataset.organization)));
+$("refresh-inventory").addEventListener("click", () => loadOrganization(true));
+$("organize-existing").addEventListener("click", organizeExisting);
 document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => { showPanel("search"); $("search-query").value = ({ person: "人物清楚", club: "社團活動", event: "活動現場", scene: "校園 教室 舞台" })[button.dataset.filter] || ""; runSearch(); }));
 $("export-pack").addEventListener("click", exportPack);
 $("batch-confirm").addEventListener("click", batchConfirm);

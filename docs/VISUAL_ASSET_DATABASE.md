@@ -138,10 +138,17 @@ append-only audit；列表端點有 page/limit 並受 `VISUAL_SEARCH_LIMIT` 限�
 | GET | `/api/visual-sync/{id}` | 查看同步 manifest、逐檔狀態與錯誤 |
 | POST | `/api/visual-sync/{id}/retry` | 只重試未完成項目，建立新的 resumed run |
 | POST | `/api/visual-sync/{id}/rollback` | 非破壞性本地回滾參照，不刪原圖或遠端資料 |
-| POST | `/api/backend-sync/run` | 專案、Artifact、活動、研究來源、知識、視覺資料 dry-run／同步 |
+| POST | `/api/backend-sync/run` | 專案、Artifact、活動、研究來源、知識、視覺與 organization mapping dry-run／同步 |
 | GET | `/api/backend-sync/{id}` | 通用同步 manifest、逐項狀態與錯誤 |
 | POST | `/api/backend-sync/{id}/retry` | 只續傳未完成的 resource |
 | POST | `/api/backend-sync/{id}/rollback` | 非破壞性回滾本地 backend reference |
+| GET/POST | `/api/data-organization/inventory` | 真實資料盤點；可指定 project 並保存報告 |
+| POST | `/api/data-organization/organize` | 可重跑、部分成功的現有資料 mapping |
+| GET | `/api/data-organization/runs/{id}` | 查看 manifest、逐筆狀態與錯誤 |
+| POST | `/api/data-organization/runs/{id}/retry` | 只重試失敗 mapping |
+| GET | `/api/data-organization/queue` | 資料整理中心分頁佇列 |
+| POST | `/api/library/context-nodes` | 建立 Story／Scene／Shot／Output context |
+| POST | `/api/library/context-search` | ACL-first 任務脈絡素材搜尋 |
 
 ## InsForge adapter 與 migration
 
@@ -169,6 +176,12 @@ activity_tasks、research_sources、knowledge_documents、knowledge_chunks 與
 `knowledge_hybrid_search` RPC。同步 manifest 永遠排除 sessions、messages、
 working_memory、retrieval_cache、audit IP 與 credentials，也不回傳 local_path。
 
+`0005_data_organization_depth` 以 mapping 方式新增 inventory、lineage、Entity Graph 與
+Library → Project → Scene → Shot context，沒有重建既有 people/club/school domain tables。
+對應遠端 migration 是 `migrations/insforge/003_data_organization_depth.sql`。知識文件 ID
+與 current-version 判定包含 project scope，避免不同專案同路徑互相覆蓋；所有 sync
+idempotency key 也包含 sync source，避免 visual/core/organization 互撞。
+
 知識文件採相對路徑＋SHA-256 版本化；原始 Markdown 存 private Storage，chunks 批次
 upsert。PostgreSQL 不接受的 NUL 控制字元只在遠端 payload 邊界清除，本機原檔不修改。
 
@@ -189,6 +202,7 @@ INSFORGE_ALLOW_PRIVATE_SYNC=false
 INSFORGE_ALLOW_ARTIFACT_FILE_SYNC=false
 INSFORGE_ALLOW_KNOWLEDGE_SYNC=false
 INSFORGE_ALLOW_CONVERSATION_KNOWLEDGE_SYNC=false
+INSFORGE_SYNC_LIMIT=5000
 INSFORGE_SYNC_WORKERS=6
 FAL_KEY=...
 ```
@@ -202,9 +216,11 @@ Zeabur 必須把 SQLite、原圖與衍生圖放在持久化磁碟；只設 DB_PA
 
 ## 驗證
 
-`tests/test_visual_asset_database.py` 與 `tests/test_visual_asset_phase1.py` 涵蓋上傳、品質、原圖不變、重複圖、海報 OCR、
+`tests/test_visual_asset_database.py`、`tests/test_visual_asset_phase1.py` 與
+`tests/test_data_organization_depth.py` 涵蓋上傳、品質、原圖不變、重複圖、海報 OCR、
 日期衝突、活動／場景、跨校隔離、同名人物、自然語言搜尋、以圖搜圖、修正、
 學習紀錄、素材包、不可變欄位、未登入、跨使用者隔離、超大與損壞圖片、manifest、
-部分失敗、續傳、idempotency、重新同步、文件擷取、外部阻擋標記與手機 UI 契約。
+部分失敗、續傳、idempotency、重新同步、XLSX/Apps Script 文件擷取、owner-scoped
+Entity mapping、ACL-first scene/shot context、外部阻擋標記與手機 UI 契約。
 成功路徑的 Vision 使用 deterministic fake，CI 不會傳送私人圖片或消耗額度；
 真實外部模型若未配置，一律列為 `BLOCKED_BY_EXTERNAL_DEPENDENCY`，不列 PASS。
