@@ -74,7 +74,7 @@ class DataOrganizationService:
         Reachability through an owned asset is therefore the ACL boundary; loading
         every canonical row here would leak another user's people or club names.
         """
-        sql = "SELECT id,school_id,club_id FROM visual_assets WHERE user_id=?"
+        sql = "SELECT id,school_id,club_id FROM visual_assets WHERE user_id=? AND COALESCE(source,'')!='derived_thumbnail'"
         params: tuple[Any, ...] = (user_id,)
         if project_id:
             sql += " AND project_id=?"
@@ -169,12 +169,109 @@ class DataOrganizationService:
             return "document"
         return "other"
 
+    @staticmethod
+    def _derived_thumbnail_source(row: dict[str, Any]) -> str:
+        """Return the parent asset id for a previously imported rendition.
+
+        Older organization runs could see ``data`` before the canonical
+        ``data/visual-assets`` walk and import generated thumbnails as new
+        images.  Those rows are retained for auditability, but are marked as
+        derivatives so they cannot appear as independent searchable assets.
+        """
+        relative = PurePosixPath(str(row.get("relative_path") or "").replace("\\", "/"))
+        parts = relative.parts
+        try:
+            visual_index = parts.index("visual-assets")
+        except ValueError:
+            return ""
+        if len(parts) <= visual_index + 2:
+            return ""
+        filename = parts[-1].lower()
+        if not (filename.startswith("thumbnail") or filename.startswith("rendition-")):
+            return ""
+        candidate = parts[visual_index + 2]
+        return candidate if candidate.startswith("asset_") else ""
+
+    def _reconcile_derived_assets(self, user_id: str, project_id: str = "") -> int:
+        """Annotate legacy thumbnail imports without deleting or rewriting files."""
+        sql = "SELECT id,user_id,relative_path,source,source_metadata FROM visual_assets WHERE user_id=?"
+        params: tuple[Any, ...] = (user_id,)
+        if project_id:
+            sql += " AND project_id=?"
+            params += (project_id,)
+        rows = self.visual_store._conn.execute(sql, params).fetchall()
+        updates: list[tuple[str, str, str, str, str]] = []
+        for row in rows:
+            data = dict(row)
+            parent_id = self._derived_thumbnail_source(data)
+            if not parent_id or data.get("source") == "derived_thumbnail":
+                continue
+            metadata = _json(data.get("source_metadata"), {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata.update({"derived_asset": True, "derived_from_asset_id": parent_id})
+            # Only mark a row as a derivative when its encoded parent belongs
+            # to the same owner.  This keeps owner isolation intact even if a
+            # hand-edited path points at another user's asset id.
+            parent = self.visual_store._conn.execute(
+                "SELECT id FROM visual_assets WHERE id=? AND user_id=?", (parent_id, user_id),
+            ).fetchone()
+            duplicate_of = parent_id if parent else ""
+            updates.append((dumps(metadata), duplicate_of, data["id"], now(), user_id))
+        if not updates:
+            return 0
+        with self.visual_store._lock:
+            self.visual_store._conn.executemany(
+                "UPDATE visual_assets SET source='derived_thumbnail',source_metadata=?,duplicate_of=CASE WHEN ?!='' THEN ? ELSE duplicate_of END,review_status='verified',processing_state='completed',updated_at=? WHERE id=? AND user_id=?",
+                [(metadata, duplicate, duplicate, stamp, asset_id, owner) for metadata, duplicate, asset_id, stamp, owner in updates],
+            )
+            self.visual_store._conn.executemany(
+                "UPDATE review_queue SET status='ignored',reviewer_id='system:derived_thumbnail',reviewed_at=? WHERE asset_id=? AND owner_id=? AND status NOT IN ('approved','rejected','ignored')",
+                [(_stamp, asset_id, owner) for _metadata, _duplicate, asset_id, _stamp, owner in updates],
+            )
+            self.visual_store._conn.commit()
+        return len(updates)
+
+    @staticmethod
+    def _source_key(row: dict[str, Any]) -> str:
+        metadata = _json(row.get("source_metadata"), {})
+        if not isinstance(metadata, dict):
+            return ""
+        root = str(metadata.get("root") or "").strip()
+        relative = str(metadata.get("relative_path") or "").replace("\\", "/").strip("/")
+        return f"{root}:{relative}" if root and relative else ""
+
+    @staticmethod
+    def _filesystem_source_key(row: dict[str, Any]) -> str:
+        relative = str(row.get("relative_path") or "").replace(chr(92), "/").strip("/")
+        return f"{str(row.get('root') or '').strip()}:{relative}"
+
     def _filesystem_candidates(self, user_id: str = "") -> list[dict[str, Any]]:
         roots = [
             ("visual_assets", config.VISUAL_ASSET_DIR),
             ("outputs", config.OUTPUT_DIR),
             ("knowledge", config.KNOWLEDGE_DIR),
         ]
+        # Additional roots may be a parent of one of the canonical roots
+        # (the default ``data`` root is).  Keep the canonical walk as the
+        # source of truth so a broader walk cannot re-import originals,
+        # thumbnails, or generated renditions as loose user assets.
+        canonical_roots = {
+            Path(config.VISUAL_ASSET_DIR).resolve(): "visual_assets",
+            Path(config.OUTPUT_DIR).resolve(): "outputs",
+            Path(config.KNOWLEDGE_DIR).resolve(): "knowledge",
+        }
+        known_roots = {Path(value).resolve() for _label, value in roots}
+        for value in getattr(config, "DATA_ORGANIZATION_IMPORT_ROOTS", ()):
+            root = Path(value)
+            try:
+                resolved_root = root.resolve()
+            except OSError:
+                continue
+            if resolved_root in known_roots:
+                continue
+            known_roots.add(resolved_root)
+            roots.append((root.name or "local_data", root))
         records: list[dict[str, Any]] = []
         seen: set[Path] = set()
         local_owner = False
@@ -198,13 +295,18 @@ class DataOrganizationService:
                 # Loose output files have no owner metadata.  They are only
                 # discoverable by the explicitly designated local owner;
                 # remote users receive their own artifact rows instead.
-                if user_id and root_label == "outputs" and not local_owner:
+                if user_id and root_label in {"outputs", "output", "mobile-shots", "data"} and not local_owner:
                     continue
                 if resolved in seen or resolved.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
                     continue
+                if any(
+                    canonical_root != root.resolve() and canonical_root in resolved.parents
+                    for canonical_root in canonical_roots
+                ):
+                    continue
                 if root_label == "visual_assets" and path.name.startswith(("thumbnail", "rendition-")):
                     continue
-                if root_label == "outputs" and relative.startswith("playwright/"):
+                if root_label in {"outputs", "output"} and relative.startswith("playwright/"):
                     continue
                 kind = self._kind(resolved)
                 if kind == "other":
@@ -220,31 +322,39 @@ class DataOrganizationService:
                     "kind": kind,
                     "sha256": digest,
                     "size_bytes": resolved.stat().st_size,
+                    "_base_path": str(root.resolve()),
                 })
         return records
 
     def inventory(self, user_id: str, *, project_id: str = "", persist: bool = True) -> dict[str, Any]:
         if project_id and not self.session_store.get_project(project_id, user_id):
             raise ValueError("project 不屬於目前使用者")
+        if persist:
+            self._reconcile_derived_assets(user_id, project_id)
         asset_sql = "SELECT * FROM visual_assets WHERE user_id=?"
         asset_params: tuple[Any, ...] = (user_id,)
         if project_id:
             asset_sql += " AND project_id=?"
             asset_params += (project_id,)
-        assets = self.visual_store._rows(asset_sql, asset_params)
+        all_assets = self.visual_store._rows(asset_sql, asset_params)
+        assets = [row for row in all_assets if row.get("source") != "derived_thumbnail"]
         visual_scope = self._owned_visual_scope(user_id, project_id)
         snapshot = self.session_store.export_sync_snapshot(user_id, project_id=project_id or None, limit=5000)
         knowledge = self._knowledge_documents()
         filesystem = self._filesystem_candidates(user_id)
 
+        # Include retained derivative rows in the path set so their generated
+        # files are not reclassified as loose imports after reconciliation.
         registered_paths = {
             str(Path(str(row.get("storage_path") or "")).resolve())
-            for row in assets if row.get("storage_path")
+            for row in all_assets if row.get("storage_path")
         }
+        registered_source_keys = {key for key in (self._source_key(row) for row in all_assets) if key}
         unregistered = [
             row for row in filesystem
             if row["root"] != "knowledge"
-            and str((Path(config.VISUAL_ASSET_DIR if row["root"] == "visual_assets" else config.OUTPUT_DIR) / row["relative_path"]).resolve()) not in registered_paths
+            and self._filesystem_source_key(row) not in registered_source_keys
+            and str((Path(str(row.get("_base_path") or config.OUTPUT_DIR)) / row["relative_path"]).resolve()) not in registered_paths
         ]
         asset_types = Counter(str(row.get("asset_type") or "image") for row in assets)
         filesystem_types = Counter(row["kind"] for row in unregistered)
@@ -331,7 +441,7 @@ class DataOrganizationService:
             "duplicate_groups": duplicate_groups[:20],
         }
         manifest = {
-            "roots": ["knowledge", "data/visual-assets", "outputs"],
+            "roots": sorted({str(row["root"]) for row in filesystem}),
             "filesystem_candidates": len(filesystem),
             "unregistered_candidates": len(unregistered),
             "sample_unregistered": [{key: row[key] for key in ("root", "relative_path", "kind", "sha256")} for row in unregistered[:20]],
@@ -409,7 +519,7 @@ class DataOrganizationService:
             ("visual_people", "person"), ("visual_scenes", "scene"), ("visual_events", "event"),
         ):
             if table == "visual_assets":
-                rows = self.visual_store._rows("SELECT * FROM visual_assets WHERE user_id=?" + (" AND project_id=?" if project_id else ""), (user_id, project_id) if project_id else (user_id,))
+                rows = self.visual_store._rows("SELECT * FROM visual_assets WHERE user_id=? AND COALESCE(source,'')!='derived_thumbnail'" + (" AND project_id=?" if project_id else ""), (user_id, project_id) if project_id else (user_id,))
             else:
                 ids = visual_scope[resource_type]
                 if not ids:
@@ -420,19 +530,34 @@ class DataOrganizationService:
             catalog.extend((resource_type, str(row["id"]), row) for row in rows)
         for document in self._knowledge_documents():
             catalog.append(("knowledge_document", str(document["id"]), document))
+        visual_path_sql = "SELECT storage_path FROM visual_assets WHERE user_id=?"
+        visual_path_params: tuple[Any, ...] = (user_id,)
+        if project_id:
+            visual_path_sql += " AND project_id=?"
+            visual_path_params += (project_id,)
         registered_paths = {
-            str(Path(str(row[2].get("storage_path") or "")).resolve())
-            for row in catalog if row[0] == "visual_asset" and row[2].get("storage_path")
+            str(Path(str(row["storage_path"] or "")).resolve())
+            for row in self.visual_store._conn.execute(visual_path_sql, visual_path_params).fetchall()
+            if row["storage_path"]
         }
-        root_paths = {"visual_assets": Path(config.VISUAL_ASSET_DIR), "outputs": Path(config.OUTPUT_DIR)}
+        registered_source_keys = {
+            key for key in (
+                self._source_key(row)
+                for row in self.visual_store._rows(
+                    "SELECT source_metadata FROM visual_assets WHERE user_id=?" + (" AND project_id=?" if project_id else ""),
+                    (user_id, project_id) if project_id else (user_id,),
+                )
+            ) if key
+        }
         for candidate in self._filesystem_candidates(user_id):
             if candidate["root"] == "knowledge":
                 continue
-            root = root_paths.get(str(candidate["root"]))
+            root = Path(str(candidate.get("_base_path") or ""))
             if not root:
                 continue
             resolved = (root / str(candidate["relative_path"])).resolve()
-            if str(resolved) in registered_paths:
+            source_key = self._filesystem_source_key(candidate)
+            if str(resolved) in registered_paths or source_key in registered_source_keys:
                 continue
             candidate = {**candidate, "path": resolved}
             resource_id = _stable_id("loose_file", user_id, candidate["root"], candidate["relative_path"], candidate["sha256"])

@@ -58,6 +58,7 @@ def sync_env(tmp_db,tmp_output_dir,tmp_path,monkeypatch):
     )
     monkeypatch.setattr(config,"VISUAL_ASSET_DIR",asset_dir)
     monkeypatch.setattr(config,"VISUAL_EXPORT_DIR",export_dir)
+    monkeypatch.setattr(config,"DATA_ORGANIZATION_IMPORT_ROOTS",())
     monkeypatch.setattr(config,"KNOWLEDGE_DIR",knowledge_dir)
     monkeypatch.setattr(config,"PLAYBOOK_DIR",knowledge_dir / "劇本")
     monkeypatch.setattr(config,"DRIVE_DOCS_DIR",knowledge_dir / "雲端文件")
