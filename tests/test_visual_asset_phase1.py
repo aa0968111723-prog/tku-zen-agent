@@ -253,3 +253,46 @@ def test_upload_records_project_id_when_provided(visual_env, tmp_db):
         row = store._rows("SELECT project_id,owner_id FROM visual_assets WHERE id=?", (item["asset_id"],))[0]
         assert row["project_id"] == project_id
         assert row["owner_id"]
+
+
+def test_process_restart_does_not_downgrade_verified_review_status(visual_env):
+    with TestClient(main.app) as client:
+        item = upload(client, picture(), auto=False).json()["items"][0]
+        asset_id = item["asset_id"]
+    store = visual_assets.get_visual_store()
+    store.create_job(asset_id)
+    with store._lock:
+        store._conn.execute("UPDATE visual_assets SET review_status='verified' WHERE id=?", (asset_id,))
+        store._conn.commit()
+    store.close()
+    visual_assets._visual_store = None
+    reopened = visual_assets.get_visual_store()
+    row = reopened._rows("SELECT review_status,processing_state FROM visual_assets WHERE id=?", (asset_id,))[0]
+    assert row["review_status"] == "verified"
+    assert row["processing_state"] == "failed"
+    job = reopened._rows(
+        "SELECT status,error_code FROM visual_analysis_jobs WHERE asset_id=? ORDER BY created_at DESC LIMIT 1",
+        (asset_id,),
+    )[0]
+    assert job["status"] == "failed"
+    assert job["error_code"] == "interrupted_process"
+
+
+def test_analyze_does_not_read_escaped_storage_path(visual_env):
+    with TestClient(main.app) as client:
+        item = upload(client, picture(), auto=False).json()["items"][0]
+        asset_id = item["asset_id"]
+        store = visual_assets.get_visual_store()
+        bait = visual_env / "secret-for-vision.txt"
+        bait.write_text("do-not-send-to-vision", encoding="utf-8")
+        store._conn.execute("UPDATE visual_assets SET storage_path=? WHERE id=?", (str(bait), asset_id))
+        store._conn.commit()
+        response = client.post(f"/api/visual-assets/{asset_id}/analyze")
+        assert response.status_code == 404
+        assert bait.read_text(encoding="utf-8") == "do-not-send-to-vision"
+
+
+def test_visual_search_limit_is_rejected_above_cap(visual_env):
+    with TestClient(main.app) as client:
+        response = client.get("/api/visual-assets/search", params={"limit": 1000})
+        assert response.status_code == 422

@@ -494,9 +494,12 @@ class VisualAssetStore:
                        error_code='interrupted_process',error_message='服務重新啟動，請重試分析',updated_at=?
                    WHERE status='running'""",(stamp,),
             )
+            # Do not overwrite review_status: a verified/probable asset must
+            # not become failed just because the process restarted mid-job.
             self._conn.execute(
-                """UPDATE visual_assets SET processing_state='failed',review_status='failed',updated_at=?
-                   WHERE id IN (SELECT asset_id FROM visual_analysis_jobs WHERE error_code='interrupted_process')""",(stamp,),
+                """UPDATE visual_assets SET processing_state='failed',updated_at=?
+                   WHERE id IN (SELECT asset_id FROM visual_analysis_jobs WHERE error_code='interrupted_process')
+                     AND processing_state IN ('running','pending','queued','')""",(stamp,),
             )
             for name in SCENE_NAMES:
                 self._conn.execute(

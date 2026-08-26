@@ -150,8 +150,9 @@ class LibraryContextResolver:
         requirements = context["output_requirements"]
         project = context.get("project") or {}
         augmented_query = " ".join(filter(None, [query, str((context.get("scene") or {}).get("title") or ""), str(project.get("name") or "")]))
+        capped = max(1, min(int(limit or 30), 60))
         items, total, parsed = self.visual_store.search(
-            user_id, query=augmented_query, page=page, limit=limit,
+            user_id, query=augmented_query, page=page, limit=capped,
             school=str(requirements.get("school") or ""), scene=str(requirements.get("scene") or ""),
             ratio=str(requirements.get("ratio") or ""), people_min=int(requirements.get("people_min") or 0),
             quality_min=float(requirements.get("quality_min") or 0), brightness_min=float(requirements.get("brightness_min") or 0),
@@ -160,5 +161,5 @@ class LibraryContextResolver:
         for item in items:
             item.setdefault("recommendation_reasons", []).insert(0, "符合 Library → Project → Scene → Shot 任務脈絡")
             item["context"] = {"project_id": project.get("id", ""), "scene_position": scene_position, "shot_position": shot_position}
-        return {"context": context, "items": items, "total": total, "page": page, "limit": limit, "parsed_conditions": parsed, "acl_first": True}
+        return {"context": context, "items": items, "total": total, "page": page, "limit": capped, "parsed_conditions": parsed, "acl_first": True}
 

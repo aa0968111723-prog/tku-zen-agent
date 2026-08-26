@@ -121,6 +121,7 @@ async def get_http_client() -> httpx.AsyncClient:
                     timeout=httpx.Timeout(180.0, connect=15.0),
                     limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
                     headers={"Accept": "application/json", "Content-Type": "application/json"},
+                    follow_redirects=False,
                 )
     return _client
 
