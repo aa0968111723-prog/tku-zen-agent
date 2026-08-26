@@ -264,20 +264,26 @@ SCENE_NAMES = (
 IMAGE_MIME = {
     "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
     "image/gif": ".gif", "image/avif": ".avif", "image/jfif": ".jfif",
+    "image/tiff": ".tiff", "image/bmp": ".bmp", "image/x-icon": ".ico", "image/x-portable-pixmap": ".ppm",
 }
 RAW_IMAGE_MIME = {
     "image/x-canon-cr2": ".cr2", "image/x-sony-arw": ".arw",
     "image/vnd.adobe.photoshop": ".psd", "image/svg+xml": ".svg",
+    "image/x-adobe-dng": ".dng", "image/x-raw": ".raw", "image/heic": ".heic", "image/heif": ".heif",
 }
 VIDEO_MIME = {
     "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm",
     "video/x-m4v": ".m4v", "video/x-msvideo": ".avi", "video/x-matroska": ".mkv",
-    "video/mp2t": ".mts",
+    "video/mp2t": ".mts", "video/x-m2ts": ".m2ts", "video/3gpp": ".3gp",
+    "video/x-ms-wmv": ".wmv", "video/x-flv": ".flv", "application/mxf": ".mxf",
+    "video/vnd.rn-realmedia": ".rm",
 }
 AUDIO_MIME = {
     "audio/mpeg": ".mp3", "audio/wav": ".wav", "audio/x-wav": ".wav",
     "audio/mp4": ".m4a", "audio/x-m4a": ".m4a", "audio/flac": ".flac",
     "audio/ogg": ".ogg", "audio/aac": ".aac", "audio/x-ms-wma": ".wma",
+    "audio/aiff": ".aiff", "audio/x-aiff": ".aif", "audio/opus": ".opus",
+    "audio/midi": ".mid", "audio/x-midi": ".midi",
 }
 DOCUMENT_MIME = {
     "application/pdf": ".pdf",
@@ -291,25 +297,64 @@ DOCUMENT_MIME = {
     "text/tab-separated-values": ".tsv", "text/html": ".html", "application/xhtml+xml": ".html",
     "text/xml": ".xml", "application/xml": ".xml", "text/ini": ".ini",
     "application/x-subrip": ".srt", "text/srt": ".srt", "application/x-edl": ".edl",
+    "application/msword": ".doc", "text/rtf": ".rtf", "application/rtf": ".rtf",
+    "application/vnd.oasis.opendocument.text": ".odt",
+    "application/vnd.oasis.opendocument.spreadsheet": ".ods",
+    "application/vnd.oasis.opendocument.presentation": ".odp",
+    "application/oxps": ".oxps", "application/x-ole-storage": ".odc",
+    "text/x-log": ".log", "text/calendar": ".ics", "application/x-7z-compressed": ".7z",
+    "application/vnd.ms-powerpoint": ".ppt", "application/illustrator": ".ai",
+    "application/x-subtitle": ".lrc", "text/x-jsonl": ".jsonl", "application/x-xml-sidecar": ".sxml",
+    "application/oxps-package": ".xps", "application/x-relation-sidecar": ".rels",
 }
 GENERIC_BINARY_MIME = {
     "application/zip": ".zip", "application/x-zip-compressed": ".zip",
     "application/x-wondershare-project": ".wfp", "application/x-wondershare-bundle": ".wfpbundle",
     "application/x-video-sidecar": ".bdm", "application/x-video-index": ".cpi",
     "application/x-video-playlist": ".mpl", "application/octet-stream": ".bin",
+    "application/x-after-effects": ".aep", "application/x-notion-effect": ".nbeffect",
+    "application/x-creative-preset": ".cfpreset", "application/x-motion-template": ".mogrt",
+    "application/x-premiere-preset": ".prm", "application/x-3d-object": ".obj",
+    "model/gltf+json": ".gltf", "model/gltf-binary": ".glb", "model/obj": ".obj",
+    "application/x-blender": ".blend", "application/x-fbx": ".fbx", "model/vnd.collada+xml": ".dae",
+    "model/stl": ".stl", "application/x-3ds": ".3ds", "font/ttf": ".ttf", "font/otf": ".otf",
+    "font/woff": ".woff", "font/woff2": ".woff2",
+    "application/x-premiere-project": ".prproj", "application/x-powerdirector-project": ".pds",
+    "application/x-premiere-preset-binary": ".prfpset", "application/x-editing-cache": ".ewc2",
+    "application/x-editing-cache-v1": ".ewc", "application/x-title-sidecar": ".nbtitle",
+    "application/x-marker-sidecar": ".mrk", "application/x-peak-file": ".pk",
+    "application/x-wordpress-export": ".wpress", "font/collection": ".ttc",
+    "video/vnd.rn-realmedia": ".rm", "application/x-gzip": ".gz", "application/x-7z-compressed": ".7z",
 }
 EXTRA_MIME_BY_EXTENSION = {
     ".cr2": "image/x-canon-cr2", ".arw": "image/x-sony-arw", ".psd": "image/vnd.adobe.photoshop",
-    ".svg": "image/svg+xml", ".m4v": "video/x-m4v", ".avi": "video/x-msvideo",
-    ".mkv": "video/x-matroska", ".mts": "video/mp2t", ".mp3": "audio/mpeg",
+    ".svg": "image/svg+xml", ".dng": "image/x-adobe-dng", ".raw": "image/x-raw", ".heic": "image/heic", ".heif": "image/heif",
+    ".tif": "image/tiff", ".tiff": "image/tiff", ".bmp": "image/bmp", ".ico": "image/x-icon", ".ppm": "image/x-portable-pixmap",
+    ".m4v": "video/x-m4v", ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska", ".mts": "video/mp2t", ".m2ts": "video/x-m2ts", ".3gp": "video/3gpp",
+    ".wmv": "video/x-ms-wmv", ".flv": "video/x-flv", ".mxf": "application/mxf", ".mp3": "audio/mpeg",
     ".wav": "audio/wav", ".m4a": "audio/mp4", ".flac": "audio/flac", ".ogg": "audio/ogg",
-    ".aac": "audio/aac", ".wma": "audio/x-ms-wma", ".wfp": "application/x-wondershare-project",
+    ".aac": "audio/aac", ".wma": "audio/x-ms-wma", ".aiff": "audio/aiff", ".aif": "audio/x-aiff",
+    ".opus": "audio/opus", ".mid": "audio/midi", ".midi": "audio/x-midi", ".wfp": "application/x-wondershare-project",
     ".wfpbundle": "application/x-wondershare-bundle", ".bdm": "application/x-video-sidecar",
     ".cpi": "application/x-video-index", ".mpl": "application/x-video-playlist",
     ".zip": "application/zip", ".json": "application/json", ".yaml": "application/yaml",
     ".yml": "application/yaml", ".tsv": "text/tab-separated-values", ".html": "text/html",
     ".ini": "text/ini", ".srt": "application/x-subrip", ".edl": "application/x-edl",
-    ".fcpxml": "application/xml", ".xml": "application/xml", ".url": "text/plain",
+    ".fcpxml": "application/xml", ".xml": "application/xml", ".url": "text/plain", ".doc": "application/msword",
+    ".rtf": "text/rtf", ".odt": "application/vnd.oasis.opendocument.text", ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+    ".odp": "application/vnd.oasis.opendocument.presentation", ".oxps": "application/oxps", ".odc": "application/x-ole-storage",
+    ".log": "text/x-log", ".ics": "text/calendar", ".ppt": "application/vnd.ms-powerpoint", ".ai": "application/illustrator",
+    ".lrc": "application/x-subtitle", ".jsonl": "text/x-jsonl", ".sxml": "application/x-xml-sidecar", ".xps": "application/oxps-package", ".rels": "application/x-relation-sidecar",
+    ".aep": "application/x-after-effects", ".nbeffect": "application/x-notion-effect",
+    ".cfpreset": "application/x-creative-preset", ".mogrt": "application/x-motion-template", ".prm": "application/x-premiere-preset",
+    ".obj": "model/obj", ".gltf": "model/gltf+json", ".glb": "model/gltf-binary", ".blend": "application/x-blender",
+    ".fbx": "application/x-fbx", ".dae": "model/vnd.collada+xml", ".stl": "model/stl", ".3ds": "application/x-3ds",
+    ".ttf": "font/ttf", ".otf": "font/otf", ".woff": "font/woff", ".woff2": "font/woff2",
+    ".prproj": "application/x-premiere-project", ".pds": "application/x-powerdirector-project", ".prfpset": "application/x-premiere-preset-binary",
+    ".ewc2": "application/x-editing-cache", ".ewc": "application/x-editing-cache-v1", ".nbtitle": "application/x-title-sidecar",
+    ".mrk": "application/x-marker-sidecar", ".pk": "application/x-peak-file", ".wpress": "application/x-wordpress-export",
+    ".ttc": "font/collection", ".rm": "video/vnd.rn-realmedia", ".gz": "application/x-gzip", ".7z": "application/x-7z-compressed",
 }
 ALLOWED_MIME = {**IMAGE_MIME, **RAW_IMAGE_MIME, **VIDEO_MIME, **AUDIO_MIME, **DOCUMENT_MIME, **GENERIC_BINARY_MIME}
 STATUS_VALUES = {"verified", "probable", "pending_review", "conflicted", "failed"}
@@ -464,6 +509,19 @@ def inspect_media(content: bytes, mime_type: str, filename: str = "") -> ImageIn
     if not content:
         raise VisualAssetError("素材內容是空的", code="empty_file")
     digest = hashlib.sha256(content).hexdigest()
+    if content == b"external-binary" and mime_type in DOCUMENT_MIME:
+        # Data-folder imports may intentionally avoid loading a very large
+        # document into memory.  Keep a truthful catalogue row and an explicit
+        # generic inspection marker; OCR/parser retry can be scheduled later.
+        return ImageInspection(
+            width=0, height=0, orientation="file", exif_date="", sha256=digest,
+            perceptual_hash=digest[:16], color_embedding=[], blur_score=0,
+            brightness_score=0, quality_score=0,
+            suitability={"poster": False, "video": False, "instagram_cover": False,
+                         "reasons": ["文件過大，已完成 metadata 目錄化；OCR 延後"]},
+            thumbnail=_placeholder_thumbnail("DOCUMENT", filename or mime_type),
+            asset_type="document",
+        )
     if mime_type in DOCUMENT_MIME:
         try:
             text = _document_text(content, mime_type)[:20000]

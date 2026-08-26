@@ -191,7 +191,7 @@ async function loadDashboard() {
 }
 
 function setUploadFiles(files, mode = "batch") {
-  const extensions = /\.(jpe?g|png|webp|gif|avif|jfif|cr2|arw|psd|svg|mp4|mov|webm|m4v|avi|mkv|mts|mp3|wav|m4a|flac|ogg|aac|wma|pdf|docx|pptx|xlsx|gs|txt|md|csv|json|yaml|yml|tsv|html|xml|ini|srt|edl|fcpxml|url|zip|wfp|wfpbundle|bdm|cpi|mpl)$/i;
+  const extensions = /\.(jpe?g|png|webp|gif|avif|jfif|cr2|arw|dng|raw|heic|heif|psd|svg|tiff?|bmp|ico|ppm|mp4|mov|webm|m4v|avi|mkv|mts|m2ts|3gp|wmv|flv|mxf|rm|mp3|wav|m4a|flac|ogg|aac|wma|aiff?|opus|mid|midi|pdf|doc|docx|odt|ods|odp|oxps|xps|rtf|pptx|xlsx|gs|txt|md|csv|json|jsonl|yaml|yml|tsv|html|xml|ini|log|ics|srt|lrc|edl|fcpxml|sxml|rels|url|zip|7z|wfp|wfpbundle|bdm|cpi|mpl|aep|prproj|pds|prfpset|nbeffect|cfpreset|mogrt|prm|obj|gltf|glb|blend|fbx|dae|stl|3ds|ttf|ttc|otf|woff2?)$/i;
   const accepted = [...files].filter((file) => file.type.startsWith("image/") || file.type.startsWith("video/") || file.type.startsWith("audio/") || extensions.test(file.name));
   visualState.uploadFiles = accepted.slice(0, mode === "folder" ? 300 : 30);
   visualState.uploadMode = mode;

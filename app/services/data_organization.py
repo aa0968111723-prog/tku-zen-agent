@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import os
 import re
 from collections import Counter, defaultdict
 from dataclasses import asdict, is_dataclass
@@ -23,16 +24,25 @@ from .visual_assets import ALLOWED_MIME, EXTRA_MIME_BY_EXTENSION, VisualAssetSto
 
 MIGRATION_VERSION = "0005_data_organization_depth"
 VALID_STATUSES = {"verified", "probable", "pending_review", "conflicted", "failed"}
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".avif", ".jfif", ".cr2", ".arw", ".psd", ".svg"}
-DECODABLE_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".jfif"}
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv", ".mts"}
-AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma"}
+IMAGE_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif", ".avif", ".jfif",
+    ".cr2", ".arw", ".dng", ".raw", ".psd", ".svg", ".tif", ".tiff", ".bmp", ".ico", ".ppm",
+}
+DECODABLE_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".jfif", ".tif", ".tiff", ".bmp", ".ico", ".ppm"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv", ".mts", ".m2ts", ".3gp", ".wmv", ".flv", ".mxf", ".rm"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma", ".aiff", ".aif", ".opus", ".mid", ".midi"}
 DOCUMENT_EXTENSIONS = {
     ".md", ".txt", ".csv", ".pdf", ".docx", ".pptx", ".xlsx", ".gs", ".json", ".yaml", ".yml",
     ".tsv", ".html", ".xml", ".ini", ".srt", ".edl", ".fcpxml", ".url",
-    ".zip", ".wfp", ".wfpbundle", ".bdm", ".cpi", ".mpl",
+    ".zip", ".7z", ".wfp", ".wfpbundle", ".bdm", ".cpi", ".mpl", ".doc", ".rtf", ".log", ".ics", ".jsonl", ".lrc", ".sxml", ".xps", ".rels", ".ppt", ".ai", ".odt", ".ods", ".odp", ".oxps", ".odc",
+    ".aep", ".nbeffect", ".cfpreset", ".mogrt", ".prm", ".obj", ".gltf", ".glb", ".blend", ".fbx", ".dae", ".stl", ".3ds",
+    ".ttf", ".ttc", ".otf", ".woff", ".woff2", ".prproj", ".pds", ".prfpset", ".ewc2", ".ewc", ".nbtitle", ".mrk", ".pk", ".wpress", ".rm", ".gz",
 }
-SUPPLEMENTAL_BINARY_EXTENSIONS = {".zip", ".wfp", ".wfpbundle", ".bdm", ".cpi", ".mpl"}
+SUPPLEMENTAL_BINARY_EXTENSIONS = {
+    ".zip", ".7z", ".wfp", ".wfpbundle", ".bdm", ".cpi", ".mpl", ".doc", ".odt", ".ods", ".odp", ".oxps", ".odc", ".ppt", ".ai",
+    ".aep", ".nbeffect", ".cfpreset", ".mogrt", ".prm", ".obj", ".gltf", ".glb", ".blend", ".fbx", ".dae", ".stl", ".3ds",
+    ".ttf", ".ttc", ".otf", ".woff", ".woff2", ".prproj", ".pds", ".prfpset", ".ewc2", ".ewc", ".nbtitle", ".mrk", ".pk", ".wpress", ".rm", ".gz",
+}
 IGNORED_IMPORT_DIRS = {
     ".git", ".venv", ".pytest_cache", ".playwright-cli", ".claude", ".codex",
     ".codex-remote-attachments", "__pycache__", "node_modules",
@@ -45,11 +55,17 @@ def _stable_id(prefix: str, *parts: object) -> str:
 
 
 def _sha_file(path: Path) -> str:
-    digest = hashlib.sha256()
+    # Python 3.11's file_digest uses the file object's efficient read path and
+    # avoids a Python callback for every 1 MiB chunk.  This matters for the
+    # club's multi-gigabyte camera/video archive while retaining exact SHA-256.
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        try:
+            return hashlib.file_digest(handle, "sha256").hexdigest()
+        except AttributeError:  # pragma: no cover - Python < 3.11 fallback
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+            return digest.hexdigest()
 
 
 def _status(value: object, default: str = "pending_review") -> str:
@@ -78,6 +94,31 @@ class DataOrganizationService:
     ) -> None:
         self.session_store = session_store or get_store()
         self.visual_store = visual_store or get_visual_store()
+        # A full workspace inventory can hash hundreds of gigabytes.  Keep
+        # the just-computed scan on this service instance so a caller that
+        # inventories and then synchronizes in one request does not hash every
+        # large video/archive a second time.  Each mapping still verifies
+        # size+mtime before it writes server truth.
+        self._filesystem_scan_cache: dict[tuple[str, bool], list[dict[str, Any]]] = {}
+        self._filesystem_scan_errors: list[dict[str, str]] = []
+
+    @staticmethod
+    def _id_chunks(ids: Iterable[str], size: int = 400) -> Iterable[tuple[str, ...]]:
+        """Yield bounded id batches for SQLite's variable limit.
+
+        A completed workspace import can contain tens of thousands of assets.
+        SQLite rejects an ``IN (...)`` statement once it exceeds the build's
+        host-parameter limit (commonly 999 or 32766), so every ACL/relation
+        lookup must stay comfortably below that limit.
+        """
+        batch: list[str] = []
+        for value in ids:
+            batch.append(str(value))
+            if len(batch) >= size:
+                yield tuple(batch)
+                batch = []
+        if batch:
+            yield tuple(batch)
 
     def _owned_visual_scope(self, user_id: str, project_id: str = "") -> dict[str, set[str]]:
         """Return canonical entity ids reachable from assets the caller may own.
@@ -102,43 +143,49 @@ class DataOrganizationService:
             "scene": set(),
         }
         if asset_ids:
-            placeholders = ",".join("?" for _ in asset_ids)
-            observations = self.visual_store._rows(
-                f"SELECT entity_type,entity_id FROM visual_observations WHERE asset_id IN ({placeholders}) AND entity_id!='' AND review_action!='ignored'",
-                tuple(asset_ids),
-            )
-            for row in observations:
-                kind = str(row.get("entity_type") or "")
-                if kind in scope:
-                    scope[kind].add(str(row["entity_id"]))
+            for chunk in self._id_chunks(sorted(asset_ids)):
+                placeholders = ",".join("?" for _ in chunk)
+                observations = self.visual_store._rows(
+                    f"SELECT entity_type,entity_id FROM visual_observations WHERE asset_id IN ({placeholders}) AND entity_id!='' AND review_action!='ignored'",
+                    chunk,
+                )
+                for row in observations:
+                    kind = str(row.get("entity_type") or "")
+                    if kind in scope:
+                        scope[kind].add(str(row["entity_id"]))
         for table, kind in (("visual_people", "person"), ("visual_events", "event")):
             ids = scope[kind]
             if not ids:
                 continue
-            placeholders = ",".join("?" for _ in ids)
-            for row in self.visual_store._rows(
-                f"SELECT school_id,club_id FROM {table} WHERE id IN ({placeholders})", tuple(ids),
-            ):
-                if row.get("school_id"):
-                    scope["school"].add(str(row["school_id"]))
-                if row.get("club_id"):
-                    scope["club"].add(str(row["club_id"]))
+            for chunk in self._id_chunks(sorted(ids)):
+                placeholders = ",".join("?" for _ in chunk)
+                for row in self.visual_store._rows(
+                    f"SELECT school_id,club_id FROM {table} WHERE id IN ({placeholders})", chunk,
+                ):
+                    if row.get("school_id"):
+                        scope["school"].add(str(row["school_id"]))
+                    if row.get("club_id"):
+                        scope["club"].add(str(row["club_id"]))
         if scope["club"]:
-            placeholders = ",".join("?" for _ in scope["club"])
-            for row in self.visual_store._rows(
-                f"SELECT school_id FROM visual_clubs WHERE id IN ({placeholders})", tuple(scope["club"]),
-            ):
-                scope["school"].add(str(row["school_id"]))
+            for chunk in self._id_chunks(sorted(scope["club"])):
+                placeholders = ",".join("?" for _ in chunk)
+                for row in self.visual_store._rows(
+                    f"SELECT school_id FROM visual_clubs WHERE id IN ({placeholders})", chunk,
+                ):
+                    scope["school"].add(str(row["school_id"]))
         return scope
 
     def _scope_count(self, table: str, ids: set[str], extra: str = "", params: tuple[Any, ...] = ()) -> int:
         if not ids:
             return 0
-        placeholders = ",".join("?" for _ in ids)
         clause = f" AND {extra}" if extra else ""
-        return int(self.visual_store._conn.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE id IN ({placeholders}){clause}", tuple(ids) + params,
-        ).fetchone()[0])
+        total = 0
+        for chunk in self._id_chunks(sorted(ids)):
+            placeholders = ",".join("?" for _ in chunk)
+            total += int(self.visual_store._conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE id IN ({placeholders}){clause}", chunk + params,
+            ).fetchone()[0])
+        return total
 
     def _knowledge_documents(self) -> list[dict[str, Any]]:
         grouped: dict[str, list[Any]] = defaultdict(list)
@@ -262,7 +309,7 @@ class DataOrganizationService:
         relative = str(row.get("relative_path") or "").replace(chr(92), "/").strip("/")
         return f"{str(row.get('root') or '').strip()}:{relative}"
 
-    def _lineage_source_keys(self, user_id: str) -> set[str]:
+    def _lineage_source_keys(self, user_id: str, *, include_failed: bool = True) -> set[str]:
         """Return source keys recorded for loose files, including SHA dedupes.
 
         A filesystem duplicate can intentionally reuse an existing visual
@@ -272,10 +319,11 @@ class DataOrganizationService:
         unregistered on every reload.
         """
         keys: set[str] = set()
-        rows = self.visual_store._conn.execute(
-            "SELECT metadata FROM data_lineage WHERE owner_id=? AND resource_type='filesystem_asset'",
-            (user_id,),
-        ).fetchall()
+        sql = "SELECT metadata FROM data_lineage WHERE owner_id=? AND resource_type='filesystem_asset'"
+        params: tuple[Any, ...] = (user_id,)
+        if not include_failed:
+            sql += " AND verification_status!='failed'"
+        rows = self.visual_store._conn.execute(sql, params).fetchall()
         for row in rows:
             metadata = _json(row[0], {})
             if not isinstance(metadata, dict):
@@ -287,6 +335,15 @@ class DataOrganizationService:
         return keys
 
     def _filesystem_candidates(self, user_id: str = "", *, include_other: bool = False) -> list[dict[str, Any]]:
+        cached = self._filesystem_scan_cache.get((user_id, include_other))
+        if cached is not None:
+            return cached
+        if not include_other:
+            all_cached = self._filesystem_scan_cache.get((user_id, True))
+            if all_cached is not None:
+                supported = [row for row in all_cached if row.get("kind") != "other"]
+                self._filesystem_scan_cache[(user_id, False)] = supported
+                return supported
         roots = [
             ("visual_assets", config.VISUAL_ASSET_DIR),
             ("outputs", config.OUTPUT_DIR),
@@ -314,6 +371,28 @@ class DataOrganizationService:
             roots.append((root.name or "local_data", root))
         records: list[dict[str, Any]] = []
         seen: set[Path] = set()
+        scan_errors: list[dict[str, str]] = []
+        known_fingerprints: dict[tuple[str, str], tuple[str, int, int]] = {}
+        if user_id:
+            # Reuse the server-truth fingerprint from a prior successful
+            # mapping when size and mtime are unchanged.  This makes a later
+            # inventory of a 400GB archive an inexpensive metadata pass while
+            # still hashing every new or changed file exactly once.
+            for lineage in self.visual_store._rows(
+                "SELECT original_path,sha256,metadata FROM data_lineage WHERE owner_id=? AND resource_type='filesystem_asset'",
+                (user_id,),
+            ):
+                metadata = _json(lineage.get("metadata"), {})
+                if not isinstance(metadata, dict):
+                    continue
+                root_name = str(metadata.get("root") or "")
+                relative_name = str(metadata.get("relative_path") or "")
+                if root_name and relative_name and lineage.get("sha256"):
+                    known_fingerprints[(root_name, relative_name)] = (
+                        str(lineage.get("sha256") or ""),
+                        int(metadata.get("size_bytes") or 0),
+                        int(metadata.get("mtime_ns") or 0),
+                    )
         local_owner = False
         if user_id:
             user_row = self.session_store._conn.execute("SELECT is_local FROM users WHERE id=?", (user_id,)).fetchone()
@@ -322,58 +401,79 @@ class DataOrganizationService:
             root = Path(root_value)
             if not root.exists():
                 continue
-            for path in root.rglob("*"):
-                if not path.is_file():
-                    continue
-                if any(part in IGNORED_IMPORT_DIRS for part in path.parts):
-                    continue
-                # Office lock files (for example ``~$agenda.pptx``) are
-                # transient implementation details, not user documents.
-                if path.name.startswith("~$"):
-                    continue
-                try:
-                    resolved = path.resolve(strict=True)
-                    relative = resolved.relative_to(root.resolve()).as_posix()
-                except (OSError, RuntimeError, ValueError):
-                    continue
-                if user_id and root_label == "visual_assets" and PurePosixPath(relative).parts[:1] != (user_id,):
-                    continue
-                # Loose output files have no owner metadata.  They are only
-                # discoverable by the explicitly designated local owner;
-                # remote users receive their own artifact rows instead.
-                if user_id and not local_owner and root_label not in {"visual_assets", "knowledge"}:
-                    # Additional roots (including the sibling media trees
-                    # auto-discovered for the local workspace) have no
-                    # per-file owner metadata.  Never expose them to a
-                    # non-local account.
-                    continue
-                if resolved in seen or resolved.suffix.lower() in {".sqlite", ".sqlite3", ".db", ".sqlite3-shm", ".sqlite3-wal", ".sqlite3-journal"}:
-                    continue
-                if any(
-                    canonical_root != root.resolve() and canonical_root in resolved.parents
-                    for canonical_root in canonical_roots
-                ):
-                    continue
-                if root_label == "visual_assets" and path.name.startswith(("thumbnail", "rendition-")):
-                    continue
-                if root_label in {"outputs", "output"} and relative.startswith("playwright/"):
-                    continue
-                kind = self._kind(resolved)
-                if kind == "other" and not include_other:
-                    continue
-                seen.add(resolved)
-                try:
-                    digest = _sha_file(resolved) if kind != "other" else ""
-                except OSError:
-                    digest = ""
-                records.append({
-                    "root": root_label,
-                    "relative_path": relative,
-                    "kind": kind,
-                    "sha256": digest,
-                    "size_bytes": resolved.stat().st_size,
-                    "_base_path": str(root.resolve()),
-                })
+            root_resolved = root.resolve()
+            # ``Path.rglob`` aborts the whole inventory when a workspace
+            # contains a dangling junction/symlink (common in archived
+            # node_modules).  os.walk lets us prune ignored/symlinked
+            # directories and continue with the rest of the user's files.
+            def _on_walk_error(error: OSError, *, root_name: str = root_label) -> None:
+                scan_errors.append({"root": root_name, "path": str(getattr(error, "filename", "") or root_resolved), "error": str(error)[:300]})
+
+            for current, directories, filenames in os.walk(root_resolved, topdown=True, followlinks=False, onerror=_on_walk_error):
+                directories[:] = [
+                    name for name in directories
+                    if name not in IGNORED_IMPORT_DIRS and not (Path(current) / name).is_symlink()
+                ]
+                for filename in filenames:
+                    path = Path(current) / filename
+                    if path.is_symlink() or filename.startswith("~$"):
+                        continue
+                    if any(part in IGNORED_IMPORT_DIRS for part in path.parts):
+                        continue
+                    try:
+                        resolved = path.resolve(strict=True)
+                        relative = resolved.relative_to(root_resolved).as_posix()
+                    except (OSError, RuntimeError, ValueError):
+                        continue
+                    if user_id and root_label == "visual_assets" and PurePosixPath(relative).parts[:1] != (user_id,):
+                        continue
+                    # Loose output files have no owner metadata.  They are only
+                    # discoverable by the explicitly designated local owner;
+                    # remote users receive their own artifact rows instead.
+                    if user_id and not local_owner and root_label not in {"visual_assets", "knowledge"}:
+                        # Additional roots (including the sibling media trees
+                        # auto-discovered for the local workspace) have no
+                        # per-file owner metadata.  Never expose them to a
+                        # non-local account.
+                        continue
+                    if resolved in seen or resolved.suffix.lower() in {".sqlite", ".sqlite3", ".db", ".sqlite3-shm", ".sqlite3-wal", ".sqlite3-journal"}:
+                        continue
+                    if any(
+                        canonical_root != root_resolved and canonical_root in resolved.parents
+                        for canonical_root in canonical_roots
+                    ):
+                        continue
+                    if root_label == "visual_assets" and filename.startswith(("thumbnail", "rendition-")):
+                        continue
+                    if root_label in {"outputs", "output"} and relative.startswith("playwright/"):
+                        continue
+                    kind = self._kind(resolved)
+                    if kind == "other" and not include_other:
+                        continue
+                    seen.add(resolved)
+                    try:
+                        stat = resolved.stat()
+                        fingerprint = known_fingerprints.get((root_label, relative))
+                        if kind == "other":
+                            digest = ""
+                        elif fingerprint and fingerprint[1] == stat.st_size and fingerprint[2] == stat.st_mtime_ns:
+                            digest = fingerprint[0]
+                        else:
+                            digest = _sha_file(resolved)
+                    except OSError:
+                        digest = ""
+                        stat = None
+                    records.append({
+                        "root": root_label,
+                        "relative_path": relative,
+                        "kind": kind,
+                        "sha256": digest,
+                        "size_bytes": int(stat.st_size if stat else 0),
+                        "mtime_ns": int(stat.st_mtime_ns if stat else 0),
+                        "_base_path": str(root_resolved),
+                    })
+        self._filesystem_scan_errors = scan_errors
+        self._filesystem_scan_cache[(user_id, include_other)] = records
         return records
 
     def inventory(self, user_id: str, *, project_id: str = "", persist: bool = True) -> dict[str, Any]:
@@ -403,6 +503,8 @@ class DataOrganizationService:
             for row in all_assets if row.get("storage_path")
         }
         registered_source_keys = {key for key in (self._source_key(row) for row in all_assets) if key}
+        # Failed files already have an auditable lineage record, so inventory
+        # does not report them as new candidates.
         registered_source_keys.update(self._lineage_source_keys(user_id))
         unregistered = [
             row for row in filesystem
@@ -443,6 +545,10 @@ class DataOrganizationService:
                 (user_id, project_id) if project_id else (user_id,),
             )
         )
+        failed_lineage = int(self.visual_store._conn.execute(
+            "SELECT COUNT(*) FROM data_lineage WHERE owner_id=? AND resource_type='filesystem_asset' AND verification_status='failed'",
+            (user_id,),
+        ).fetchone()[0])
         sync_failed = int(self.visual_store._conn.execute(
             "SELECT COUNT(*) FROM backend_sync_items i JOIN sync_runs r ON r.id=i.sync_run_id WHERE r.owner_id=? AND i.status='failed'",
             (user_id,),
@@ -481,7 +587,10 @@ class DataOrganizationService:
             "duplicate_assets": sum(1 for row in assets if row.get("duplicate_of")) + len(duplicate_groups),
             "missing_sources": missing_sources,
             "pending_review": pending,
-            "analysis_failed": len(failed_asset_ids),
+            # Include both failed visual analysis jobs and failed filesystem
+            # mappings.  A failed mapping has no visual_assets row by design,
+            # so lineage is the durable counter for those files.
+            "analysis_failed": len(failed_asset_ids) + failed_lineage,
         }
         breakdown = {
             "registered_visual_assets": dict(asset_types),
@@ -494,9 +603,11 @@ class DataOrganizationService:
             "messages_excluded_from_mapping": int(self.session_store._conn.execute("SELECT COUNT(*) FROM messages m JOIN sessions s ON s.id=m.session_id WHERE s.user_id=?", (user_id,)).fetchone()[0]),
             "social_reference_files": sum(1 for row in knowledge if str(row["relative_path"]).startswith("社群/")),
             "sync_failed": sync_failed,
+            "failed_lineage": failed_lineage,
             "duplicate_groups": duplicate_groups[:20],
             "excluded_files": len(excluded_filesystem),
             "excluded_by_extension": dict(excluded_by_extension),
+            "scan_errors": len(self._filesystem_scan_errors),
         }
         manifest = {
             # Report every scanned root, including roots containing only
@@ -507,6 +618,8 @@ class DataOrganizationService:
             "scanned_files": len(scanned_filesystem),
             "excluded_files": len(excluded_filesystem),
             "excluded_by_extension": dict(excluded_by_extension),
+            "scan_errors": len(self._filesystem_scan_errors),
+            "scan_error_samples": self._filesystem_scan_errors[:20],
             "unregistered_candidates": len(unregistered),
             "sample_unregistered": [{key: row[key] for key in ("root", "relative_path", "kind", "sha256")} for row in unregistered[:20]],
             "absolute_paths_exposed": False,
@@ -613,7 +726,8 @@ class DataOrganizationService:
                 )
             ) if key
         }
-        registered_source_keys.update(self._lineage_source_keys(user_id))
+        # Failed lineage remains retryable; do not hide it from the catalog.
+        registered_source_keys.update(self._lineage_source_keys(user_id, include_failed=False))
         for candidate in self._filesystem_candidates(user_id):
             if candidate["root"] == "knowledge":
                 continue
@@ -728,7 +842,21 @@ class DataOrganizationService:
     def _map_resource(self, user_id: str, resource_type: str, resource_id: str, row: dict[str, Any]) -> None:
         if resource_type == "filesystem_asset":
             path = Path(str(row.get("path") or "")).resolve(strict=True)
-            if not path.is_file() or _sha_file(path) != str(row.get("sha256") or ""):
+            if not path.is_file():
+                raise ValueError("來源檔案在盤點後已變更")
+            current_stat = path.stat()
+            # The scanner already computed SHA-256.  Avoid hashing a
+            # multi-gigabyte video/project a second time during the same run;
+            # size + nanosecond mtime is the server-truth change guard. Older
+            # rows without these fields still take the strict hash path.
+            expected_size = int(row.get("size_bytes") or 0)
+            expected_mtime = int(row.get("mtime_ns") or 0)
+            unchanged = (
+                expected_size > 0 and expected_mtime > 0
+                and current_stat.st_size == expected_size
+                and current_stat.st_mtime_ns == expected_mtime
+            )
+            if not unchanged and _sha_file(path) != str(row.get("sha256") or ""):
                 raise ValueError("來源檔案在盤點後已變更")
             relative = f"{row.get('root')}:{row.get('relative_path')}"
             existing_lineage = self.visual_store._rows(
@@ -755,25 +883,34 @@ class DataOrganizationService:
                 # place.  We inspect image/document bytes for metadata, but
                 # only create managed thumbnails; no second multi-GB binary
                 # tree is written under data/visual-assets.
-                inspection_bytes = path.read_bytes() if row.get("kind") == "document" or suffix in DECODABLE_IMAGE_EXTENSIONS else b"external-binary"
+                inspect_document = (
+                    row.get("kind") == "document"
+                    and int(row.get("size_bytes") or current_stat.st_size) <= config.DATA_ORGANIZATION_MAX_DOCUMENT_INSPECTION_BYTES
+                )
+                inspection_bytes = path.read_bytes() if inspect_document or suffix in DECODABLE_IMAGE_EXTENSIONS else b"external-binary"
+                source_metadata = {
+                    "root": row.get("root"), "relative_path": row.get("relative_path"),
+                    "sha256": row.get("sha256"), "file_kind": row.get("kind"),
+                    "inspection_mode": "full" if inspect_document or suffix in DECODABLE_IMAGE_EXTENSIONS else "metadata_only",
+                }
                 imported = self.visual_store.create_asset(
                     user_id=user_id, filename=path.name, mime_type=mime_type, content=inspection_bytes,
                     source="existing_data_import", relative_path=str(row.get("relative_path") or ""),
-                    source_metadata={"root": row.get("root"), "relative_path": row.get("relative_path"), "sha256": row.get("sha256"), "file_kind": row.get("kind")},
+                    source_metadata=source_metadata,
                     external_path=str(path), sha256_override=str(row.get("sha256") or ""),
                 )
                 mapped_asset_id = str(imported["asset_id"])
             source_id = self._source(
                 user_id, source_type="existing_filesystem", original_file=relative,
-                captured_at=str(path.stat().st_mtime_ns), reliability=1.0,
+                captured_at=str(current_stat.st_mtime_ns), reliability=1.0,
             )
             status = "pending_review" if mapped_asset_id else "failed"
             self._lineage(
                 user_id, resource_type, resource_id, original_path=relative,
                 original_source="existing_filesystem", source_id=source_id,
                 sha256=str(row.get("sha256") or ""), confidence=1.0,
-                verification_status=status, updated_at=str(path.stat().st_mtime_ns),
-                metadata={"root": row.get("root"), "relative_path": row.get("relative_path"), "mapped_asset_id": mapped_asset_id, "mime_type": mime_type},
+                verification_status=status, updated_at=str(current_stat.st_mtime_ns),
+                metadata={"root": row.get("root"), "relative_path": row.get("relative_path"), "mapped_asset_id": mapped_asset_id, "mime_type": mime_type, "size_bytes": row.get("size_bytes", 0), "mtime_ns": row.get("mtime_ns", 0)},
             )
             if not mapped_asset_id:
                 raise ValueError(f"不支援匯入的素材格式：{path.suffix.lower() or mime_type}")
@@ -941,6 +1078,34 @@ class DataOrganizationService:
             except Exception as exc:  # one bad item must not roll back completed mappings
                 with self.visual_store._lock:
                     self.visual_store._conn.rollback()
+                    # Keep an auditable server-truth record for an item that
+                    # could not be mapped.  The mapping transaction is rolled
+                    # back above (so no partial asset survives), therefore a
+                    # lineage marker is written here after the rollback.  It
+                    # prevents every inventory from reporting the same broken
+                    # file as a brand-new candidate while retaining enough
+                    # path/fingerprint/error evidence for a later retry.
+                    if resource_type == "filesystem_asset":
+                        self._lineage(
+                            user_id,
+                            resource_type,
+                            resource_id,
+                            original_path=str(row.get("relative_path") or ""),
+                            original_source="existing_filesystem",
+                            sha256=str(row.get("sha256") or ""),
+                            confidence=0.0,
+                            verification_status="failed",
+                            updated_at=str(row.get("mtime_ns") or ""),
+                            metadata={
+                                "root": row.get("root"),
+                                "relative_path": row.get("relative_path"),
+                                "mapped_asset_id": "",
+                                "size_bytes": row.get("size_bytes", 0),
+                                "mtime_ns": row.get("mtime_ns", 0),
+                                "error_code": "mapping_failed",
+                                "error_message": str(exc)[:500],
+                            },
+                        )
                     self.visual_store._conn.execute(
                         "UPDATE backend_sync_items SET status='failed',error_code='mapping_failed',error_message=?,attempts=attempts+1,updated_at=? WHERE sync_run_id=? AND resource_type=? AND resource_id=?",
                         (str(exc)[:500], now(), run_id, resource_type, resource_id),
