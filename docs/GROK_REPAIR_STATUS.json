@@ -94,7 +94,9 @@
   },
   "test_results": [
     {"name": "visual_insforge_fal_phase1", "passed": 42, "failed": 0, "at": "2026-08-26T13:40:00Z"},
-    {"name": "phase1_observation_sqlite_sync", "passed": 48, "failed": 0, "at": "2026-08-26T14:20:00Z"}
+    {"name": "phase1_observation_sqlite_sync", "passed": 48, "failed": 0, "at": "2026-08-26T14:20:00Z"},
+    {"name": "api_session_artifact_frontend_org_regression", "passed": 97, "failed": 0, "at": "2026-08-26T14:55:00Z"},
+    {"name": "organization_insforge_sync_after_project_id", "passed": 19, "failed": 0, "at": "2026-08-26T15:10:00Z"}
   ],
   "commands_executed": [
     "git clone https://github.com/aa0968111723-prog/tku-zen-agent.git",
