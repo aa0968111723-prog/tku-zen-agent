@@ -373,10 +373,12 @@ app/
 │   ├── current_term.py   本學期真實資料
 │   ├── memory.py         工作記憶、事實抽取、對話壓縮
 │   ├── fal.py            fal.ai 視覺服務（圖片理解與視覺稿）
+│   ├── data_organization.py 現有資料盤點、lineage、Entity Graph 與可續傳 mapping
+│   ├── library_context.py ACL-first Library→Project→Scene→Shot 素材解析
 │   └── context.py        請求身分（contextvars）
 ├── skills/               11 個 skill 與規則式路由
 ├── verification/         產出檢查與修正指示
-├── tools/                25 個工具
+├── tools/                26 個工具（含受 ACL 保護的素材庫搜尋）
 └── static/               聊天介面、本學期設定
 evals/                    64 個情境 + 九維評分 + 事件流斷言
 tests/                    700+ 個測試

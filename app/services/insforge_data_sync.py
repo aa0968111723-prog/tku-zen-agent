@@ -18,7 +18,7 @@ from .session_store import SessionStore, get_store
 from .visual_assets import VisualAssetStore, dumps, get_visual_store, new_id, now, semantic_embedding
 
 
-SAFE_GROUPS = {"projects", "artifacts", "activities", "research_sources", "knowledge", "visual_assets"}
+SAFE_GROUPS = {"projects", "artifacts", "activities", "research_sources", "knowledge", "visual_assets", "organization"}
 SENSITIVE_KEYS = {"api_key", "apikey", "authorization", "cookie", "password", "secret", "token"}
 
 
@@ -169,7 +169,9 @@ class InsForgeDataSyncAdapter:
             except (OSError, ValueError, RuntimeError):
                 continue
             file_sha = _sha(content)
-            document_id = "kdoc_" + hashlib.sha1(f"{remote_owner}:{relative_path}:{file_sha}".encode()).hexdigest()[:24]
+            project_scope = project_id or "__shared__"
+            logical_key = hashlib.sha256(f"{remote_owner}:{project_scope}:{relative_path}".encode()).hexdigest()
+            document_id = "kdoc_" + hashlib.sha1(f"{remote_owner}:{project_scope}:{relative_path}:{file_sha}".encode()).hexdigest()[:24]
             first = chunks[0]
             source_type = str(getattr(first.meta, "source_type", "archive") or "archive")
             source_scope = str(getattr(first.meta, "source_scope", "internal") or "internal")
@@ -179,6 +181,7 @@ class InsForgeDataSyncAdapter:
                 "title": str(first.source).split(" › ")[0], "relative_path": relative_path,
                 "storage_path": "", "source_type": source_type, "source_scope": source_scope,
                 "sha256": file_sha, "size_bytes": len(content),
+                "logical_key": logical_key, "is_current": True,
                 "modified_at": datetime.fromtimestamp(resolved.stat().st_mtime, timezone.utc).isoformat(),
             }
             documents.append(SyncResource("knowledge_document", document_id, "knowledge_documents", doc_payload, file_sha, resolved, storage_key, "text/markdown"))
@@ -220,6 +223,56 @@ class InsForgeDataSyncAdapter:
             ))
         return resources
 
+    def _organization_resources(self, user_id: str, project_id: str) -> list[SyncResource]:
+        """Export mapping/lineage records without exposing local absolute paths."""
+        remote_owner = self._remote_owner(user_id)
+        specs = (
+            ("sources", ()),
+            ("entities", ("aliases",)),
+            ("events", ()),
+            ("review_queue", ("proposed_change",)),
+            ("data_inventory_reports", ("statistics", "breakdown", "manifest")),
+            ("data_lineage", ("metadata",)),
+            ("entity_relationships", ("evidence",)),
+            ("project_context_nodes", ("requirements",)),
+            ("project_asset_links", ("reasons",)),
+        )
+        resources: list[SyncResource] = []
+        for table, json_fields in specs:
+            if table == "project_asset_links":
+                sql = "SELECT l.* FROM project_asset_links l JOIN project_context_nodes n ON n.id=l.context_node_id AND n.owner_id=l.owner_id WHERE l.owner_id=?"
+                params: tuple[Any, ...] = (user_id,)
+                if project_id:
+                    sql += " AND n.project_id=?"
+                    params += (project_id,)
+            else:
+                sql = f"SELECT * FROM {table} WHERE owner_id=?"
+                params = (user_id,)
+                if project_id and table in {"data_inventory_reports", "project_context_nodes"}:
+                    sql += " AND project_id=?"
+                    params += (project_id,)
+            sql += f" LIMIT {int(config.INSFORGE_SYNC_LIMIT)}"
+            for row in self.visual_store._rows(sql, params):
+                payload = dict(row)
+                payload["owner_id"] = remote_owner
+                for field_name in json_fields:
+                    value = payload.get(field_name)
+                    if isinstance(value, str):
+                        try:
+                            payload[field_name] = json.loads(value or "{}")
+                        except ValueError:
+                            payload[field_name] = {} if field_name not in {"aliases", "reasons"} else []
+                for path_field in ("original_path", "original_file"):
+                    value = str(payload.get(path_field) or "")
+                    if value and Path(value).is_absolute():
+                        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+                        payload[path_field] = str(metadata.get("relative_path") or Path(value).name)
+                identity = str(payload.get("id") or hashlib.sha256(
+                    dumps([table] + [payload.get(key) for key in ("resource_type", "resource_id", "context_node_id", "asset_id")]).encode()
+                ).hexdigest()[:32])
+                resources.append(SyncResource(f"organization_{table}", identity, table, _sanitize(payload)))
+        return resources
+
     def discover(self, user_id: str, *, groups: set[str], project_id: str = "") -> list[SyncResource]:
         invalid = groups - SAFE_GROUPS
         if invalid:
@@ -229,6 +282,8 @@ class InsForgeDataSyncAdapter:
             resources.extend(self._knowledge_resources(user_id, project_id))
         if "visual_assets" in groups:
             resources.extend(self._visual_resources(user_id, project_id))
+        if "organization" in groups:
+            resources.extend(self._organization_resources(user_id, project_id))
         return resources
 
     def preview(self, user_id: str, *, groups: set[str], project_id: str = "") -> dict[str, Any]:
@@ -244,9 +299,10 @@ class InsForgeDataSyncAdapter:
         }
 
     def _create_run(self, user_id: str, project_id: str, idempotency_key: str, groups: set[str], resources: list[SyncResource], resumed_from: str) -> tuple[str, bool]:
+        scoped_key = f"insforge_core:{idempotency_key}"[:160]
         with self.visual_store._lock:
             existing = self.visual_store._conn.execute(
-                "SELECT id FROM sync_runs WHERE owner_id=? AND idempotency_key=?", (user_id, idempotency_key),
+                "SELECT id FROM sync_runs WHERE owner_id=? AND source='insforge_core' AND idempotency_key=?", (user_id, scoped_key),
             ).fetchone()
             if existing:
                 return str(existing[0]), False
@@ -257,8 +313,8 @@ class InsForgeDataSyncAdapter:
                 counts[resource.resource_type] = counts.get(resource.resource_type, 0) + 1
             manifest = {"groups": sorted(groups), "counts": counts, "total": len(resources), "excluded": ["sessions", "messages", "working_memory", "retrieval_cache", "audit_logs", "credentials"]}
             self.visual_store._conn.execute(
-                "INSERT INTO sync_runs(id,source,owner_id,project_id,manifest,status,resumed_from,idempotency_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (run_id, "insforge_core", user_id, project_id, dumps(manifest), "running", resumed_from, idempotency_key, stamp, stamp),
+                "INSERT INTO sync_runs(id,source,owner_id,project_id,manifest,status,resumed_from,idempotency_key,idempotency_scope,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, "insforge_core", user_id, project_id, dumps(manifest), "running", resumed_from, scoped_key, scoped_key, stamp, stamp),
             )
             for resource in resources:
                 self.visual_store._conn.execute(
@@ -304,6 +360,21 @@ class InsForgeDataSyncAdapter:
                 remote_path = str(uploaded.get("key") or resource.storage_key)
                 payload["storage_path"] = remote_path
             self.adapters.database.upsert(resource.table, payload)
+            if resource.resource_type == "knowledge_document" and payload.get("logical_key"):
+                # Keep history, but only the just-upserted version remains
+                # searchable.  Updating after the insert avoids a failed upload
+                # leaving the prior document with no current version.
+                self.adapters.database.update(
+                    "knowledge_documents",
+                    {
+                        "owner_id": f"eq.{payload['owner_id']}",
+                        "project_id": f"eq.{payload.get('project_id') or ''}",
+                        "logical_key": f"eq.{payload['logical_key']}",
+                        "id": f"neq.{payload['id']}",
+                        "is_current": "eq.true",
+                    },
+                    {"is_current": False, "superseded_at": now()},
+                )
             if resource.resource_type == "visual_asset":
                 entities = resource.metadata.get("entities") or []
                 relations = resource.metadata.get("relations") or []
@@ -377,7 +448,7 @@ class InsForgeDataSyncAdapter:
                     with ThreadPoolExecutor(max_workers=config.INSFORGE_SYNC_WORKERS) as executor:
                         list(executor.map(lambda item: self._sync_resource(run_id,item),parallel))
                     continue
-                if resource.resource_type not in batchable:
+                if resource.resource_type not in batchable and not resource.resource_type.startswith("organization_"):
                     self._sync_resource(run_id,resource)
                     position += 1
                     continue

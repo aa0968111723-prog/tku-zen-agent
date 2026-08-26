@@ -37,6 +37,7 @@
     <button type="button" data-panel="upload">上傳分析</button>
     <button type="button" data-panel="search">智慧找照片</button>
     <button type="button" data-panel="review">待確認</button>
+    <button type="button" data-panel="organize">資料整理中心</button>
   </nav>
 
   <main class="visual-main">
@@ -64,9 +65,9 @@
           <span class="drop-icon" aria-hidden="true">＋</span><strong>拖曳素材到這裡</strong>
           <span>圖片、影片、PDF、Word、PowerPoint 或文字文件</span><span class="muted">一次最多 30 個、每個 20MB</span>
         </label>
-        <input id="visual-files" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm,application/pdf,.docx,.pptx,text/plain,text/markdown,text/csv" multiple>
+        <input id="visual-files" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm,application/pdf,.docx,.pptx,.xlsx,.gs,text/plain,text/markdown,text/csv" multiple>
         <input id="camera-files" type="file" accept="image/*" capture="environment">
-        <input id="folder-files" type="file" accept="image/*,video/*,application/pdf,.docx,.pptx,.txt,.md,.csv" webkitdirectory directory multiple>
+        <input id="folder-files" type="file" accept="image/*,video/*,application/pdf,.docx,.pptx,.xlsx,.gs,.txt,.md,.csv" webkitdirectory directory multiple>
         <div class="upload-source-actions"><label class="ghost" for="camera-files">手機拍照上傳</label><label class="ghost" for="folder-files">匯入資料夾</label><span id="import-mode" class="muted">一般批次上傳</span></div>
         <div id="upload-preview" class="upload-preview"></div>
         <div class="metadata-grid">
@@ -107,6 +108,18 @@
       <div class="panel-heading"><div><p class="eyebrow">Human review</p><h1>待確認與衝突</h1><p>AI 建議不會自動變成事實；在這裡逐筆確認、修正或忽略。</p></div></div>
       <div class="review-filters"><button class="is-active" data-review="pending_review">待確認</button><button data-review="verified">已確認</button><button data-review="failed">分析失敗</button><button data-review="duplicate">重複素材</button><button data-review="high-quality">高品質素材</button><button id="batch-confirm" class="primary" type="button" disabled>批次確認</button></div>
       <div id="review-results" class="asset-grid"></div>
+    </section>
+
+    <section id="panel-organize" class="visual-panel" hidden>
+      <div class="panel-heading"><div><p class="eyebrow">Data organization</p><h1>資料整理中心</h1><p>盤點真實資料、建立 lineage 與關聯候選；不覆寫原始檔，也不自動合併人物或社團。</p></div><div class="organization-actions"><button id="refresh-inventory" type="button" class="ghost">重新盤點</button><button id="organize-existing" type="button" class="primary">整理現有資料</button></div></div>
+      <div id="inventory-stats" class="inventory-stats" aria-label="現有資料盤點"></div>
+      <section class="visual-section"><div class="section-title"><div><h2>整理狀態</h2><p id="organization-run-status" class="muted">尚未執行本次整理</p></div></div>
+        <div class="review-filters organization-filters">
+          <button class="is-active" data-organization="verified">已整理</button><button data-organization="pending_review">待確認</button><button data-organization="conflicted">有衝突</button><button data-organization="unclassified">未分類</button><button data-organization="duplicate">重複素材</button><button data-organization="missing_source">缺少來源</button><button data-organization="failed">分析失敗</button>
+        </div>
+        <p class="muted">「合併」只會建立待審核候選；沒有來源與人工確認時不會合併同名人物、社團或活動。</p>
+        <div id="organization-results" class="asset-grid"></div>
+      </section>
     </section>
   </main>
 </div>

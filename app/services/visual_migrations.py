@@ -304,6 +304,115 @@ def _insforge_core_data_sync(conn: sqlite3.Connection) -> None:
     )
 
 
+def _data_organization_depth(conn: sqlite3.Connection) -> None:
+    """Add lineage, inventory, graph and project/scene/shot context records.
+
+    Domain entities continue to live in the existing ``visual_*`` and generic
+    ``entities`` tables.  These tables record mappings and relationships only;
+    they are not a second people/club/school database.
+    """
+    _add_column(conn, "sync_runs", "idempotency_scope TEXT NOT NULL DEFAULT ''")
+    conn.execute(
+        "UPDATE sync_runs SET idempotency_scope=source || ':' || idempotency_key "
+        "WHERE idempotency_scope=''"
+    )
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS data_inventory_reports (
+            id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT '',
+            statistics TEXT NOT NULL DEFAULT '{}',
+            breakdown TEXT NOT NULL DEFAULT '{}',
+            manifest TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'verified',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_inventory_reports_owner
+            ON data_inventory_reports(owner_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS data_lineage (
+            resource_type TEXT NOT NULL,
+            resource_id TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            original_id TEXT NOT NULL DEFAULT '',
+            original_path TEXT NOT NULL DEFAULT '',
+            original_source TEXT NOT NULL DEFAULT '',
+            source_id TEXT NOT NULL DEFAULT '',
+            sha256 TEXT NOT NULL DEFAULT '',
+            migration_version TEXT NOT NULL DEFAULT '0005_data_organization_depth',
+            confidence REAL NOT NULL DEFAULT 0,
+            verification_status TEXT NOT NULL DEFAULT 'pending_review',
+            imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            source_updated_at TEXT NOT NULL DEFAULT '',
+            metadata TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(resource_type, resource_id, owner_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_data_lineage_source
+            ON data_lineage(owner_id, source_id, verification_status);
+        CREATE INDEX IF NOT EXISTS idx_data_lineage_sha
+            ON data_lineage(owner_id, sha256) WHERE sha256!='';
+
+        CREATE TABLE IF NOT EXISTS entity_relationships (
+            id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            from_type TEXT NOT NULL,
+            from_id TEXT NOT NULL,
+            to_type TEXT NOT NULL,
+            to_id TEXT NOT NULL,
+            relation_type TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0,
+            verification_status TEXT NOT NULL DEFAULT 'pending_review',
+            evidence TEXT NOT NULL DEFAULT '{}',
+            source_id TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(owner_id, from_type, from_id, to_type, to_id, relation_type)
+        );
+        CREATE INDEX IF NOT EXISTS idx_entity_graph_from
+            ON entity_relationships(owner_id, from_type, from_id);
+        CREATE INDEX IF NOT EXISTS idx_entity_graph_to
+            ON entity_relationships(owner_id, to_type, to_id);
+
+        CREATE TABLE IF NOT EXISTS project_context_nodes (
+            id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            parent_id TEXT NOT NULL DEFAULT '',
+            node_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            requirements TEXT NOT NULL DEFAULT '{}',
+            verification_status TEXT NOT NULL DEFAULT 'pending_review',
+            source_id TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(owner_id, project_id, node_type, parent_id, position, title)
+        );
+        CREATE INDEX IF NOT EXISTS idx_project_context_order
+            ON project_context_nodes(owner_id, project_id, node_type, position);
+
+        CREATE TABLE IF NOT EXISTS project_asset_links (
+            context_node_id TEXT NOT NULL,
+            asset_id TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            match_score REAL NOT NULL DEFAULT 0,
+            reasons TEXT NOT NULL DEFAULT '[]',
+            verification_status TEXT NOT NULL DEFAULT 'pending_review',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(context_node_id, asset_id, owner_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_project_asset_links_asset
+            ON project_asset_links(owner_id, asset_id, match_score DESC);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_runs_source_scope
+            ON sync_runs(owner_id, source, idempotency_scope)
+            WHERE idempotency_scope!='';
+        """
+    )
+
+
 def apply_visual_migrations(conn: sqlite3.Connection, baseline_sql: str) -> list[str]:
     """Apply missing migrations and return the versions applied this run."""
     conn.execute(
@@ -318,6 +427,7 @@ def apply_visual_migrations(conn: sqlite3.Connection, baseline_sql: str) -> list
         ("0002_phase1_media_import", _phase1_media_import),
         ("0003_insforge_visual_backend", _insforge_backend),
         ("0004_insforge_core_data_sync", _insforge_core_data_sync),
+        ("0005_data_organization_depth", _data_organization_depth),
     ]
     completed: list[str] = []
     for version, migration in migrations:
