@@ -1,0 +1,98 @@
+{
+  "project": "tku-zen-agent",
+  "branch": "feat/grok-full-repair",
+  "base_commit": "03e21a7",
+  "started_at": "2026-08-26T10:20:00Z",
+  "current_phase": "phase1_insforge_docs_aligned_http_hardening",
+  "last_checkpoint": "2026-08-26T11:20:00Z",
+  "completed_steps": [
+    "clone_repo",
+    "confirm_pr_20_21_22_23_merged",
+    "confirm_pr_24_open_plan_only",
+    "create_feat_grok_full_repair_from_main",
+    "live_insforge_health_2_3_1",
+    "live_insforge_table_list",
+    "live_insforge_private_bucket",
+    "official_docs_llms_txt",
+    "fetch_docs_instructions_via_rest",
+    "fetch_docs_db_storage_functions_rest_api",
+    "http_adapter_no_redirect_ssrf_breaker",
+    "storage_upload_strategy_with_put_fallback"
+  ],
+  "in_progress_steps": [
+    "pytest_http_hardening",
+    "architecture_audit_doc",
+    "defect_scan_remaining"
+  ],
+  "failed_steps": [],
+  "blocked_by_external_dependency": [
+    {
+      "name": "insforge_mcp_fetch_docs",
+      "reason": "Grok TUI MCP servers are github, google_drive, tasks only; used GET /api/docs/instructions (same backend as MCP fetch-docs)"
+    },
+    {
+      "name": "windows_media_trees",
+      "reason": "D:\\\\柏能資料\\\\淡大劇本 and sibling folders are not present on this Linux runner"
+    }
+  ],
+  "network_dependencies": [
+    "https://ge5cr87f.us-east.insforge.app",
+    "https://docs.insforge.dev"
+  ],
+  "insforge_state": {
+    "base_url_host": "ge5cr87f.us-east.insforge.app",
+    "version": "2.3.1",
+    "health": "ok",
+    "tables": [
+      "activities",
+      "activity_tasks",
+      "artifacts",
+      "asset_entities",
+      "data_inventory_reports",
+      "data_lineage",
+      "embeddings",
+      "entities",
+      "entity_relationships",
+      "events",
+      "knowledge_chunks",
+      "knowledge_documents",
+      "project_asset_links",
+      "project_context_nodes",
+      "projects",
+      "research_sources",
+      "review_queue",
+      "sources",
+      "sync_runs",
+      "visual_assets"
+    ],
+    "storage_buckets": [{"name": "visual-assets", "public": false}],
+    "counts": {
+      "visual_assets": 1,
+      "projects": 11,
+      "knowledge_documents": 517,
+      "knowledge_chunks": 2430,
+      "embeddings": 1,
+      "review_queue": 0,
+      "entities": 0,
+      "sync_runs": 0
+    },
+    "api_key_in_git": false
+  },
+  "test_results": [],
+  "commands_executed": [
+    "git clone https://github.com/aa0968111723-prog/tku-zen-agent.git",
+    "gh pr list --state all",
+    "GET /api/health (InsForge)",
+    "GET /api/database/tables",
+    "GET /api/storage/buckets",
+    "GET /api/docs/instructions",
+    "GET /api/docs/db/rest-api",
+    "GET /api/docs/storage/rest-api",
+    "GET /api/docs/functions/rest-api"
+  ],
+  "commits": [],
+  "pull_requests": [
+    {"number": 24, "role": "plan-only-do-not-implement-here", "state": "open"}
+  ],
+  "next_action": "run pytest for HTTP hardening and storage-strategy then continue defect scan"
+}
