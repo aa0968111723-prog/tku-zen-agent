@@ -191,7 +191,7 @@ async function loadDashboard() {
 }
 
 function setUploadFiles(files, mode = "batch") {
-  const extensions = /\.(jpe?g|png|webp|mp4|mov|webm|pdf|docx|pptx|xlsx|gs|txt|md|csv)$/i;
+  const extensions = /\.(jpe?g|png|webp|gif|avif|jfif|mp4|mov|webm|pdf|docx|pptx|xlsx|gs|txt|md|csv)$/i;
   const accepted = [...files].filter((file) => file.type.startsWith("image/") || file.type.startsWith("video/") || extensions.test(file.name));
   visualState.uploadFiles = accepted.slice(0, mode === "folder" ? 300 : 30);
   visualState.uploadMode = mode;

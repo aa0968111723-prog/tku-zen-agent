@@ -202,6 +202,7 @@ def test_existing_xlsx_and_apps_script_are_imported_as_searchable_documents(orga
 def test_configured_additional_roots_are_scanned_without_exposing_absolute_paths(organization_env, monkeypatch):
     sessions, _store, service = organization_env
     user_id = sessions.ensure_user("expanded_local", is_local=True)
+    remote_user = sessions.ensure_user("expanded_remote")
     extra = Path(config.VISUAL_ASSET_DIR).parent / "mobile-shots"
     extra.mkdir(parents=True, exist_ok=True)
     (extra / "phone-shot.png").write_bytes(picture(color=(220, 220, 220)))
@@ -210,6 +211,8 @@ def test_configured_additional_roots_are_scanned_without_exposing_absolute_paths
     assert report["breakdown"]["unregistered_filesystem_candidates"]["image"] == 1
     assert "phone-shot.png" in json.dumps(report["manifest"], ensure_ascii=False)
     assert str(extra.resolve()) not in json.dumps(report, ensure_ascii=False)
+    remote_report = service.inventory(remote_user, persist=False)
+    assert remote_report["breakdown"]["unregistered_filesystem_candidates"] == {}
 
 
 def test_parent_import_root_does_not_reimport_canonical_visual_renditions(organization_env, monkeypatch):
@@ -244,3 +247,69 @@ def test_legacy_thumbnail_is_retained_but_not_counted_or_searchable(organization
     assert report["statistics"]["images"] == 0
     items, total, _ = store.search(user_id, query="thumbnail")
     assert all(item["asset_id"] != derived["asset_id"] for item in items)
+
+
+def test_external_media_import_keeps_original_path_and_only_writes_derivatives(organization_env, monkeypatch):
+    sessions, store, service = organization_env
+    user_id = sessions.ensure_user("external_media", is_local=True)
+    source_root = Path(config.VISUAL_ASSET_DIR).parent / "external-media"
+    source_root.mkdir(parents=True, exist_ok=True)
+    image_path = source_root / "社課照片.png"
+    video_path = source_root / "社課花絮.mp4"
+    image_path.write_bytes(picture(size=(320, 180)))
+    video_path.write_bytes(b"video-original-bytes")
+    monkeypatch.setattr(config, "DATA_ORGANIZATION_IMPORT_ROOTS", (source_root,))
+
+    result = service.run(user_id, idempotency_key="external-media-import")
+    assert result["status"] == "completed", result.get("error_log")
+    rows = store._conn.execute(
+        "SELECT original_filename,storage_path,thumbnail_path,asset_type FROM visual_assets WHERE user_id=? ORDER BY original_filename",
+        (user_id,),
+    ).fetchall()
+    assert {row["original_filename"] for row in rows} == {"社課照片.png", "社課花絮.mp4"}
+    by_name = {row["original_filename"]: row for row in rows}
+    assert Path(by_name["社課照片.png"]["storage_path"]).resolve() == image_path.resolve()
+    assert Path(by_name["社課花絮.mp4"]["storage_path"]).resolve() == video_path.resolve()
+    assert image_path.read_bytes() == picture(size=(320, 180))
+    assert video_path.read_bytes() == b"video-original-bytes"
+    assert Path(by_name["社課照片.png"]["thumbnail_path"]).exists()
+    rendition = store.asset_file(
+        store._conn.execute("SELECT id FROM visual_assets WHERE user_id=? AND original_filename=?", (user_id, "社課照片.png")).fetchone()[0],
+        user_id,
+        "16:9",
+    )
+    assert rendition and Path(rendition[0]).parent.is_relative_to(Path(config.VISUAL_ASSET_DIR).resolve())
+
+
+def test_curated_scene_tree_becomes_reviewable_taxonomy_and_searchable(organization_env, monkeypatch):
+    sessions, store, service = organization_env
+    user_id = sessions.ensure_user("curated_scene_tree", is_local=True)
+    source_root = Path(config.VISUAL_ASSET_DIR).parent / "淡大劇本"
+    category = source_root / "場景" / "上學期社課"
+    category.mkdir(parents=True, exist_ok=True)
+    source_photo = category / "IMG_社課現場.png"
+    source_photo.write_bytes(picture(size=(640, 360), color=(45, 120, 190)))
+    monkeypatch.setattr(config, "DATA_ORGANIZATION_IMPORT_ROOTS", (source_root,))
+
+    result = service.run(user_id, idempotency_key="curated-scene-taxonomy")
+    assert result["status"] == "completed", result.get("error_log")
+    asset_id = store._conn.execute(
+        "SELECT id FROM visual_assets WHERE user_id=? AND original_filename=?",
+        (user_id, source_photo.name),
+    ).fetchone()[0]
+    observations = store._rows(
+        "SELECT entity_type,label,status,source,evidence FROM visual_observations WHERE asset_id=?",
+        (asset_id,),
+    )
+    labels = {(row["entity_type"], row["label"], row["status"], row["source"]) for row in observations}
+    assert ("school", "淡江大學", "probable", "directory_taxonomy_v1") in labels
+    assert ("club", "領袖禪學社", "probable", "directory_taxonomy_v1") in labels
+    assert ("scene", "社課", "probable", "directory_taxonomy_v1") in labels
+    assert ("event", "上學期社課", "probable", "directory_taxonomy_v1") in labels
+    evidence = json.loads(next(row["evidence"] for row in observations if row["label"] == "社課"))
+    assert evidence["root"] == "淡大劇本" and evidence["relative_path"].startswith("場景/上學期社課/")
+
+    items, total, parsed = store.search(user_id, query="找淡江領袖禪學社上學期社課照片")
+    assert total == 1 and items[0]["asset_id"] == asset_id
+    assert parsed["school"] == "淡江大學" and parsed["club"] == "領袖禪學社" and parsed["scene"] == "社課"
+    assert any("社課" in reason for reason in items[0]["recommendation_reasons"])

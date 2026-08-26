@@ -33,20 +33,21 @@ SQLite source-of-truth、FastAPI、server-only InsForge Adapter 與既有素材�
 之後才把內部專用的 `data`、`output`、`mobile-shots` 也加入白名單。這樣可以完整涵蓋
 專案內的使用者素材，同時不會把程式碼、SQLite、Playwright 暫存或憑證當成素材。
 
-擴大白名單後的最新持久化盤點（`inventory_qfpcnYimuMynU4_4`，`u_local`）：
+擴大白名單並納入工作區同層社團媒體樹、套用資料夾分類證據後的最新持久化盤點（`inventory_KvxMaMD86E0ChM-w`，
+`u_local`）：
 
 | 項目 | 數量 |
 |---|---:|
-| 圖片（可搜尋素材） | 13 |
-| 影片 | 0 |
-| 文件（含知識與已匯入輸出） | 523 |
+| 圖片（可搜尋素材） | 4,788 |
+| 影片（原檔引用） | 313 |
+| 文件（含知識與已匯入輸出） | 963 |
 | Artifact | 0 |
 | 知識來源 | 517 |
 | 社團／學校 | 1／1 |
-| 人物／活動／日期 | 0／0／0 |
-| 重複素材（保留原始副本） | 18 |
+| 人物／活動／日期 | 0／0／289 |
+| 重複素材（保留原始副本） | 598 |
 | 缺少來源 | 0 |
-| 待確認資料 | 121 |
+| 待確認資料 | 30,644 |
 | 無法分析素材（distinct asset） | 1 |
 
 `sync_BagwU6QyBcku1Vqk` 與 `sync_KuSKa5U4BpMk0JF6` 是舊白名單的歷史 run；擴大後的
@@ -54,10 +55,24 @@ SQLite source-of-truth、FastAPI、server-only InsForge Adapter 與既有素材�
 knowledge document 517、filesystem asset 25）。所有 6 份輸出文件與 19 份手機／本機圖片
 都以 SHA-256 與來源 key 做 idempotent mapping，原始路徑保留，沒有移動或覆蓋原檔。
 
+針對工作區外部資料樹的 `sync_u0YcUNrWUpvyTZUZ` 實際建立 6,743 筆 mapping，6,732 筆完成、
+11 筆失敗；`sync_qDui70vdHjUvQ27C` 只重試該 11 筆並完成 10 筆，剩 1 份無法解析文件；
+補上 GIF/AVIF/JFIF 後，`sync_Y3AukcnS4UXjytp9` 完成 6,066 筆既有 mapping 與 7 個 JFIF。
+其中 `淡大劇本` 3,404 個可讀素材（`場景` 子樹 1,797 個）、`淡大所有照片` 88 個、
+`05_Photos` 1,903 個、`06_Video` 547 個、`招生影片` 165 個均已納入；原始檔以外部路徑
+引用，沒有複製 29GB 原檔，只有素材庫縮圖、metadata、lineage 與 embedding 寫入本機。
+
+最新的 `sync_G37B09ZwDUDs2jPD` 用 additive reconciliation 將 5,547 個既有 visual asset
+與 517 個知識文件重新映射，並把 `淡大劇本`／`招生影片` 的資料夾分類轉成
+`directory_taxonomy_v1` 的 `probable` 觀察：例如 `場景/上學期社課` 會產生
+`scene=社課`、`event=上學期社課`、`school=淡江大學`、`club=領袖禪學社`（均附
+relative path evidence，仍需人工確認）。搜尋索引同時納入 relative path，因此不必依賴
+外部 OCR/vision 也能找到「淡江領袖禪學社上學期社課」分類素材。
+
 早期 run 曾把 6 個 `data/visual-assets/**/thumbnail.jpg` 當成鬆散圖片；本次盤點已將它們
 標記為 `derived_thumbnail`、保留 lineage 與檔案，但從素材搜尋與統計排除。這是可回溯的
-metadata 修正，不是刪除。最新 manifest 掃描 560 個支援格式檔案，`unregistered_candidates=0`；
-18 組重複是檔案系統原始副本與素材庫副本並存的真實結果。
+metadata 修正，不是刪除。最新 manifest 掃描 6,771 個支援格式檔案，
+`unregistered_candidates=0`；598 組重複是檔案系統原始副本與素材庫副本並存的真實結果。
 
 ## 本階段 mapping 與 migration
 
@@ -80,8 +95,9 @@ graph、context 表與 RLS，並為 knowledge documents 增加 project-scoped ve
 
 ## 同步與搜尋行為
 
-- 現有鬆散圖片／影片／支援文件會依相對路徑建立 manifest，以 SHA-256 對既有素材去重。
-- 支援 JPEG/PNG/WebP、影片、PDF/DOCX/PPTX/XLSX、Markdown/文字/CSV/Apps Script。
+- 現有鬆散圖片／影片／支援文件會依相對路徑建立 manifest，以 SHA-256 對既有素材去重；
+  已整理資料夾的 scene/event/club/school 標籤會以 `probable` evidence 寫入 review queue。
+- 支援 JPEG/PNG/WebP/GIF/AVIF/JFIF、影片、PDF/DOCX/PPTX/XLSX、Markdown/文字/CSV/Apps Script。
 - 一筆失敗只更新自己的 sync item；成功項目會 commit，retry 只發現並重跑失敗項目。
 - `LibraryContextResolver` 先確認 project ownership，再解析 scene/shot，最後呼叫素材 ACL 搜尋。
 - 「淡江招生影片第二幕」可推導校園、明亮、16:9、品質與人物偏好；推導值標為 probable。
@@ -98,9 +114,10 @@ MCP 管理 API key 沒有被誤寫成前端或 runtime key，private binary 也�
 
 ## 保留風險
 
-- 目前沒有新影片檔；影片格式仍可匯入並保留原檔，沒有影格解碼器時只提供安全占位縮圖，
-  不會虛構人物／場景標籤。
+- 影片已實際匯入 313 個可搜尋資產；原檔仍在外部資料夾，沒有影格解碼器時只提供安全占位
+  縮圖，不會虛構人物／場景標籤。
 - 現有唯一圖片的外部 vision 分析仍是 `needs_vision_config`，不是 PASS。
 - 專用 OCR/vision 與高維 image embedding 仍取決於外部模型；不可用時維持明確 blocker。
 - Runtime InsForge owner mapping 與最小權限 server key 完成前，只能 dry-run／本機整理。
-- 121 筆 probable/pending mapping 需要人在資料整理中心審核，不會自動升級為 verified。
+- 30,644 筆 probable/pending mapping 需要人在資料整理中心審核，不會自動升級為 verified；
+  其中包含新建立的資料夾分類觀察，並非人物身分宣稱。

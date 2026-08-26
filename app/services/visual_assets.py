@@ -261,7 +261,10 @@ SCENE_NAMES = (
     "校園", "教室", "禪堂", "舞台", "報到區", "戶外", "茶會", "講座",
     "社課", "聚餐", "活動現場", "海報", "文件",
 )
-IMAGE_MIME = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+IMAGE_MIME = {
+    "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+    "image/gif": ".gif", "image/avif": ".avif", "image/jfif": ".jfif",
+}
 VIDEO_MIME = {"video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm"}
 DOCUMENT_MIME = {
     "application/pdf": ".pdf",
@@ -327,7 +330,7 @@ def _color_embedding(image: Image.Image) -> list[float]:
 
 def inspect_image(content: bytes, mime_type: str) -> ImageInspection:
     if mime_type not in IMAGE_MIME:
-        raise VisualAssetError("只支援 JPEG、PNG、WebP 圖片", code="unsupported_media_type")
+        raise VisualAssetError("只支援 JPEG、PNG、WebP、GIF、AVIF、JFIF 圖片", code="unsupported_media_type")
     if not content:
         raise VisualAssetError("圖片內容是空的", code="empty_file")
     try:
@@ -418,7 +421,7 @@ def inspect_media(content: bytes, mime_type: str, filename: str = "") -> ImageIn
         return inspect_image(content, mime_type)
     if mime_type not in ALLOWED_MIME:
         raise VisualAssetError(
-            "只支援 JPEG、PNG、WebP、MP4、MOV、WebM、PDF、DOCX、PPTX、XLSX 與文字文件",
+            "只支援 JPEG、PNG、WebP、GIF、AVIF、JFIF、MP4、MOV、WebM、PDF、DOCX、PPTX、XLSX 與文字文件",
             code="unsupported_media_type",
         )
     if not content:
@@ -556,9 +559,18 @@ class VisualAssetStore:
         source: str = "upload", school: str = "", club: str = "", privacy: str = "private",
         commercial_use: str = "unknown", file_created_date: str = "", source_metadata: dict[str, Any] | None = None,
         relative_path: str = "", manifest_id: str = "", supersedes_asset_id: str = "",
+        external_path: str = "", sha256_override: str = "",
     ) -> dict[str, Any]:
-        if len(content) > config.VISUAL_MAX_FILE_BYTES:
-            raise VisualAssetError(f"圖片超過 {config.VISUAL_MAX_FILE_BYTES // 1_000_000}MB 上限", code="file_too_large")
+        external_source: Path | None = None
+        if external_path:
+            try:
+                external_source = Path(external_path).resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise VisualAssetError("外部素材來源不存在或無法讀取", code="source_unavailable") from exc
+            if not external_source.is_file():
+                raise VisualAssetError("外部素材來源不是檔案", code="source_unavailable")
+        if len(content) > config.VISUAL_MAX_FILE_BYTES and not external_source:
+            raise VisualAssetError(f"素材超過 {config.VISUAL_MAX_FILE_BYTES // 1_000_000}MB 上限", code="file_too_large")
         if privacy not in {"private", "shared", "public"}:
             raise VisualAssetError("隱私狀態必須是 private、shared 或 public")
         if commercial_use not in {"allowed", "not_allowed", "unknown"}:
@@ -573,14 +585,20 @@ class VisualAssetStore:
         if root not in target_dir.parents:
             raise VisualAssetError("資產儲存路徑無效")
         target_dir.mkdir(parents=True, exist_ok=False)
-        original_path = target_dir / ("original" + safe_ext)
+        original_path = external_source or (target_dir / ("original" + safe_ext))
         thumb_path = target_dir / "thumbnail.jpg"
-        # 只在新建資產時寫一次；後續沒有任何覆寫原圖的程式路徑。
-        original_path.write_bytes(content)
+        # 外部匯入只寫入素材庫縮圖；原始檔維持在原位置，避免 9GB 級資料
+        # 再複製一份，也不會有任何 API 路徑覆寫或刪除原檔。
+        if not external_source:
+            original_path.write_bytes(content)
         thumb_path.write_bytes(inspection.thumbnail)
+        digest = (sha256_override or inspection.sha256).strip()
+        metadata = dict(source_metadata or {})
+        if external_source:
+            metadata.setdefault("storage_mode", "external")
         duplicate = self._rows(
             "SELECT id FROM visual_assets WHERE sha256=? AND (user_id=? OR privacy IN ('shared','public')) ORDER BY created_at LIMIT 1",
-            (inspection.sha256, user_id),
+            (digest, user_id),
         )
         duplicate_of = duplicate[0]["id"] if duplicate else None
         stamp = now()
@@ -596,8 +614,8 @@ class VisualAssetStore:
                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     asset_id,user_id,filename[:240],str(original_path),str(thumb_path),mime_type,safe_ext,
-                    inspection.width,inspection.height,inspection.orientation,stamp,source[:120],dumps(source_metadata or {}),
-                    inspection.exif_date,file_created_date[:40],inspection.sha256,inspection.perceptual_hash,
+                    inspection.width,inspection.height,inspection.orientation,stamp,source[:120],dumps(metadata),
+                    inspection.exif_date,file_created_date[:40],digest,inspection.perceptual_hash,
                     dumps(inspection.color_embedding),dumps(semantic_embedding(filename + " " + inspection.extracted_text)),privacy,commercial_use,
                     "local_complete",inspection.quality_score,inspection.blur_score,inspection.brightness_score,
                     dumps(inspection.suitability),inspection.extracted_text,"pending_review",school_id,club_id,duplicate_of,stamp,stamp,
@@ -696,7 +714,12 @@ class VisualAssetStore:
         if asset.get("asset_type") != "image":
             raise VisualAssetError("文件與影片目前只支援原始檔及縮圖輸出", code="unsupported_rendition")
         source = Path(asset["storage_path"])
-        target = source.parent / f"rendition-{variant.replace(':','x')}.jpg"
+        metadata = loads(asset.get("source_metadata"), {})
+        # External imports must never write a rendition beside the user's
+        # original file.  Keep all generated derivatives under our managed
+        # visual-assets directory instead.
+        target_parent = Path(asset["thumbnail_path"]).parent if isinstance(metadata, dict) and metadata.get("storage_mode") == "external" else source.parent
+        target = target_parent / f"rendition-{variant.replace(':','x')}.jpg"
         if not target.exists():
             with Image.open(source) as raw:
                 image = ImageOps.exif_transpose(raw).convert("RGB")
@@ -911,16 +934,20 @@ class VisualAssetStore:
     ) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
         q = query.strip().lower()
         school_filter = school or infer_school(query)
+        # Natural-language searches should use the same conservative labels
+        # produced by the data organizer (for example ``領袖禪學社`` from a
+        # curated 淡大劇本 folder), while explicit filters still win.
+        club_filter = club or infer_club(query)
         # Generated thumbnails/renditions are retained for lineage but are not
         # independent search results.  They were never user-authored assets.
         where = ["COALESCE(a.source,'')!='derived_thumbnail'", "(a.user_id=? OR a.privacy IN ('shared','public'))"]
         params: list[Any] = [user_id]
         if school_filter:
-            where.append("a.school_id IN (SELECT id FROM visual_schools WHERE canonical_name LIKE ? OR aliases LIKE ?)")
-            params.extend([f"%{school_filter}%", f"%{school_filter}%"])
-        if club:
+            where.append("(a.school_id IN (SELECT id FROM visual_schools WHERE canonical_name LIKE ? OR aliases LIKE ?) OR a.id IN (SELECT asset_id FROM visual_observations WHERE entity_type='school' AND label LIKE ? AND review_action!='ignored'))")
+            params.extend([f"%{school_filter}%", f"%{school_filter}%", f"%{school_filter}%"])
+        if club_filter:
             where.append("a.id IN (SELECT asset_id FROM visual_observations WHERE entity_type='club' AND label LIKE ? AND review_action!='ignored') OR a.club_id IN (SELECT id FROM visual_clubs WHERE name LIKE ? OR aliases LIKE ?)")
-            params.extend([f"%{club}%",f"%{club}%",f"%{club}%"])
+            params.extend([f"%{club_filter}%",f"%{club_filter}%",f"%{club_filter}%"])
         if person:
             # A real name is a hard identity filter: only user-confirmed
             # observations tied to a verified person are eligible.
@@ -985,17 +1012,22 @@ class VisualAssetStore:
         qtokens += [compact_q[i:i+2] for i in range(max(0,len(compact_q)-1)) if not compact_q[i:i+2].isspace()]
         qtokens = list(dict.fromkeys(qtokens))
         ratio_alias = infer_ratio(q, ratio)
-        hard_scene_names = ("校園","教室","禪堂","舞台","報到區","戶外","海報","文件")
-        inferred_scene = scene or next((name for name in hard_scene_names if name in q), "")
+        # Keep the original hard-scene contract for explicit visual scenes;
+        # directory-derived event names such as 茶會／社課 remain searchable
+        # through labels and paths without excluding legacy filename matches.
+        hard_scene_names = ("活動現場","報到區","校園","教室","禪堂","舞台","戶外","海報","文件")
+        scene_intent_names = (*hard_scene_names, "茶會", "講座", "社課", "聚餐")
+        inferred_scene = scene or next((name for name in scene_intent_names if name in q), "")
+        hard_scene = scene or next((name for name in hard_scene_names if name in q), "")
         candidates: list[tuple[dict[str, Any], int, float, list[str]]] = []
         for row in rows:
             if ratio_alias and not ratio_matches(row["width"], row["height"], ratio_alias):
                 continue
             # 自然語言中明確出現既知場景時，把它當證據條件，不把只有學校名稱
             # 相符、卻沒有任何場景觀察的圖片冒充成「校園照」。
-            if inferred_scene and inferred_scene not in str(row.get("labels") or ""):
+            if hard_scene and hard_scene not in str(row.get("labels") or ""):
                 continue
-            document = " ".join(str(row.get(key) or "") for key in ("original_filename","ocr_text","school_name","club_name","labels","dates"))
+            document = " ".join(str(row.get(key) or "") for key in ("original_filename","relative_path","ocr_text","school_name","club_name","labels","dates"))
             doc_lower = document.lower()
             keyword_hits = sum(1 for token in qtokens if token in doc_lower)
             sem = cosine(qvec, loads(row.get("semantic_embedding"), [])) if q else 0.0
@@ -1055,7 +1087,7 @@ class VisualAssetStore:
             }
             items.append(item)
         parsed = {
-            "query": query, "school": school_filter, "club": club, "person": person,
+            "query": query, "school": school_filter, "club": club_filter, "person": person,
             "scene": inferred_scene, "event": event, "date_from": date_from, "date_to": date_to,
             "ratio": ratio_alias, "quality_min": inferred_quality_min, "commercial_use": commercial_use,
             "people_min": inferred_people_min, "brightness_min": brightness_min,
@@ -1611,6 +1643,18 @@ def infer_school(query: str) -> str:
         "國立政治大學": ("國立政治大學","政治大學","政大","nccu"),
     }
     for canonical,names in aliases.items():
+        if any(name.lower() in text for name in names):
+            return canonical
+    return ""
+
+
+def infer_club(query: str) -> str:
+    """Infer only known, explicit club names from a natural-language query."""
+    text = (query or "").lower()
+    aliases = {
+        "領袖禪學社": ("領袖禪學社", "領袖禪學", "禪學社"),
+    }
+    for canonical, names in aliases.items():
         if any(name.lower() in text for name in names):
             return canonical
     return ""
