@@ -30,6 +30,7 @@ from .services import memory as memory_service
 from .services import permissions, ratelimit
 from .services.session_store import get_store
 from .orchestrator.state import Stage, WorkflowStatus
+from .visual_api import router as visual_router
 
 logger = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
@@ -47,7 +48,7 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 _CSP = (
     "default-src 'self'; "
-    "img-src 'self' data: https:; "  # fal 視覺稿與雲端縮圖是外部 https 圖片
+    "img-src 'self' data: blob: https:; "  # fal 圖、雲端縮圖與上傳前本機預覽
     "style-src 'self'; "
     "script-src 'self'; "
     "connect-src 'self'; "
@@ -68,6 +69,23 @@ from .services.clientip import client_ip  # noqa: E402
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
+    # 視覺 API 在 multipart 解析前先用 Content-Length 擋掉明顯超量請求；
+    # 端點內仍會逐檔再次檢查，因為 chunked request 可能沒有這個標頭。
+    visual_api = request.url.path.startswith(("/api/visual-assets", "/api/visual-collections", "/api/entities", "/api/learning"))
+    if visual_api and request.method in _STATE_CHANGING:
+        try:
+            content_length = int(request.headers.get("content-length") or 0)
+        except ValueError:
+            content_length = 0
+        if request.url.path in {"/api/visual-assets/upload", "/api/visual-assets/import"}:
+            body_limit = config.VISUAL_MAX_FILE_BYTES * config.VISUAL_MAX_BATCH + 2_000_000
+        elif request.url.path == "/api/visual-assets/search-by-image":
+            body_limit = config.VISUAL_MAX_FILE_BYTES + 1_000_000
+        else:
+            body_limit = 512_000
+        if content_length > body_limit:
+            return JSONResponse({"detail": "請求內容超過大小限制"}, status_code=413)
+
     # CSRF 縱深防禦：瀏覽器跨站請求一定帶 Origin，比對不上就擋。
     # 沒有 Origin 的請求（curl、同站舊瀏覽器 GET）不在此攔——
     # cookie 的 SameSite 已經擋掉跨站自動帶 cookie 的情況。
@@ -99,7 +117,7 @@ async def security_middleware(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault(
-        "Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"
+        "Permissions-Policy", "camera=(self), microphone=(), geolocation=(), payment=()"
     )
     response.headers.setdefault("Content-Security-Policy", _CSP)
     if config.auth_mode() == "token":
@@ -131,7 +149,8 @@ def _build_openapi() -> dict[str, Any]:
     }
     schema["security"] = [{"sessionCookie": []}]
     admin_prefixes = ("/api/admin", "/api/reindex", "/api/instagram/publish",
-                      "/api/instagram/comments", "/api/instagram/messages")
+                      "/api/instagram/comments", "/api/instagram/messages",
+                      "/api/learning/approve")
     for path, ops in schema.get("paths", {}).items():
         if path.startswith(admin_prefixes) or path == "/api/term":
             for op in ops.values():
@@ -328,6 +347,11 @@ async def admin_logout(request: Request, response: Response) -> dict[str, bool]:
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
     return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
+
+
+@app.get("/visual-assets", response_class=HTMLResponse)
+async def visual_assets_workspace() -> HTMLResponse:
+    return HTMLResponse((STATIC / "visual-assets.html").read_text(encoding="utf-8"))
 
 
 @general_router.get("/health")
@@ -1008,3 +1032,4 @@ async def instagram_send(req: InstagramActionRequest, request: Request) -> None:
 
 app.include_router(general_router)
 app.include_router(admin_router)
+app.include_router(visual_router)

@@ -16,6 +16,11 @@
 圖片的**輸入（理解上傳的照片、海報）與輸出（生成視覺稿）**都走 **fal.ai**；
 沒設定 `FAL_KEY` 時圖片功能會誠實說明未啟用，純文字任務不受影響。
 
+現在另有正式的**人物／場景／日期／活動／社團視覺資料庫**：進入工作台後按
+「視覺資料庫」，即可批次上傳、查看品質與 OCR 證據、人工確認人物／活動、用
+自然語言或另一張圖片找照片，並匯出社群比例圖片或含 JSON／CSV 的素材包。
+設計與部署細節見 [視覺資料庫文件](docs/VISUAL_ASSET_DATABASE.md)。
+
 ---
 
 ## 三分鐘上手
@@ -168,6 +173,8 @@ Google 沒有可以直接呼叫的表單建立 API。代理改成產一支 Apps 
    - **`ADMIN_ACCESS_TOKEN`** ← 管理授權碼（重建索引、改本學期資料、Instagram 連接）
    - `DEFAULT_DESTINATION=drive`
    - `DRIVE_FOLDER_ID`
+   - `VISUAL_ASSET_DIR=/persistent/visual-assets`（必須使用持久化磁碟）
+   - `VISUAL_EXPORT_DIR=/persistent/visual-exports`
 
 ### Drive 上傳需要另外掛憑證
 
@@ -244,6 +251,8 @@ Google 沒有可以直接呼叫的表單建立 API。代理改成產一支 Apps 
 **容器重啟後本機檔案與 SQLite 會消失。** 所以：
 - 產出落點設 `drive`
 - 如果平台有持久化磁碟，把 `DB_PATH` 指到掛載點，否則對話紀錄不會保留
+- 視覺資料庫要把 `VISUAL_ASSET_DIR` 與 `DB_PATH` 放在同一組持久化備份；
+  原圖不會自動刪除或覆寫，不能只備份資料庫而漏掉圖片目錄
 
 ---
 
@@ -298,7 +307,7 @@ python scripts/ingest_line.py --dry-run
 
 ```bash
 python scripts/selftest.py    # 快速檢查，30 秒
-python -m pytest              # 650+ 個測試（含認證／權限／SSE 取消／續接／版本／研究來源／實體辨識／手機版）
+python -m pytest              # 700+ 個測試（含認證／權限／SSE／視覺資料庫／跨校隔離／以圖搜圖／手機版）
 python -m evals               # 64 個真實社團情境
 ```
 
@@ -363,7 +372,7 @@ app/
 ├── tools/                25 個工具
 └── static/               聊天介面、本學期設定
 evals/                    64 個情境 + 九維評分 + 事件流斷言
-tests/                    650+ 個測試
+tests/                    700+ 個測試
 ```
 
 ### 幾個刻意的取捨
