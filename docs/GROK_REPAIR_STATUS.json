@@ -3,8 +3,8 @@
   "branch": "feat/grok-full-repair",
   "base_commit": "03e21a7",
   "started_at": "2026-08-26T10:20:00Z",
-  "current_phase": "phase1_defect_scan_observation_sqlite_owner",
-  "last_checkpoint": "2026-08-26T14:20:00Z",
+  "current_phase": "phase1_regression_and_organize_project_id",
+  "last_checkpoint": "2026-08-26T15:10:00Z",
   "completed_steps": [
     "clone_repo",
     "confirm_pr_20_21_22_23_merged",
@@ -29,7 +29,11 @@
     "observation_rerun_preserves_verified_and_ignored",
     "sqlite_busy_timeout_10s",
     "data_sync_uses_resolved_insforge_owner",
-    "visual_usage_audit"
+    "visual_usage_audit",
+    "organize_writes_project_id",
+    "page_query_bounds",
+    "local_inventory_no_windows_media",
+    "chat_artifact_session_security_regression"
   ],
   "in_progress_steps": [
     "defect_scan_remaining_non_p0"

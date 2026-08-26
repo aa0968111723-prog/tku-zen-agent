@@ -475,7 +475,7 @@ async def record_visual_usage(asset_id: str,req: UsageRequest,request: Request,u
 @router.get("/visual-collections")
 async def list_visual_collections(
     kind: str = Query(default="",pattern=r"^(|material_pack|storyboard|social_post|poster)$"),
-    page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1,le=100),
+    page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),
     user_id: str = Depends(auth.require_user),
 ) -> dict[str,Any]:
     capped = min(limit,config.VISUAL_SEARCH_LIMIT)
@@ -535,22 +535,22 @@ async def _entity_list(kind: str,query: str,school: str,page: int,limit: int,use
 
 
 @router.get("/people")
-async def list_people(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)):
+async def list_people(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)):
     return await _entity_list("people",q,school,page,limit,user_id)
 
 
 @router.get("/clubs")
-async def list_clubs(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)):
+async def list_clubs(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)):
     return await _entity_list("clubs",q,school,page,limit,user_id)
 
 
 @router.get("/events")
-async def list_events(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)):
+async def list_events(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)):
     return await _entity_list("events",q,school,page,limit,user_id)
 
 
 @router.get("/scenes")
-async def list_scenes(q: str = Query(default="",max_length=200),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)):
+async def list_scenes(q: str = Query(default="",max_length=200),page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)):
     return await _entity_list("scenes",q,"",page,limit,user_id)
 
 
@@ -560,7 +560,7 @@ async def learning_insights(user_id: str = Depends(auth.require_user)) -> dict[s
 
 
 @router.get("/learning/corrections")
-async def learning_corrections(page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+async def learning_corrections(page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
     capped = min(limit,config.VISUAL_SEARCH_LIMIT)
     items,total = get_visual_store().corrections(user_id,page=page,limit=capped)
     return {"items":items,"total":total,"page":page,"limit":capped}
@@ -725,7 +725,7 @@ async def retry_data_organization_run(run_id: str,request: Request,user_id: str 
 
 
 @router.get("/data-organization/queue")
-async def data_organization_queue(category: str = Query(default="pending_review",max_length=30),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+async def data_organization_queue(category: str = Query(default="pending_review",max_length=30),page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
     capped = min(limit,config.VISUAL_SEARCH_LIMIT)
     items,total = DataOrganizationService().list_queue(user_id,category=category,page=page,limit=capped)
     return {"items":items,"total":total,"page":page,"limit":capped,"category":category}

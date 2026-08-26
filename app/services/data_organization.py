@@ -701,7 +701,7 @@ class DataOrganizationService:
                 evidence=json.dumps(evidence, ensure_ascii=False),
             )
 
-    def _map_resource(self, user_id: str, resource_type: str, resource_id: str, row: dict[str, Any]) -> None:
+    def _map_resource(self, user_id: str, resource_type: str, resource_id: str, row: dict[str, Any], project_id: str = "") -> None:
         if resource_type == "filesystem_asset":
             path = Path(str(row.get("path") or "")).resolve(strict=True)
             if not path.is_file() or _sha_file(path) != str(row.get("sha256") or ""):
@@ -725,6 +725,11 @@ class DataOrganizationService:
             mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             if mime_type not in ALLOWED_MIME:
                 mime_type = next((candidate for candidate, suffix in ALLOWED_MIME.items() if suffix == path.suffix.lower()), mime_type)
+            if mapped_asset_id and project_id:
+                self.visual_store._conn.execute(
+                    "UPDATE visual_assets SET project_id=?,updated_at=? WHERE id=? AND user_id=? AND (project_id='' OR project_id IS NULL)",
+                    (project_id[:160], now(), mapped_asset_id, user_id),
+                )
             if not mapped_asset_id and mime_type in ALLOWED_MIME:
                 # Keep large local videos and already-organized photo trees in
                 # place.  We inspect image/document bytes for metadata, but
@@ -736,6 +741,7 @@ class DataOrganizationService:
                     source="existing_data_import", relative_path=str(row.get("relative_path") or ""),
                     source_metadata={"root": row.get("root"), "relative_path": row.get("relative_path"), "sha256": row.get("sha256")},
                     external_path=str(path), sha256_override=str(row.get("sha256") or ""),
+                    project_id=project_id,
                 )
                 mapped_asset_id = str(imported["asset_id"])
             source_id = self._source(
@@ -760,7 +766,7 @@ class DataOrganizationService:
                 confidence=1.0, status="verified", evidence={"sha256": row.get("sha256"), "relative_path": row.get("relative_path")}, source_id=source_id,
             )
             asset_row = self.visual_store._rows("SELECT * FROM visual_assets WHERE id=? AND user_id=?", (mapped_asset_id, user_id))[0]
-            self._map_resource(user_id, "visual_asset", mapped_asset_id, asset_row)
+            self._map_resource(user_id, "visual_asset", mapped_asset_id, asset_row, project_id=project_id)
             return
 
         if resource_type == "visual_asset":
@@ -907,7 +913,7 @@ class DataOrganizationService:
         for resource_type, resource_id, row in catalog:
             try:
                 with self.visual_store._lock:
-                    self._map_resource(user_id, resource_type, resource_id, row)
+                    self._map_resource(user_id, resource_type, resource_id, row, project_id=project_id)
                     self.visual_store._conn.execute(
                         "UPDATE backend_sync_items SET status='completed',remote_id=?,attempts=attempts+1,updated_at=? WHERE sync_run_id=? AND resource_type=? AND resource_id=?",
                         (resource_id, now(), run_id, resource_type, resource_id),

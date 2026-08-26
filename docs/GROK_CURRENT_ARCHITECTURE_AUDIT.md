@@ -88,6 +88,19 @@ Grok TUI 本 session 未掛 `@insforge/mcp`（只有 github / google_drive / tas
 
 InsForge 官方能力（文件，非 MCP fetch-docs 回傳）：Postgres + RLS + pgvector、Storage（S3 相容）、Edge Functions、Model Gateway、REST `/api/database/records/{table}`、admin SQL 需 admin key 且擋 system tables。
 
+## 本機資料根目錄實查（Linux runner，非 Windows `D:\柏能資料`）
+
+| 路徑 | 實況 |
+|---|---|
+| `data/` | `current_term.example.yaml`、啟動複製的 `current_term.yaml`、空的 `visual-assets/` |
+| `outputs/` | 空的 `visual-exports/` |
+| `output/` | 不存在 |
+| `mobile-shots/` | 12 張 UI 截圖 + `results.json`（驗收證據，不是社團相簿） |
+| `knowledge/` | 517 份 markdown（已在 repo） |
+| `D:\柏能資料\淡大劇本` 等同層素材樹 | **不存在** → `BLOCKED_BY_EXTERNAL_DEPENDENCY` |
+
+本 runner **沒有**對 `mobile-shots` 執行 organize：那些是介面截圖，不能當成淡江活動照片匯入。外部 29GB 樹未出現，沒有假裝匯入。
+
 ## 這台主機沒有的路徑
 
 `D:\柏能資料\…` 與 `/root/淡大劇本` 等 Windows 同層媒體樹：**不存在**。`DATA_ORGANIZATION_IMPORT_ROOTS` 只在資料夾存在時才加入，部署環境不會誤掃。標為 `BLOCKED_BY_EXTERNAL_DEPENDENCY`（路徑／掛載不在此 runner）。

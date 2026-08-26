@@ -99,11 +99,11 @@ def test_inventory_and_mapping_are_real_idempotent_non_destructive_and_owner_sco
     real_map = service._map_resource
     failed_once = {"value": False}
 
-    def fail_asset_once(owner_id, resource_type, resource_id, row):
+    def fail_asset_once(owner_id, resource_type, resource_id, row, project_id=""):
         if resource_type == "visual_asset" and not failed_once["value"]:
             failed_once["value"] = True
             raise RuntimeError("synthetic mapping boundary failure")
-        return real_map(owner_id, resource_type, resource_id, row)
+        return real_map(owner_id, resource_type, resource_id, row, project_id=project_id)
 
     monkeypatch.setattr(service, "_map_resource", fail_asset_once)
     partial = service.run(user_a, idempotency_key="organization-partial")
@@ -259,11 +259,12 @@ def test_external_media_import_keeps_original_path_and_only_writes_derivatives(o
     image_path.write_bytes(picture(size=(320, 180)))
     video_path.write_bytes(b"video-original-bytes")
     monkeypatch.setattr(config, "DATA_ORGANIZATION_IMPORT_ROOTS", (source_root,))
+    project_id = sessions.create_project(user_id, "社課影像", "promotion")
 
-    result = service.run(user_id, idempotency_key="external-media-import")
+    result = service.run(user_id, idempotency_key="external-media-import", project_id=project_id)
     assert result["status"] == "completed", result.get("error_log")
     rows = store._conn.execute(
-        "SELECT original_filename,storage_path,thumbnail_path,asset_type FROM visual_assets WHERE user_id=? ORDER BY original_filename",
+        "SELECT original_filename,storage_path,thumbnail_path,asset_type,project_id FROM visual_assets WHERE user_id=? ORDER BY original_filename",
         (user_id,),
     ).fetchall()
     assert {row["original_filename"] for row in rows} == {"社課照片.png", "社課花絮.mp4"}
@@ -273,6 +274,7 @@ def test_external_media_import_keeps_original_path_and_only_writes_derivatives(o
     assert image_path.read_bytes() == picture(size=(320, 180))
     assert video_path.read_bytes() == b"video-original-bytes"
     assert Path(by_name["社課照片.png"]["thumbnail_path"]).exists()
+    assert {row["project_id"] for row in rows} == {project_id}
     rendition = store.asset_file(
         store._conn.execute("SELECT id FROM visual_assets WHERE user_id=? AND original_filename=?", (user_id, "社課照片.png")).fetchone()[0],
         user_id,
