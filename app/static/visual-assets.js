@@ -191,8 +191,8 @@ async function loadDashboard() {
 }
 
 function setUploadFiles(files, mode = "batch") {
-  const extensions = /\.(jpe?g|png|webp|gif|avif|jfif|mp4|mov|webm|pdf|docx|pptx|xlsx|gs|txt|md|csv)$/i;
-  const accepted = [...files].filter((file) => file.type.startsWith("image/") || file.type.startsWith("video/") || extensions.test(file.name));
+  const extensions = /\.(jpe?g|png|webp|gif|avif|jfif|cr2|arw|psd|svg|mp4|mov|webm|m4v|avi|mkv|mts|mp3|wav|m4a|flac|ogg|aac|wma|pdf|docx|pptx|xlsx|gs|txt|md|csv|json|yaml|yml|tsv|html|xml|ini|srt|edl|fcpxml|url|zip|wfp|wfpbundle|bdm|cpi|mpl)$/i;
+  const accepted = [...files].filter((file) => file.type.startsWith("image/") || file.type.startsWith("video/") || file.type.startsWith("audio/") || extensions.test(file.name));
   visualState.uploadFiles = accepted.slice(0, mode === "folder" ? 300 : 30);
   visualState.uploadMode = mode;
   $("import-mode").textContent = mode === "folder" ? "資料夾匯入：保留相對路徑與 manifest" : mode === "camera" ? "手機拍照上傳" : "一般批次上傳";
@@ -376,7 +376,7 @@ async function loadReview(kind) {
 }
 
 const INVENTORY_LABELS = {
-  images: "圖片", videos: "影片", documents: "文件", artifacts: "Artifact", knowledge_sources: "知識來源",
+  images: "圖片", videos: "影片", audio: "音訊", other_files: "其他檔案", documents: "文件", artifacts: "Artifact", knowledge_sources: "知識來源",
   clubs: "社團", schools: "學校", people: "人物", events: "活動", dates: "日期",
   duplicate_assets: "重複素材", missing_sources: "缺少來源", pending_review: "待確認", analysis_failed: "無法分析",
 };
