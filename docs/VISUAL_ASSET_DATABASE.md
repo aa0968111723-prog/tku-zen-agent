@@ -133,6 +133,30 @@ append-only audit；列表端點有 page/limit 並受 `VISUAL_SEARCH_LIMIT` 限�
 | GET | `/api/learning/insights` | 搜尋／工具／修正洞察 |
 | GET | `/api/learning/corrections` | 修正紀錄 |
 | POST | `/api/learning/approve` | 管理者審核修正紀錄 |
+| GET | `/api/visual-backend/status` | InsForge 設定／可用性；不回傳金鑰 |
+| POST | `/api/visual-sync/run` | 以 asset id 批次同步 metadata，逐檔部分成功與 idempotency |
+| GET | `/api/visual-sync/{id}` | 查看同步 manifest、逐檔狀態與錯誤 |
+| POST | `/api/visual-sync/{id}/retry` | 只重試未完成項目，建立新的 resumed run |
+| POST | `/api/visual-sync/{id}/rollback` | 非破壞性本地回滾參照，不刪原圖或遠端資料 |
+
+## InsForge adapter 與 migration
+
+遠端呼叫集中於 server-only `app/services/insforge_adapters.py`：
+`InsForgeDatabaseAdapter`（PostgREST CRUD/RPC）、`InsForgeStorageAdapter`
+（upload-strategy）、`InsForgeSearchAdapter`（hybrid-search RPC）與
+`InsForgeFunctionAdapter`（Edge Function）。`InsForgeSyncAdapter` 負責把本地
+source-of-truth 組成 visual_assets/entities/asset_entities/embeddings payload，並以
+`sync_runs`、`sync_run_items`、`visual_asset_backend_refs` 保存可續傳狀態。前端不載入
+InsForge SDK，也不會取得 service key。
+
+本地啟動會套用 `0003_insforge_visual_backend`，建立 `sources`、`entities`、
+`asset_entities`、`events`、`review_queue`、`embeddings`、`sync_runs` 等相容表；
+PostgreSQL/pgvector 的正式 DDL 在 `migrations/insforge/001_visual_backend.sql`，
+必須由 InsForge migration runner 套用後才可啟用遠端搜尋。未設定
+`INSFORGE_BASE_URL`、server key、`INSFORGE_OWNER_ID` 或未明確設
+`INSFORGE_TRUSTED=true` 時，sync 會保留本地資料並回傳
+`BLOCKED_BY_EXTERNAL_DEPENDENCY`。private 素材還需要
+`INSFORGE_ALLOW_PRIVATE_SYNC=true` 才允許送出 binary。
 
 ## 部署設定
 
@@ -143,6 +167,11 @@ VISUAL_EXPORT_DIR=/persistent/visual-exports
 VISUAL_MAX_FILE_BYTES=20000000
 VISUAL_MAX_BATCH=30
 VISUAL_SEARCH_LIMIT=60
+INSFORGE_BASE_URL=https://your-project.insforge.app
+INSFORGE_SERVICE_KEY=（只放伺服器 secret）
+INSFORGE_OWNER_ID=（與 InsForge Auth user id 的明確映射）
+INSFORGE_TRUSTED=false
+INSFORGE_ALLOW_PRIVATE_SYNC=false
 FAL_KEY=...
 ```
 

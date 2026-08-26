@@ -15,6 +15,8 @@ from . import config
 from .services import audit, auth, fal, permissions
 from .services.visual_analysis import analyze_asset
 from .services.visual_assets import VisualAssetError, get_visual_store
+from .services.insforge_adapters import BLOCKED_BY_EXTERNAL_DEPENDENCY, InsForgeUnavailable, get_insforge_adapters
+from .services.insforge_sync import InsForgeSyncAdapter
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(auth.require_user)], tags=["visual-assets"])
@@ -81,6 +83,17 @@ class ApproveLearningRequest(StrictRequest):
 
 class AssetConfirmRequest(StrictRequest):
     reason: str = Field(default="使用者確認整筆素材",max_length=1000)
+
+
+class VisualSyncRequest(StrictRequest):
+    asset_ids: list[str] = Field(min_length=1,max_length=100)
+    project_id: str = Field(default="",max_length=160)
+    idempotency_key: str = Field(min_length=8,max_length=160)
+    resumed_from: str = Field(default="",max_length=80)
+
+
+class VisualSyncRetryRequest(StrictRequest):
+    asset_ids: list[str] | None = Field(default=None,max_length=100)
 
 
 def _media_type(upload: UploadFile) -> str:
@@ -256,7 +269,32 @@ async def search_visual_assets(
     )
     store.record_learning(user_id,"search",query=q,payload={"filters":parsed,"result_ids":[i["asset_id"] for i in items]},outcome=str(total))
     audit.write_audit(action="visual.search",actor_user_id=user_id,resource="visual-assets",detail={"query":q[:200],"count":total},request=request)
-    return {"items":items,"total":total,"page":page,"limit":capped,"parsed_conditions":parsed}
+    backend: dict[str,Any] = {"name":"local","status":"active"}
+    # Optional remote ranking is additive.  ACL remains local-first: only
+    # assets already visible to this user can be hydrated into the response.
+    if config.INSFORGE_SYNC_MODE in {"dual", "insforge"}:
+        try:
+            remote = get_insforge_adapters().search.search({"query": q[:1000], "filters": parsed, "owner_id": config.INSFORGE_OWNER_ID or user_id, "page": page, "limit": capped})
+            local_by_id = {str(item["asset_id"]): item for item in items}
+            remote_items: list[dict[str,Any]] = []
+            for row in remote:
+                asset_id = str(row.get("asset_id") or row.get("id") or "")
+                if not asset_id:
+                    continue
+                hydrated = local_by_id.get(asset_id) or store.get_asset(asset_id,user_id)
+                if hydrated:
+                    hydrated = dict(hydrated)
+                    hydrated["match_reason"] = row.get("match_reason") or row.get("reason") or "InsForge hybrid search"
+                    hydrated["remote_score"] = row.get("score")
+                    remote_items.append(hydrated)
+            if remote_items:
+                seen = {str(item["asset_id"]) for item in remote_items}
+                items = remote_items + [item for item in items if str(item["asset_id"]) not in seen]
+                items = items[:capped]
+            backend = {"name":"insforge","status":"active","remote_count":len(remote_items)}
+        except InsForgeUnavailable as exc:
+            backend = {"name":"insforge","status":"blocked","code":BLOCKED_BY_EXTERNAL_DEPENDENCY,"message":str(exc),"fallback":"local"}
+    return {"items":items,"total":total,"page":page,"limit":capped,"parsed_conditions":parsed,"backend":backend}
 
 
 @router.post("/visual-assets/search-by-image")
@@ -482,3 +520,54 @@ async def approve_learning(req: ApproveLearningRequest,request: Request,perms: p
         raise HTTPException(status_code=404,detail="找不到修正紀錄")
     audit.write_audit(action="visual.learning_approve",actor_user_id=perms.user_id,resource=req.correction_id,request=request)
     return item
+
+
+@router.get("/visual-backend/status")
+async def visual_backend_status(user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    """Return external dependency state without exposing credentials."""
+    del user_id
+    return {"backend": "insforge", "status": get_insforge_adapters().database.health().as_dict(), "local_source_of_truth": True}
+
+
+@router.post("/visual-sync/run", status_code=202)
+async def run_visual_sync(req: VisualSyncRequest, request: Request, user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    """Synchronize metadata (and trusted non-private files) to InsForge.
+
+    This is deliberately synchronous per batch but durable: every item is
+    committed independently, so a failed remote request never loses local data.
+    """
+    try:
+        result = InsForgeSyncAdapter(get_visual_store()).run(
+            user_id, asset_ids=req.asset_ids, project_id=req.project_id,
+            idempotency_key=req.idempotency_key, resumed_from=req.resumed_from,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    audit.write_audit(action="visual.sync", actor_user_id=user_id, resource=result.get("id", ""), detail={"status": result.get("status"), "failed": result.get("failed_count", 0)}, request=request, ok=result.get("status") != "failed")
+    return {"backend": "insforge", "local_source_of_truth": True, **result}
+
+
+@router.get("/visual-sync/{run_id}")
+async def get_visual_sync(run_id: str, user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    result = InsForgeSyncAdapter(get_visual_store()).get_run(run_id, user_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="找不到同步紀錄")
+    return result
+
+
+@router.post("/visual-sync/{run_id}/retry", status_code=202)
+async def retry_visual_sync(run_id: str, req: VisualSyncRetryRequest, request: Request, user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    result = InsForgeSyncAdapter(get_visual_store()).retry(run_id, user_id, req.asset_ids)
+    if not result:
+        raise HTTPException(status_code=404, detail="找不到同步紀錄")
+    audit.write_audit(action="visual.sync_retry", actor_user_id=user_id, resource=run_id, detail={"new_run_id": result.get("id")}, request=request)
+    return result
+
+
+@router.post("/visual-sync/{run_id}/rollback")
+async def rollback_visual_sync(run_id: str, request: Request, user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    result = InsForgeSyncAdapter(get_visual_store()).rollback(run_id, user_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="找不到同步紀錄")
+    audit.write_audit(action="visual.sync_rollback", actor_user_id=user_id, resource=run_id, detail={"remote_delete": False}, request=request)
+    return {"warning": "僅標記本地同步參照已回滾，未刪除原始檔或遠端資料", **result}

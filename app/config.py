@@ -164,6 +164,20 @@ VISUAL_MAX_FILE_BYTES = max(1_000_000, int(os.getenv("VISUAL_MAX_FILE_BYTES") or
 VISUAL_MAX_BATCH = max(1, min(100, int(os.getenv("VISUAL_MAX_BATCH") or 30)))
 VISUAL_SEARCH_LIMIT = max(1, min(200, int(os.getenv("VISUAL_SEARCH_LIMIT") or 60)))
 
+# ── InsForge 視覺資料層（可選、server-only）────────────────────
+# 預設停用；本地 SQLite/檔案儲存仍是 source-of-truth。API key 絕不送到瀏覽器。
+INSFORGE_BASE_URL = (os.getenv("INSFORGE_BASE_URL") or "").strip().rstrip("/")
+INSFORGE_ANON_KEY = _secret("INSFORGE_ANON_KEY")
+INSFORGE_SERVICE_KEY = _secret("INSFORGE_SERVICE_KEY")
+INSFORGE_TIMEOUT_SECONDS = max(2.0, float(os.getenv("INSFORGE_TIMEOUT_SECONDS") or 15))
+INSFORGE_STORAGE_BUCKET = (os.getenv("INSFORGE_STORAGE_BUCKET") or "visual-assets").strip()
+INSFORGE_SEARCH_RPC = (os.getenv("INSFORGE_SEARCH_RPC") or "visual_hybrid_search").strip()
+INSFORGE_FUNCTION_PREFIX = (os.getenv("INSFORGE_FUNCTION_PREFIX") or "functions").strip("/")
+INSFORGE_TRUSTED = _bool("INSFORGE_TRUSTED", False)
+INSFORGE_SYNC_MODE = (os.getenv("INSFORGE_SYNC_MODE") or "local").strip().lower()
+INSFORGE_ALLOW_PRIVATE_SYNC = _bool("INSFORGE_ALLOW_PRIVATE_SYNC", False)
+INSFORGE_OWNER_ID = (os.getenv("INSFORGE_OWNER_ID") or "").strip()
+
 # ── 認證 ─────────────────────────────────────────────────────
 # local  = 單人本機模式，不需要登入，所有請求都是同一個使用者
 # token  = 部署模式，要先用 APP_ACCESS_TOKEN 換到身分才能用

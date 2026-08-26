@@ -108,6 +108,152 @@ def _phase1_media_import(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE visual_assets SET aspect_ratio=CASE WHEN height>0 THEN CAST(width AS REAL)/height ELSE 0 END")
 
 
+def _insforge_backend(conn: sqlite3.Connection) -> None:
+    """Add a stable local mapping layer for the optional InsForge backend.
+
+    These tables intentionally do not replace the existing ``visual_*`` tables.
+    They let sync runs be resumed/rolled back while keeping the local database
+    authoritative when the external service is unavailable.
+    """
+    for declaration in (
+        "project_id TEXT NOT NULL DEFAULT ''",
+        "owner_id TEXT NOT NULL DEFAULT ''",
+        "duration REAL NOT NULL DEFAULT 0",
+        "permission_status TEXT NOT NULL DEFAULT 'private'",
+    ):
+        _add_column(conn, "visual_assets", declaration)
+    conn.execute("UPDATE visual_assets SET owner_id=user_id WHERE owner_id='' OR owner_id IS NULL")
+    conn.execute("UPDATE visual_assets SET permission_status=privacy WHERE permission_status='' OR permission_status IS NULL OR permission_status='private'")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS sources (
+            id TEXT PRIMARY KEY,
+            source_type TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '',
+            original_file TEXT NOT NULL DEFAULT '',
+            captured_at TEXT NOT NULL DEFAULT '',
+            reliability_score REAL NOT NULL DEFAULT 0,
+            owner_id TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_sources_owner ON sources(owner_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS entities (
+            id TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            aliases TEXT NOT NULL DEFAULT '[]',
+            description TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 0,
+            verification_status TEXT NOT NULL DEFAULT 'pending_review',
+            owner_id TEXT NOT NULL DEFAULT '',
+            source_id TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_entities_scope ON entities(owner_id, type, name);
+
+        CREATE TABLE IF NOT EXISTS asset_entities (
+            asset_id TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            relation_type TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 0,
+            evidence TEXT NOT NULL DEFAULT '{}',
+            verified_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(asset_id, entity_id, relation_type)
+        );
+        CREATE INDEX IF NOT EXISTS idx_asset_entities_entity ON asset_entities(entity_id, asset_id);
+
+        CREATE TABLE IF NOT EXISTS events (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            date TEXT NOT NULL DEFAULT '',
+            time TEXT NOT NULL DEFAULT '',
+            location TEXT NOT NULL DEFAULT '',
+            club_id TEXT NOT NULL DEFAULT '',
+            school_id TEXT NOT NULL DEFAULT '',
+            verification_status TEXT NOT NULL DEFAULT 'pending_review',
+            owner_id TEXT NOT NULL DEFAULT '',
+            source_id TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_events_scope ON events(owner_id, school_id, date);
+
+        CREATE TABLE IF NOT EXISTS review_queue (
+            id TEXT PRIMARY KEY,
+            asset_id TEXT NOT NULL,
+            proposed_change TEXT NOT NULL DEFAULT '{}',
+            confidence REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending_review',
+            reviewer_id TEXT NOT NULL DEFAULT '',
+            reviewed_at TEXT NOT NULL DEFAULT '',
+            owner_id TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_review_queue_scope ON review_queue(owner_id, status, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS embeddings (
+            id TEXT PRIMARY KEY,
+            asset_id TEXT NOT NULL,
+            text_embedding TEXT NOT NULL DEFAULT '[]',
+            image_embedding TEXT NOT NULL DEFAULT '[]',
+            model TEXT NOT NULL DEFAULT '',
+            owner_id TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(asset_id, model)
+        );
+
+        CREATE TABLE IF NOT EXISTS sync_runs (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL DEFAULT 'insforge',
+            owner_id TEXT NOT NULL DEFAULT '',
+            project_id TEXT NOT NULL DEFAULT '',
+            manifest TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending',
+            imported_count INTEGER NOT NULL DEFAULT 0,
+            failed_count INTEGER NOT NULL DEFAULT 0,
+            resumed_from TEXT NOT NULL DEFAULT '',
+            error_log TEXT NOT NULL DEFAULT '[]',
+            rollback_status TEXT NOT NULL DEFAULT 'not_requested',
+            idempotency_key TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(owner_id, idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_sync_runs_scope ON sync_runs(owner_id, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS sync_run_items (
+            id TEXT PRIMARY KEY,
+            sync_run_id TEXT NOT NULL,
+            asset_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            remote_id TEXT NOT NULL DEFAULT '',
+            remote_storage_path TEXT NOT NULL DEFAULT '',
+            error_code TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(sync_run_id, asset_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_sync_run_items_status ON sync_run_items(sync_run_id, status);
+
+        CREATE TABLE IF NOT EXISTS visual_asset_backend_refs (
+            asset_id TEXT PRIMARY KEY,
+            backend TEXT NOT NULL,
+            remote_id TEXT NOT NULL DEFAULT '',
+            remote_storage_path TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            error_code TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            last_synced_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+
+
 def apply_visual_migrations(conn: sqlite3.Connection, baseline_sql: str) -> list[str]:
     """Apply missing migrations and return the versions applied this run."""
     conn.execute(
@@ -120,6 +266,7 @@ def apply_visual_migrations(conn: sqlite3.Connection, baseline_sql: str) -> list
     migrations: list[Migration] = [
         ("0001_initial_visual_schema", lambda current: current.executescript(baseline_sql)),
         ("0002_phase1_media_import", _phase1_media_import),
+        ("0003_insforge_visual_backend", _insforge_backend),
     ]
     completed: list[str] = []
     for version, migration in migrations:

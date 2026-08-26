@@ -57,7 +57,7 @@ def test_migration_ledger_and_document_media_are_persistent(visual_env):
         assert "期初茶會" in item["ocr_text"]
         store = visual_assets.get_visual_store()
         versions = {row[0] for row in store._conn.execute("SELECT version FROM visual_schema_migrations")}
-        assert versions == {"0001_initial_visual_schema","0002_phase1_media_import"}
+        assert versions == {"0001_initial_visual_schema","0002_phase1_media_import","0003_insforge_visual_backend"}
         assert store._conn.execute("SELECT length(storage_path)>0 FROM visual_assets WHERE id=?",(item["asset_id"],)).fetchone()[0] == 1
         assert store._conn.execute("SELECT typeof(storage_path) FROM visual_assets WHERE id=?",(item["asset_id"],)).fetchone()[0] == "text"
 
@@ -180,3 +180,42 @@ def test_school_hard_boundary_and_different_user_isolation(visual_env,monkeypatc
         assert second.get("/api/visual-assets/search").json()["total"] == 0
         assert second.get("/api/people?q=私人測試人物").json()["total"] == 0
         assert second.get("/api/clubs?q=領袖禪學社").json()["total"] == 0
+
+
+def test_insforge_backend_status_is_explicitly_blocked_when_unconfigured(visual_env,monkeypatch):
+    from app.services.insforge_adapters import reset_insforge_adapters
+    monkeypatch.setattr(config,"INSFORGE_BASE_URL","")
+    monkeypatch.setattr(config,"INSFORGE_SERVICE_KEY","")
+    monkeypatch.setattr(config,"INSFORGE_ANON_KEY","")
+    reset_insforge_adapters()
+    with TestClient(main.app) as client:
+        response = client.get("/api/visual-backend/status")
+    assert response.status_code == 200
+    payload = response.json()["status"]
+    assert payload["available"] is False
+    assert payload["code"] == "BLOCKED_BY_EXTERNAL_DEPENDENCY"
+
+
+def test_insforge_sync_is_durable_and_does_not_send_private_asset_without_explicit_consent(visual_env,monkeypatch):
+    from app.services import visual_assets
+    from app.services.insforge_adapters import reset_insforge_adapters
+    monkeypatch.setattr(config,"INSFORGE_BASE_URL","")
+    monkeypatch.setattr(config,"INSFORGE_SERVICE_KEY","")
+    monkeypatch.setattr(config,"INSFORGE_ANON_KEY","")
+    monkeypatch.setattr(config,"INSFORGE_OWNER_ID","")
+    reset_insforge_adapters()
+    with TestClient(main.app) as client:
+        response = upload(client,picture(),auto=False)
+        asset_id = response.json()["items"][0]["asset_id"]
+        sync = client.post("/api/visual-sync/run",json={"asset_ids":[asset_id],"idempotency_key":"sync-test-001"})
+        assert sync.status_code == 202
+        body = sync.json()
+        assert body["status"] == "blocked"
+        assert body["items"][0]["error_code"] == "BLOCKED_BY_EXTERNAL_DEPENDENCY"
+        again = client.post("/api/visual-sync/run",json={"asset_ids":[asset_id],"idempotency_key":"sync-test-001"})
+        assert again.json()["id"] == body["id"]
+        rollback = client.post(f"/api/visual-sync/{body['id']}/rollback")
+        assert rollback.status_code == 200
+        assert rollback.json()["rollback_status"] == "complete"
+    store = visual_assets.get_visual_store()
+    assert store._rows("SELECT status FROM visual_asset_backend_refs WHERE asset_id=?",(asset_id,))[0]["status"] == "rolled_back_local"
