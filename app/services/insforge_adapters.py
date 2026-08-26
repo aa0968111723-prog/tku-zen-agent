@@ -22,8 +22,27 @@ from .http_guard import CircuitBreaker, UnsafeOutboundURL, assert_public_https_u
 logger = logging.getLogger(__name__)
 _BREAKER = CircuitBreaker()
 
+# Transport-level retries are only safe for methods that do not create or
+# mutate rows. POST/PATCH/PUT/DELETE must not be replayed after a timeout.
+_SAFE_RETRY_METHODS = {"GET", "HEAD", "OPTIONS"}
+_RETRY_STATUSES = {429, 502, 503, 504}
+_BREAKER_STATUSES = {500, 502, 503, 504}
+
 
 BLOCKED_BY_EXTERNAL_DEPENDENCY = "BLOCKED_BY_EXTERNAL_DEPENDENCY"
+
+
+def _retry_after_seconds(response: httpx.Response | None, attempt: int) -> float:
+    fallback = min(2.0, 0.25 * (2 ** attempt))
+    if response is None:
+        return fallback
+    raw = (response.headers.get("Retry-After") or "").strip()
+    if not raw:
+        return fallback
+    try:
+        return max(0.0, min(30.0, float(raw)))
+    except ValueError:
+        return fallback
 
 
 class InsForgeUnavailable(RuntimeError):
@@ -68,10 +87,12 @@ class _HTTPAdapter:
     def _headers(self, *, json_body: bool = False, request_id: str = "") -> dict[str, str]:
         self._require_configured()
         # REST docs use Authorization: Bearer; MCP/admin tools also send x-api-key.
+        rid = request_id or new_request_id()
         headers = {
             "Authorization": f"Bearer {self.key}",
             "x-api-key": self.key,
-            "X-Request-Id": request_id or new_request_id(),
+            "X-Request-Id": rid,
+            "Idempotency-Key": rid,
         }
         if json_body:
             headers["Content-Type"] = "application/json"
@@ -88,7 +109,9 @@ class _HTTPAdapter:
             raise InsForgeUnavailable(f"InsForge base URL 不安全: {exc}") from exc
         request_id = new_request_id()
         last_error: Exception | None = None
-        attempts = max(1, int(getattr(config, "INSFORGE_HTTP_ATTEMPTS", 2)))
+        method_upper = method.upper()
+        retry_allowed = method_upper in _SAFE_RETRY_METHODS
+        attempts = max(1, int(getattr(config, "INSFORGE_HTTP_ATTEMPTS", 2))) if retry_allowed else 1
         extra_headers = kwargs.pop("headers", {}) or {}
         allow_statuses = set(kwargs.pop("allow_statuses", ()) or ())
         json_body = "json" in kwargs
@@ -103,8 +126,12 @@ class _HTTPAdapter:
                     if response.status_code in allow_statuses:
                         _BREAKER.record_success()
                         return response
-                    if response.status_code in {429, 502, 503, 504} and attempt + 1 < attempts:
-                        time.sleep(min(2.0, 0.25 * (2 ** attempt)))
+                    if (
+                        retry_allowed
+                        and response.status_code in _RETRY_STATUSES
+                        and attempt + 1 < attempts
+                    ):
+                        time.sleep(_retry_after_seconds(response, attempt))
                         last_error = httpx.HTTPStatusError("retryable", request=response.request, response=response)
                         continue
                     response.raise_for_status()
@@ -118,25 +145,33 @@ class _HTTPAdapter:
                 raise
             except httpx.HTTPStatusError as exc:
                 last_error = exc
-                if exc.response is not None and exc.response.status_code < 500 and exc.response.status_code != 429:
-                    break
-            except (httpx.HTTPError, OSError) as exc:
-                last_error = exc
-                if attempt + 1 < attempts:
-                    time.sleep(min(2.0, 0.25 * (2 ** attempt)))
+                status = exc.response.status_code if exc.response is not None else 0
+                if retry_allowed and status in _RETRY_STATUSES and attempt + 1 < attempts:
+                    time.sleep(_retry_after_seconds(exc.response, attempt))
                     continue
                 break
-        _BREAKER.record_failure()
+            except (httpx.HTTPError, OSError) as exc:
+                last_error = exc
+                if retry_allowed and attempt + 1 < attempts:
+                    time.sleep(_retry_after_seconds(None, attempt))
+                    continue
+                break
+        status = 0
         if isinstance(last_error, httpx.HTTPStatusError) and last_error.response is not None:
+            status = last_error.response.status_code
+            # Client/auth errors are not provider outages.
+            if status in _BREAKER_STATUSES:
+                _BREAKER.record_failure()
             detail = last_error.response.text[:1000]
             logger.warning(
                 "insforge request failed status=%s path=%s request_id=%s",
-                last_error.response.status_code, path, request_id,
+                status, path, request_id,
             )
             raise InsForgeUnavailable(
-                f"InsForge request failed ({last_error.response.status_code}): {detail or last_error}",
+                f"InsForge request failed ({status}): {detail or last_error}",
                 detail=detail,
             ) from last_error
+        _BREAKER.record_failure()
         logger.warning("insforge request failed path=%s request_id=%s error=%s", path, request_id, type(last_error).__name__)
         raise InsForgeUnavailable(f"InsForge request failed: {last_error}", detail=str(last_error)) from last_error
 

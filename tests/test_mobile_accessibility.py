@@ -125,7 +125,10 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-@pytest.mark.skipif(not _playwright_available(), reason="沒有 node + playwright，跳過實跑檢查")
+@pytest.mark.skipif(
+    not _playwright_available(),
+    reason="BLOCKED_BY_EXTERNAL_DEPENDENCY: Chromium/playwright is not installed in this environment",
+)
 def test_mobile_viewports_end_to_end(tmp_path):
     """在 320/360/390/430 實際跑一次，任何一項失敗都算失敗。"""
     port = _free_port()

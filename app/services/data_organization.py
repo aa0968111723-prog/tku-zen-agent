@@ -251,6 +251,35 @@ class DataOrganizationService:
         relative = str(row.get("relative_path") or "").replace(chr(92), "/").strip("/")
         return f"{str(row.get('root') or '').strip()}:{relative}"
 
+    @staticmethod
+    def _source_sha_map(assets: list[dict[str, Any]]) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for row in assets:
+            key = DataOrganizationService._source_key(row)
+            digest = str(row.get("sha256") or "")
+            if key and digest:
+                mapping[key] = digest
+        return mapping
+
+    def _content_is_unregistered(
+        self,
+        row: dict[str, Any],
+        registered_source_keys: set[str],
+        registered_paths: set[str],
+        source_sha: dict[str, str],
+    ) -> bool:
+        source_key = self._filesystem_source_key(row)
+        digest = str(row.get("sha256") or "")
+        if source_key and source_key in source_sha and digest and source_sha[source_key] != digest:
+            return True
+        if source_key in registered_source_keys:
+            return False
+        try:
+            resolved = str((Path(str(row.get("_base_path") or config.OUTPUT_DIR)) / row["relative_path"]).resolve())
+        except (OSError, RuntimeError, TypeError, ValueError):
+            resolved = ""
+        return resolved not in registered_paths
+
     def _lineage_source_keys(self, user_id: str) -> set[str]:
         """Return source keys recorded for loose files, including SHA dedupes.
 
@@ -390,11 +419,11 @@ class DataOrganizationService:
         }
         registered_source_keys = {key for key in (self._source_key(row) for row in all_assets) if key}
         registered_source_keys.update(self._lineage_source_keys(user_id))
+        source_sha = self._source_sha_map(all_assets)
         unregistered = [
             row for row in filesystem
             if row["root"] != "knowledge"
-            and self._filesystem_source_key(row) not in registered_source_keys
-            and str((Path(str(row.get("_base_path") or config.OUTPUT_DIR)) / row["relative_path"]).resolve()) not in registered_paths
+            and self._content_is_unregistered(row, registered_source_keys, registered_paths, source_sha)
         ]
         asset_types = Counter(str(row.get("asset_type") or "image") for row in assets)
         filesystem_types = Counter(row["kind"] for row in unregistered)
@@ -590,6 +619,14 @@ class DataOrganizationService:
             ) if key
         }
         registered_source_keys.update(self._lineage_source_keys(user_id))
+        source_sha = {
+            key: str(row.get("sha256") or "")
+            for row in self.visual_store._rows(
+                "SELECT source_metadata,sha256 FROM visual_assets WHERE user_id=?" + (" AND project_id=?" if project_id else ""),
+                (user_id, project_id) if project_id else (user_id,),
+            )
+            if (key := self._source_key(row))
+        }
         for candidate in self._filesystem_candidates(user_id):
             if candidate["root"] == "knowledge":
                 continue
@@ -598,9 +635,19 @@ class DataOrganizationService:
                 continue
             resolved = (root / str(candidate["relative_path"])).resolve()
             source_key = self._filesystem_source_key(candidate)
-            if str(resolved) in registered_paths or source_key in registered_source_keys:
+            known_sha = source_sha.get(source_key, "")
+            if known_sha and known_sha == str(candidate.get("sha256") or ""):
                 continue
-            candidate = {**candidate, "path": resolved}
+            if not known_sha and (str(resolved) in registered_paths or source_key in registered_source_keys):
+                continue
+            previous = ""
+            if known_sha and known_sha != str(candidate.get("sha256") or ""):
+                previous_rows = self.visual_store._rows(
+                    "SELECT id FROM visual_assets WHERE user_id=? AND sha256=? ORDER BY created_at DESC LIMIT 1",
+                    (user_id, known_sha),
+                )
+                previous = str(previous_rows[0]["id"]) if previous_rows else ""
+            candidate = {**candidate, "path": resolved, "replaces_asset_id": previous}
             resource_id = _stable_id("loose_file", user_id, candidate["root"], candidate["relative_path"], candidate["sha256"])
             catalog.append(("filesystem_asset", resource_id, candidate))
         snapshot = self.session_store.export_sync_snapshot(user_id, project_id=project_id or None, limit=5000)
@@ -742,6 +789,7 @@ class DataOrganizationService:
                     source_metadata={"root": row.get("root"), "relative_path": row.get("relative_path"), "sha256": row.get("sha256")},
                     external_path=str(path), sha256_override=str(row.get("sha256") or ""),
                     project_id=project_id,
+                    supersedes_asset_id=str(row.get("replaces_asset_id") or ""),
                 )
                 mapped_asset_id = str(imported["asset_id"])
             source_id = self._source(

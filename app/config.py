@@ -189,6 +189,8 @@ INSFORGE_BASE_URL = (os.getenv("INSFORGE_BASE_URL") or "").strip().rstrip("/")
 INSFORGE_ANON_KEY = _secret("INSFORGE_ANON_KEY")
 INSFORGE_SERVICE_KEY = _secret("INSFORGE_SERVICE_KEY")
 INSFORGE_TIMEOUT_SECONDS = max(2.0, float(os.getenv("INSFORGE_TIMEOUT_SECONDS") or 15))
+# Safe-method (GET/HEAD/OPTIONS) retries only. Mutating methods are never
+# auto-replayed by the HTTP adapter.
 INSFORGE_HTTP_ATTEMPTS = max(1, min(5, int(os.getenv("INSFORGE_HTTP_ATTEMPTS") or 2)))
 INSFORGE_STORAGE_BUCKET = (os.getenv("INSFORGE_STORAGE_BUCKET") or "visual-assets").strip()
 INSFORGE_SEARCH_RPC = (os.getenv("INSFORGE_SEARCH_RPC") or "visual_hybrid_search").strip()

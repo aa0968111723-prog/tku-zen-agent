@@ -33,15 +33,15 @@ def visual_env(tmp_db,monkeypatch):
     shutil.rmtree(root,ignore_errors=True)
 
 
-def folder_payload(entries: list[dict], files: list[tuple], *, key: str, resync: bool = False):
-    return {
-        "files": [("files", item) for item in files],
-        "data": {
-            "manifest": json.dumps({"total_count": len(entries), "items": entries}, ensure_ascii=False),
-            "idempotency_key": key, "root_name": "社團相簿", "school": "淡江大學",
-            "club": "領袖禪學社", "auto_analyze": "false", "resync": str(resync).lower(),
-        },
+def folder_payload(entries: list[dict], files: list[tuple], *, key: str, resync: bool = False, project_id: str = ""):
+    data = {
+        "manifest": json.dumps({"total_count": len(entries), "items": entries}, ensure_ascii=False),
+        "idempotency_key": key, "root_name": "社團相簿", "school": "淡江大學",
+        "club": "領袖禪學社", "auto_analyze": "false", "resync": str(resync).lower(),
     }
+    if project_id:
+        data["project_id"] = project_id
+    return {"files": [("files", item) for item in files], "data": data}
 
 
 def test_migration_ledger_and_document_media_are_persistent(visual_env):
@@ -120,6 +120,34 @@ def test_folder_import_partial_failure_resume_idempotency_and_resync(visual_env)
         replacement = changed.json()["items"][0]
         assert replacement["supersedes_asset_id"]
         assert replacement["relative_path"] == "茶會/第二張.png"
+        previous_id = replacement["supersedes_asset_id"]
+        auto_version = client.post("/api/visual-assets/import", **folder_payload(
+            [entries[1]], [("第二張.png",picture(color=(10,10,10)),"image/png")], key=key,
+        ))
+        assert auto_version.status_code == 201
+        newest = auto_version.json()["items"][0]
+        assert newest["asset_id"] != previous_id
+        assert newest["supersedes_asset_id"]
+        assert client.get(f"/api/visual-assets/{previous_id}").status_code == 200
+
+
+def test_folder_import_writes_validated_project_id(visual_env, tmp_db):
+    user_id = tmp_db.ensure_user("u_local", is_local=True)
+    project_id = tmp_db.create_project(user_id, "招生影片", "promotion")
+    entries = [{"client_key": "p1", "relative_path": "校園/入口.png"}]
+    with TestClient(main.app) as client:
+        denied = client.post(
+            "/api/visual-assets/import",
+            **folder_payload(entries, [("入口.png", picture(), "image/png")], key="folder-project-denied", project_id="p_not_owned"),
+        )
+        assert denied.status_code == 422
+        ok = client.post(
+            "/api/visual-assets/import",
+            **folder_payload(entries, [("入口.png", picture(), "image/png")], key="folder-project-ok", project_id=project_id),
+        )
+        assert ok.status_code == 201
+        item = ok.json()["items"][0]
+        assert item["project_id"] == project_id
 
 
 def test_exact_phase1_routes_review_confirm_retry_and_external_marker(visual_env,monkeypatch):

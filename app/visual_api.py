@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import config
 from .services import audit, auth, fal, permissions
 from .services.visual_analysis import analyze_asset
+from .services.session_store import get_store
 from .services.visual_assets import VisualAssetError, get_visual_store
 from .services.insforge_adapters import BLOCKED_BY_EXTERNAL_DEPENDENCY, InsForgeUnavailable, get_insforge_adapters
 from .services.insforge_sync import InsForgeSyncAdapter, resolved_insforge_owner
@@ -164,6 +165,9 @@ async def upload_visual_assets(
     project_id: str = Form(default="",max_length=160),
     user_id: str = Depends(auth.require_user),
 ):
+    scoped_project = (project_id or "").strip()
+    if scoped_project and not get_store().get_project(scoped_project, user_id):
+        raise HTTPException(status_code=422,detail={"code":"unknown_project","message":"project 不屬於目前使用者"})
     if not files:
         raise HTTPException(status_code=422,detail="至少選擇一張圖片")
     if len(files) > config.VISUAL_MAX_BATCH:
@@ -189,14 +193,14 @@ async def upload_visual_assets(
                     user_id=user_id,import_id=upload_job["id"],client_key=f"{index}:{filename}",relative_path=filename,
                     filename=filename,mime_type=mime_type,content=content,last_modified=file_created_date,
                     school=school,club=club,source=source,privacy=privacy,commercial_use=commercial_use,
-                    project_id=project_id,
+                    project_id=scoped_project,
                 )
             else:
                 item = store.create_asset(
                     user_id=user_id,filename=filename,mime_type=mime_type,content=content,source=source,
                     school=school,club=club,privacy=privacy,commercial_use=commercial_use,
                     file_created_date=file_created_date,source_metadata={"upload_content_type":mime_type},
-                    project_id=project_id,
+                    project_id=scoped_project,
                 )
             created.append(item)
             skipped_count += int(was_skipped)
@@ -226,6 +230,7 @@ async def import_visual_assets(
     privacy: Literal["private","shared","public"] = Form(default="private"),
     commercial_use: Literal["allowed","not_allowed","unknown"] = Form(default="unknown"),
     resync: bool = Form(default=False), auto_analyze: bool = Form(default=True),
+    project_id: str = Form(default="",max_length=160),
     user_id: str = Depends(auth.require_user),
 ):
     if len(files) > config.VISUAL_MAX_BATCH:
@@ -239,6 +244,9 @@ async def import_visual_assets(
         raise HTTPException(status_code=422,detail={"code":"invalid_manifest","message":"manifest 必須含 items 陣列"}) from exc
     if len(entries) < len(files):
         raise HTTPException(status_code=422,detail={"code":"manifest_file_mismatch","message":"manifest 項目少於本次檔案數"})
+    scoped_project = (project_id or "").strip()
+    if scoped_project and not get_store().get_project(scoped_project, user_id):
+        raise HTTPException(status_code=422,detail={"code":"unknown_project","message":"project 不屬於目前使用者"})
     store = get_visual_store()
     job = store.start_import(user_id,idempotency_key=idempotency_key,root_name=root_name,manifest=data,total_count=int(data.get("total_count") or len(entries)))
     created,errors,skipped = [],[],[]
@@ -251,7 +259,7 @@ async def import_visual_assets(
                 user_id=user_id,import_id=job["id"],client_key=str(entry.get("client_key") or entry.get("relative_path") or filename),
                 relative_path=str(entry.get("relative_path") or filename),filename=filename,mime_type=_media_type(upload),content=content,
                 last_modified=str(entry.get("last_modified") or ""),school=school,club=club,source=source,
-                privacy=privacy,commercial_use=commercial_use,resync=resync,
+                privacy=privacy,commercial_use=commercial_use,resync=resync,project_id=scoped_project,
             )
             (skipped if was_skipped else created).append(asset)
             if auto_analyze and not was_skipped:

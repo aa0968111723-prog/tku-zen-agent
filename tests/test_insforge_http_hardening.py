@@ -175,3 +175,96 @@ def test_upload_falls_back_to_put_when_strategy_missing(monkeypatch):
     paths = [item.get("path") for item in captured if "path" in item]
     assert any(str(path).endswith("/objects/b.png") for path in paths)
     assert result["key"] == "b.png"
+
+
+def test_post_timeout_is_not_retried(monkeypatch):
+    reset_insforge_adapters()
+    _BREAKER.record_success()
+    calls: list[str] = []
+
+    class TimeoutClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def request(self, method, path, **kwargs):
+            calls.append(method)
+            raise httpx.TimeoutException("timed out")
+
+    monkeypatch.setattr("app.services.insforge_adapters.httpx.Client", TimeoutClient)
+    monkeypatch.setattr("app.services.insforge_adapters.assert_public_https_url", lambda url: url)
+    monkeypatch.setattr("app.config.INSFORGE_HTTP_ATTEMPTS", 4)
+    adapter = InsForgeDatabaseAdapter()
+    adapter.base_url = "https://example.insforge.app"
+    adapter.key = "ik_test"
+    with pytest.raises(InsForgeUnavailable):
+        adapter.insert("projects", [{"id": "p1", "name": "x"}])
+    assert calls == ["POST"]
+    assert _BREAKER.failures >= 1
+    _BREAKER.record_success()
+
+
+def test_get_service_unavailable_is_retried(monkeypatch):
+    reset_insforge_adapters()
+    _BREAKER.record_success()
+    captured: list[dict] = []
+    script = [(503, {"error": "busy"}), (200, {"status": "ok"})]
+    monkeypatch.setattr("app.services.insforge_adapters.httpx.Client", lambda *a, **k: _ScriptedClient(script, captured))
+    monkeypatch.setattr("app.services.insforge_adapters.assert_public_https_url", lambda url: url)
+    monkeypatch.setattr("app.config.INSFORGE_HTTP_ATTEMPTS", 2)
+    monkeypatch.setattr("app.services.insforge_adapters.time.sleep", lambda _s: None)
+    adapter = InsForgeDatabaseAdapter()
+    adapter.base_url = "https://example.insforge.app"
+    adapter.key = "ik_test"
+    adapter._request("GET", "/api/health")
+    assert [item.get("method") for item in captured if "method" in item] == ["GET", "GET"]
+    _BREAKER.record_success()
+
+
+def test_client_errors_do_not_open_circuit_breaker(monkeypatch):
+    reset_insforge_adapters()
+    _BREAKER.record_success()
+    captured: list[dict] = []
+
+    def always_404(*args, **kwargs):
+        return _ScriptedClient([(404, {"error": "missing"}) for _ in range(8)], captured)
+
+    monkeypatch.setattr("app.services.insforge_adapters.httpx.Client", always_404)
+    monkeypatch.setattr("app.services.insforge_adapters.assert_public_https_url", lambda url: url)
+    adapter = InsForgeDatabaseAdapter()
+    adapter.base_url = "https://example.insforge.app"
+    adapter.key = "ik_test"
+    for _ in range(6):
+        captured.clear()
+        with pytest.raises(InsForgeUnavailable):
+            adapter._request("GET", "/api/health")
+    assert _BREAKER.allow() is True
+    _BREAKER.record_success()
+
+
+def test_repeated_server_errors_open_circuit_breaker(monkeypatch):
+    reset_insforge_adapters()
+    _BREAKER.record_success()
+    captured: list[dict] = []
+
+    def always_503(*args, **kwargs):
+        return _ScriptedClient([(503, {"error": "down"})], captured)
+
+    monkeypatch.setattr("app.services.insforge_adapters.httpx.Client", always_503)
+    monkeypatch.setattr("app.services.insforge_adapters.assert_public_https_url", lambda url: url)
+    monkeypatch.setattr("app.config.INSFORGE_HTTP_ATTEMPTS", 1)
+    adapter = InsForgeDatabaseAdapter()
+    adapter.base_url = "https://example.insforge.app"
+    adapter.key = "ik_test"
+    breaker = CircuitBreaker(failure_threshold=3, reset_after_seconds=60, _now=lambda: 1.0)
+    monkeypatch.setattr("app.services.insforge_adapters._BREAKER", breaker)
+    for _ in range(3):
+        captured.clear()
+        with pytest.raises(InsForgeUnavailable):
+            adapter._request("GET", "/api/health")
+    assert breaker.allow() is False

@@ -1243,8 +1243,10 @@ class VisualAssetStore:
             item = self.get_asset(str(existing.get("asset_id") or ""),user_id)
             if item:
                 return item, True
-        if existing and existing.get("asset_id") and existing.get("sha256") != digest and not resync:
-            raise VisualAssetError("檔案內容已變更；請使用 resync=true 建立新版本", code="resync_required")
+        content_replaced = bool(existing and existing.get("asset_id") and existing.get("sha256") and existing.get("sha256") != digest)
+        # Same relative path with a new digest is a new version, not an overwrite.
+        # Keep the previous asset row; supersedes_asset_id records the lineage.
+        previous_asset_id = str((existing or {}).get("asset_id") or "") if existing and (content_replaced or resync) else ""
         stamp = now()
         item_id = str(existing.get("id")) if existing else new_id("import_item")
         attempts = int(existing.get("attempts") or 0) + 1 if existing else 1
@@ -1266,7 +1268,7 @@ class VisualAssetStore:
                 school=school,club=club,privacy=privacy,commercial_use=commercial_use,
                 file_created_date=last_modified,source_metadata={"import_id":import_id,"client_key":key},
                 relative_path=rel,manifest_id=import_id,
-                supersedes_asset_id=str(existing.get("asset_id") or "") if existing and resync else "",
+                supersedes_asset_id=previous_asset_id,
                 project_id=project_id,
             )
             with self._lock:
