@@ -21,6 +21,11 @@
 自然語言或另一張圖片找照片，並匯出社群比例圖片或含 JSON／CSV 的素材包。
 設計與部署細節見 [視覺資料庫文件](docs/VISUAL_ASSET_DATABASE.md)。
 
+另提供可選的 **InsForge 遠端資料層**：本機 SQLite 仍是 source-of-truth，可將
+專案、Artifact、活動、研究來源、知識文件／chunks 與視覺素材同步至 PostgreSQL、
+pgvector 與 private Storage。聊天、工作記憶、快取、audit IP 與憑證預設永不同步；
+遠端不可用時本機功能照常運作。
+
 ---
 
 ## 三分鐘上手
@@ -175,6 +180,8 @@ Google 沒有可以直接呼叫的表單建立 API。代理改成產一支 Apps 
    - `DRIVE_FOLDER_ID`
    - `VISUAL_ASSET_DIR=/persistent/visual-assets`（必須使用持久化磁碟）
    - `VISUAL_EXPORT_DIR=/persistent/visual-exports`
+   - 選用 InsForge：`INSFORGE_BASE_URL`、`INSFORGE_SERVICE_KEY`、`INSFORGE_OWNER_ID`
+   - 啟用前設 `INSFORGE_TRUSTED=true`；知識／private binary 仍各自需要明確 opt-in
 
 ### Drive 上傳需要另外掛憑證
 

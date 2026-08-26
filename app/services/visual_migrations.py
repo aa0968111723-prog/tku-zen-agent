@@ -254,6 +254,56 @@ def _insforge_backend(conn: sqlite3.Connection) -> None:
     )
 
 
+def _insforge_core_data_sync(conn: sqlite3.Connection) -> None:
+    """Durable state for syncing non-visual records without changing them."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS backend_sync_items (
+            id TEXT PRIMARY KEY,
+            sync_run_id TEXT NOT NULL,
+            resource_type TEXT NOT NULL,
+            resource_id TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            remote_id TEXT NOT NULL DEFAULT '',
+            remote_storage_path TEXT NOT NULL DEFAULT '',
+            error_code TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(sync_run_id, resource_type, resource_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_backend_sync_items_status
+            ON backend_sync_items(sync_run_id, status, resource_type);
+
+        CREATE TABLE IF NOT EXISTS backend_resource_refs (
+            resource_type TEXT NOT NULL,
+            resource_id TEXT NOT NULL,
+            backend TEXT NOT NULL DEFAULT 'insforge',
+            remote_id TEXT NOT NULL DEFAULT '',
+            remote_storage_path TEXT NOT NULL DEFAULT '',
+            content_sha256 TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            error_code TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            last_synced_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(resource_type, resource_id, backend)
+        );
+
+        CREATE TABLE IF NOT EXISTS backend_user_mappings (
+            local_user_id TEXT NOT NULL,
+            backend TEXT NOT NULL DEFAULT 'insforge',
+            remote_owner_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'verified',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(local_user_id, backend)
+        );
+        """
+    )
+
+
 def apply_visual_migrations(conn: sqlite3.Connection, baseline_sql: str) -> list[str]:
     """Apply missing migrations and return the versions applied this run."""
     conn.execute(
@@ -267,6 +317,7 @@ def apply_visual_migrations(conn: sqlite3.Connection, baseline_sql: str) -> list
         ("0001_initial_visual_schema", lambda current: current.executescript(baseline_sql)),
         ("0002_phase1_media_import", _phase1_media_import),
         ("0003_insforge_visual_backend", _insforge_backend),
+        ("0004_insforge_core_data_sync", _insforge_core_data_sync),
     ]
     completed: list[str] = []
     for version, migration in migrations:

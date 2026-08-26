@@ -17,6 +17,7 @@ from .services.visual_analysis import analyze_asset
 from .services.visual_assets import VisualAssetError, get_visual_store
 from .services.insforge_adapters import BLOCKED_BY_EXTERNAL_DEPENDENCY, InsForgeUnavailable, get_insforge_adapters
 from .services.insforge_sync import InsForgeSyncAdapter
+from .services.insforge_data_sync import InsForgeDataSyncAdapter
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(auth.require_user)], tags=["visual-assets"])
@@ -94,6 +95,16 @@ class VisualSyncRequest(StrictRequest):
 
 class VisualSyncRetryRequest(StrictRequest):
     asset_ids: list[str] | None = Field(default=None,max_length=100)
+
+
+class BackendSyncRequest(StrictRequest):
+    resource_types: list[Literal["projects","artifacts","activities","research_sources","knowledge","visual_assets"]] = Field(
+        default_factory=lambda: ["projects","artifacts","activities","research_sources","knowledge","visual_assets"],
+        min_length=1,max_length=6,
+    )
+    project_id: str = Field(default="",max_length=160)
+    idempotency_key: str = Field(min_length=8,max_length=160)
+    dry_run: bool = False
 
 
 def _media_type(upload: UploadFile) -> str:
@@ -571,3 +582,50 @@ async def rollback_visual_sync(run_id: str, request: Request, user_id: str = Dep
         raise HTTPException(status_code=404, detail="找不到同步紀錄")
     audit.write_audit(action="visual.sync_rollback", actor_user_id=user_id, resource=run_id, detail={"remote_delete": False}, request=request)
     return {"warning": "僅標記本地同步參照已回滾，未刪除原始檔或遠端資料", **result}
+
+
+@router.post("/backend-sync/run", status_code=202)
+async def run_backend_sync(req: BackendSyncRequest, request: Request, user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    service = InsForgeDataSyncAdapter()
+    groups = set(req.resource_types)
+    try:
+        if req.dry_run:
+            return service.preview(user_id, groups=groups, project_id=req.project_id)
+        result = service.run(
+            user_id, groups=groups, project_id=req.project_id,
+            idempotency_key=req.idempotency_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422,detail={"code":"invalid_sync_scope","message":str(exc)}) from exc
+    audit.write_audit(
+        action="backend.sync", actor_user_id=user_id, resource=result.get("id", ""),
+        detail={"groups":sorted(groups),"status":result.get("status"),"failed":result.get("failed_count",0)},
+        request=request,ok=result.get("status") in {"completed","partial"},
+    )
+    return {"backend":"insforge","local_source_of_truth":True,**result}
+
+
+@router.get("/backend-sync/{run_id}")
+async def get_backend_sync(run_id: str, user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    result = InsForgeDataSyncAdapter().get_run(run_id,user_id)
+    if not result:
+        raise HTTPException(status_code=404,detail="找不到核心資料同步紀錄")
+    return result
+
+
+@router.post("/backend-sync/{run_id}/retry", status_code=202)
+async def retry_backend_sync(run_id: str, request: Request, user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    result = InsForgeDataSyncAdapter().retry(run_id,user_id)
+    if not result:
+        raise HTTPException(status_code=404,detail="找不到核心資料同步紀錄")
+    audit.write_audit(action="backend.sync_retry",actor_user_id=user_id,resource=run_id,detail={"new_run_id":result.get("id")},request=request)
+    return result
+
+
+@router.post("/backend-sync/{run_id}/rollback")
+async def rollback_backend_sync(run_id: str, request: Request, user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    result = InsForgeDataSyncAdapter().rollback(run_id,user_id)
+    if not result:
+        raise HTTPException(status_code=404,detail="找不到核心資料同步紀錄")
+    audit.write_audit(action="backend.sync_rollback",actor_user_id=user_id,resource=run_id,detail={"remote_delete":False},request=request)
+    return {"warning":"只回滾本地同步參照；不刪除本機或 InsForge 原始資料",**result}

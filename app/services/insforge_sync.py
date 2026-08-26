@@ -71,7 +71,9 @@ class InsForgeSyncAdapter:
         return run
 
     def _asset_payload(self, asset: dict[str, Any], remote_owner: str, project_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-        asset_id = str(asset["asset_id"])
+        asset_id = str(asset.get("asset_id") or asset.get("id") or "")
+        if not asset_id:
+            raise ValueError("visual asset payload is missing id")
         observations = self.store._rows("SELECT * FROM visual_observations WHERE asset_id=?", (asset_id,))
         entities: list[dict[str, Any]] = []
         relations: list[dict[str, Any]] = []
@@ -81,7 +83,7 @@ class InsForgeSyncAdapter:
             entity_type = str(obs.get("entity_type") or "object")
             if not entity_id or not label:
                 continue
-            entities.append({"id": entity_id, "type": entity_type if entity_type in {"person", "club", "school", "event", "scene", "place", "object"} else "object", "name": label, "aliases": [], "description": "", "confidence": float(obs.get("confidence") or 0), "verification_status": obs.get("status") or "pending_review", "owner_id": remote_owner, "source_id": ""})
+            entities.append({"id": entity_id, "type": entity_type if entity_type in {"person", "club", "school", "event", "scene", "place", "object"} else "object", "name": label, "aliases": [], "description": "", "confidence": float(obs.get("confidence") or 0), "verification_status": obs.get("status") or "pending_review", "owner_id": remote_owner, "source_id": None})
             relations.append({"asset_id": asset_id, "entity_id": entity_id, "relation_type": entity_type, "confidence": float(obs.get("confidence") or 0), "evidence": _json(obs.get("evidence"), {}), "verified_by": str(obs.get("verified_by") or "")})
         remote_asset = {
             "id": asset_id,
@@ -112,7 +114,7 @@ class InsForgeSyncAdapter:
             text_vector = _vector(asset.get("semantic_embedding"))
             image_vector = _vector(asset.get("color_embedding"))
             if text_vector or image_vector:
-                self.adapters.database.upsert("embeddings", {"id": f"embedding_{asset_id}_local", "asset_id": asset_id, "text_embedding": text_vector or None, "image_embedding": image_vector or None, "model": "local-deterministic-v1", "owner_id": remote_owner}, on_conflict="asset_id,model")
+                self.adapters.database.upsert("embeddings", {"id": f"embedding_{asset_id}_local", "asset_id": asset_id, "text_embedding": dumps(text_vector) if text_vector else None, "image_embedding": dumps(image_vector) if image_vector else None, "model": "local-deterministic-v1", "owner_id": remote_owner}, on_conflict="asset_id,model")
             storage_result: dict[str, Any] = {}
             source_path = Path(str(asset.get("storage_path") or ""))
             if config.INSFORGE_TRUSTED and source_path.is_file() and (asset.get("privacy") != "private" or config.INSFORGE_ALLOW_PRIVATE_SYNC):
@@ -138,7 +140,10 @@ class InsForgeSyncAdapter:
         remote_owner = self._owner_id(user_id)
         run = self._create_run(user_id, project_id=project_id, idempotency_key=idempotency_key, asset_ids=asset_ids, resumed_from=resumed_from)
         run_id = str(run["id"])
-        if not remote_owner:
+        if not config.INSFORGE_TRUSTED:
+            for asset_id in asset_ids:
+                self._mark_item(run_id, asset_id, "failed", error_code=BLOCKED_BY_EXTERNAL_DEPENDENCY, error_message="InsForge 尚未標記為 trusted")
+        elif not remote_owner:
             for asset_id in asset_ids:
                 self._mark_item(run_id, asset_id, "failed", error_code=BLOCKED_BY_EXTERNAL_DEPENDENCY, error_message="未設定 INSFORGE_OWNER_ID，拒絕將本地 tenant 映射至遠端")
         else:
@@ -173,4 +178,3 @@ class InsForgeSyncAdapter:
             self.store._conn.execute("UPDATE visual_asset_backend_refs SET status='rolled_back_local',updated_at=? WHERE asset_id IN (SELECT asset_id FROM sync_run_items WHERE sync_run_id=?)", (now(), run_id))
             self.store._conn.commit()
         return self.get_run(run_id, user_id)
-

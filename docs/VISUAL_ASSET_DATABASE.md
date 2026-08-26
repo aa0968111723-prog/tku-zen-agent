@@ -138,6 +138,10 @@ append-only audit；列表端點有 page/limit 並受 `VISUAL_SEARCH_LIMIT` 限�
 | GET | `/api/visual-sync/{id}` | 查看同步 manifest、逐檔狀態與錯誤 |
 | POST | `/api/visual-sync/{id}/retry` | 只重試未完成項目，建立新的 resumed run |
 | POST | `/api/visual-sync/{id}/rollback` | 非破壞性本地回滾參照，不刪原圖或遠端資料 |
+| POST | `/api/backend-sync/run` | 專案、Artifact、活動、研究來源、知識、視覺資料 dry-run／同步 |
+| GET | `/api/backend-sync/{id}` | 通用同步 manifest、逐項狀態與錯誤 |
+| POST | `/api/backend-sync/{id}/retry` | 只續傳未完成的 resource |
+| POST | `/api/backend-sync/{id}/rollback` | 非破壞性回滾本地 backend reference |
 
 ## InsForge adapter 與 migration
 
@@ -158,6 +162,16 @@ PostgreSQL/pgvector 的正式 DDL 在 `migrations/insforge/001_visual_backend.sq
 `BLOCKED_BY_EXTERNAL_DEPENDENCY`。private 素材還需要
 `INSFORGE_ALLOW_PRIVATE_SYNC=true` 才允許送出 binary。
 
+核心資料同步使用 `0004_insforge_core_data_sync` 的 `backend_sync_items`、
+`backend_resource_refs` 與 `backend_user_mappings` 保存 checkpoint。遠端核心 schema 在
+`migrations/insforge/002_core_data_layer.sql`，包含 projects、artifacts、activities、
+activity_tasks、research_sources、knowledge_documents、knowledge_chunks 與
+`knowledge_hybrid_search` RPC。同步 manifest 永遠排除 sessions、messages、
+working_memory、retrieval_cache、audit IP 與 credentials，也不回傳 local_path。
+
+知識文件採相對路徑＋SHA-256 版本化；原始 Markdown 存 private Storage，chunks 批次
+upsert。PostgreSQL 不接受的 NUL 控制字元只在遠端 payload 邊界清除，本機原檔不修改。
+
 ## 部署設定
 
 ```env
@@ -172,6 +186,10 @@ INSFORGE_SERVICE_KEY=（只放伺服器 secret）
 INSFORGE_OWNER_ID=（與 InsForge Auth user id 的明確映射）
 INSFORGE_TRUSTED=false
 INSFORGE_ALLOW_PRIVATE_SYNC=false
+INSFORGE_ALLOW_ARTIFACT_FILE_SYNC=false
+INSFORGE_ALLOW_KNOWLEDGE_SYNC=false
+INSFORGE_ALLOW_CONVERSATION_KNOWLEDGE_SYNC=false
+INSFORGE_SYNC_WORKERS=6
 FAL_KEY=...
 ```
 

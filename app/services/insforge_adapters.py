@@ -7,10 +7,10 @@ structured ``BLOCKED_BY_EXTERNAL_DEPENDENCY`` result when InsForge is absent.
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -61,7 +61,7 @@ class _HTTPAdapter:
 
     def _headers(self, *, json_body: bool = False) -> dict[str, str]:
         self._require_configured()
-        headers = {"Authorization": f"Bearer {self.key}", "apikey": self.key}
+        headers = {"Authorization": f"Bearer {self.key}"}
         if json_body:
             headers["Content-Type"] = "application/json"
         return headers
@@ -78,6 +78,11 @@ class _HTTPAdapter:
                 return response
         except InsForgeUnavailable:
             raise
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text[:1000]
+            raise InsForgeUnavailable(
+                f"InsForge request failed ({exc.response.status_code}): {detail or exc}", detail=detail,
+            ) from exc
         except (httpx.HTTPError, OSError) as exc:
             raise InsForgeUnavailable(f"InsForge request failed: {exc}", detail=str(exc)) from exc
 
@@ -101,33 +106,37 @@ class InsForgeDatabaseAdapter(_HTTPAdapter):
         query = dict(params or {})
         query.setdefault("select", "*")
         query.setdefault("limit", str(max(1, min(limit, 200))))
-        payload = self._json(self._request("GET", f"/rest/v1/{table}", params=query))
+        payload = self._json(self._request("GET", f"/api/database/records/{table}", params=query))
         return payload if isinstance(payload, list) else payload.get("data", []) if isinstance(payload, dict) else []
 
     def insert(self, table: str, rows: list[dict[str, Any]] | dict[str, Any]) -> list[dict[str, Any]]:
         self._validate_table(table)
         body = rows if isinstance(rows, list) else [rows]
-        response = self._request("POST", f"/rest/v1/{table}", json=body, headers={**self._headers(json_body=True), "Prefer": "return=representation"})
+        response = self._request("POST", f"/api/database/records/{table}", json=body, headers={"Prefer": "return=representation"})
         payload = self._json(response)
         return payload if isinstance(payload, list) else payload.get("data", []) if isinstance(payload, dict) else []
 
     def upsert(self, table: str, rows: list[dict[str, Any]] | dict[str, Any], *, on_conflict: str = "id") -> list[dict[str, Any]]:
         self._validate_table(table)
         body = rows if isinstance(rows, list) else [rows]
-        response = self._request("POST", f"/rest/v1/{table}", params={"on_conflict": on_conflict}, json=body, headers={**self._headers(json_body=True), "Prefer": "resolution=merge-duplicates,return=representation"})
+        # InsForge resolves conflicts from table PK/unique constraints. The
+        # parameter is retained for adapter compatibility and validation.
+        if not all(self._table.fullmatch(part.strip()) for part in on_conflict.split(",")):
+            raise ValueError("invalid InsForge conflict columns")
+        response = self._request("POST", f"/api/database/records/{table}", json=body, headers={"Prefer": "resolution=merge-duplicates,return=representation"})
         payload = self._json(response)
         return payload if isinstance(payload, list) else payload.get("data", []) if isinstance(payload, dict) else []
 
     def update(self, table: str, filters: dict[str, str], values: dict[str, Any]) -> list[dict[str, Any]]:
         self._validate_table(table)
-        response = self._request("PATCH", f"/rest/v1/{table}", params=filters, json=values, headers={**self._headers(json_body=True), "Prefer": "return=representation"})
+        response = self._request("PATCH", f"/api/database/records/{table}", params=filters, json=values, headers={"Prefer": "return=representation"})
         payload = self._json(response)
         return payload if isinstance(payload, list) else payload.get("data", []) if isinstance(payload, dict) else []
 
     def rpc(self, name: str, payload: dict[str, Any]) -> Any:
         if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_]{0,62}", name):
             raise ValueError("invalid InsForge RPC name")
-        return self._json(self._request("POST", f"/rest/v1/rpc/{name}", json=payload))
+        return self._json(self._request("POST", f"/api/database/rpc/{name}", json=payload))
 
     def health(self) -> InsForgeStatus:
         if not self.configured:
@@ -145,43 +154,27 @@ class InsForgeDatabaseAdapter(_HTTPAdapter):
 
 
 class InsForgeStorageAdapter(_HTTPAdapter):
-    """Storage boundary using InsForge's REST upload-strategy helper.
-
-    The helper returns a presigned/direct-upload description.  We never expose
-    the service key or a public object URL to the browser.
-    """
+    """Storage boundary using InsForge's authenticated object REST API."""
 
     def upload_bytes(self, bucket: str, key: str, content: bytes, mime_type: str) -> dict[str, Any]:
         if not config.INSFORGE_TRUSTED:
             raise InsForgeUnavailable("InsForge storage 尚未標記為 trusted，禁止送出檔案")
-        strategy_response = self._request(
-            "POST", f"/api/storage/buckets/{bucket}/upload-strategy",
-            json={"key": key, "contentType": mime_type, "upsert": False},
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", bucket):
+            raise ValueError("invalid InsForge bucket name")
+        safe_key = quote(key.lstrip("/"), safe="/._-")
+        response = self._request(
+            "PUT", f"/api/storage/buckets/{bucket}/objects/{safe_key}",
+            files={"file": (key.rsplit("/", 1)[-1], content, mime_type)},
         )
-        strategy = self._json(strategy_response)
-        data = strategy.get("data", strategy) if isinstance(strategy, dict) else {}
-        url = data.get("url") or data.get("uploadUrl")
-        if not url:
-            raise InsForgeUnavailable("InsForge 未回傳 upload strategy URL", detail=data)
-        method = str(data.get("method") or "PUT").upper()
-        headers = {str(k): str(v) for k, v in (data.get("headers") or {}).items()}
-        fields = data.get("fields") or {}
-        try:
-            with httpx.Client(timeout=config.INSFORGE_TIMEOUT_SECONDS, follow_redirects=True) as client:
-                if fields:
-                    response = client.post(url, data=fields, files={"file": (key.rsplit("/", 1)[-1], content, mime_type)}, headers=headers)
-                else:
-                    response = client.request(method, url, content=content, headers={"Content-Type": mime_type, **headers})
-                response.raise_for_status()
-        except (httpx.HTTPError, OSError) as exc:
-            raise InsForgeUnavailable(f"InsForge storage upload failed: {exc}", detail=str(exc)) from exc
-        return {"bucket": bucket, "key": key, "url": url, "size": len(content)}
+        payload = self._json(response)
+        data = payload.get("data", payload) if isinstance(payload, dict) else {}
+        return {"bucket": bucket, "key": str(data.get("key") or key), "url": str(data.get("url") or self.object_url(bucket, key)), "size": int(data.get("size") or len(content))}
 
     def object_url(self, bucket: str, key: str) -> str:
         self._require_configured()
         # This is a server-side reference only; ACL is still enforced by the
         # database and callers should proxy downloads rather than expose keys.
-        return f"{self.base_url}/api/storage/buckets/{bucket}/objects/{key.lstrip('/')}"
+        return f"{self.base_url}/api/storage/buckets/{bucket}/objects/{quote(key.lstrip('/'), safe='/._-')}"
 
 
 class InsForgeSearchAdapter(_HTTPAdapter):
