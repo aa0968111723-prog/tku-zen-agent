@@ -413,6 +413,27 @@ def _data_organization_depth(conn: sqlite3.Connection) -> None:
     )
 
 
+def _audit_job_and_project_scope(conn: sqlite3.Connection) -> None:
+    """Indexes and job-status aliases; does not rewrite verified review rows."""
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_visual_assets_user_project "
+        "ON visual_assets(user_id, project_id, uploaded_at DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_visual_assets_project_scope "
+        "ON visual_assets(project_id, uploaded_at DESC) WHERE project_id!=''"
+    )
+    conn.execute(
+        "UPDATE visual_analysis_jobs SET status='processing' WHERE status IN ('running')"
+    )
+    conn.execute(
+        "UPDATE visual_analysis_jobs SET status='completed' WHERE status='complete'"
+    )
+    conn.execute(
+        "UPDATE visual_assets SET processing_state='processing' WHERE processing_state='running'"
+    )
+
+
 def apply_visual_migrations(conn: sqlite3.Connection, baseline_sql: str) -> list[str]:
     """Apply missing migrations and return the versions applied this run."""
     conn.execute(
@@ -428,6 +449,7 @@ def apply_visual_migrations(conn: sqlite3.Connection, baseline_sql: str) -> list
         ("0003_insforge_visual_backend", _insforge_backend),
         ("0004_insforge_core_data_sync", _insforge_core_data_sync),
         ("0005_data_organization_depth", _data_organization_depth),
+        ("0006_audit_job_and_project_scope", _audit_job_and_project_scope),
     ]
     completed: list[str] = []
     for version, migration in migrations:

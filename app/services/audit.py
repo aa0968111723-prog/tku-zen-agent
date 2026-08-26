@@ -73,5 +73,8 @@ def write_audit(
             ip=_client_ip(request),
             ok=ok,
         )
+    except TypeError:
+        # Contract mismatch must not be swallowed; callers and tests see it.
+        raise
     except Exception:  # noqa: BLE001
         logger.exception("audit write failed action=%s", action)

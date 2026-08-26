@@ -11,12 +11,15 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
 from .. import config
+from .audit import mask_secrets
 from .http_guard import CircuitBreaker, UnsafeOutboundURL, assert_public_https_url, new_request_id
 
 logger = logging.getLogger(__name__)
@@ -25,24 +28,40 @@ _BREAKER = CircuitBreaker()
 # Transport-level retries are only safe for methods that do not create or
 # mutate rows. POST/PATCH/PUT/DELETE must not be replayed after a timeout.
 _SAFE_RETRY_METHODS = {"GET", "HEAD", "OPTIONS"}
-_RETRY_STATUSES = {429, 502, 503, 504}
+# 500 is retried only for safe methods. Mutating methods still use attempts=1.
+_RETRY_STATUSES = {429, 500, 502, 503, 504}
 _BREAKER_STATUSES = {500, 502, 503, 504}
+_MAX_RETRY_WAIT_SECONDS = 8.0
 
 
 BLOCKED_BY_EXTERNAL_DEPENDENCY = "BLOCKED_BY_EXTERNAL_DEPENDENCY"
 
 
-def _retry_after_seconds(response: httpx.Response | None, attempt: int) -> float:
+def _retry_after_seconds(response: httpx.Response | None, attempt: int, *, budget: float = _MAX_RETRY_WAIT_SECONDS) -> float:
     fallback = min(2.0, 0.25 * (2 ** attempt))
-    if response is None:
-        return fallback
-    raw = (response.headers.get("Retry-After") or "").strip()
-    if not raw:
-        return fallback
-    try:
-        return max(0.0, min(30.0, float(raw)))
-    except ValueError:
-        return fallback
+    delay = fallback
+    if response is not None:
+        raw = (response.headers.get("Retry-After") or "").strip()
+        if raw:
+            try:
+                delay = float(raw)
+            except ValueError:
+                try:
+                    when = parsedate_to_datetime(raw)
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=timezone.utc)
+                    delay = (when - datetime.now(timezone.utc)).total_seconds()
+                except (TypeError, ValueError, OverflowError, OSError):
+                    delay = fallback
+    return max(0.0, min(30.0, min(delay, max(0.0, budget))))
+
+
+def _safe_provider_detail(text: str | None) -> str:
+    """Keep client-facing InsForge errors free of keys, tokens, and paths."""
+    raw = mask_secrets(str(text or ""))
+    raw = re.sub(r"(?i)(authorization|x-api-key|api[_-]?key|bearer)[=:\s]+[^\s,;]+", "***", raw)
+    raw = re.sub(r"(?i)(/[^\s\"']+\.(?:py|sqlite3?|pem|key)\b)", "[redacted-path]", raw)
+    return raw[:300]
 
 
 class InsForgeUnavailable(RuntimeError):
@@ -115,6 +134,7 @@ class _HTTPAdapter:
         extra_headers = kwargs.pop("headers", {}) or {}
         allow_statuses = set(kwargs.pop("allow_statuses", ()) or ())
         json_body = "json" in kwargs
+        wait_budget = _MAX_RETRY_WAIT_SECONDS
         for attempt in range(attempts):
             try:
                 timeout = httpx.Timeout(config.INSFORGE_TIMEOUT_SECONDS, connect=min(5.0, config.INSFORGE_TIMEOUT_SECONDS))
@@ -131,7 +151,9 @@ class _HTTPAdapter:
                         and response.status_code in _RETRY_STATUSES
                         and attempt + 1 < attempts
                     ):
-                        time.sleep(_retry_after_seconds(response, attempt))
+                        delay = _retry_after_seconds(response, attempt, budget=wait_budget)
+                        wait_budget = max(0.0, wait_budget - delay)
+                        time.sleep(delay)
                         last_error = httpx.HTTPStatusError("retryable", request=response.request, response=response)
                         continue
                     response.raise_for_status()
@@ -147,13 +169,17 @@ class _HTTPAdapter:
                 last_error = exc
                 status = exc.response.status_code if exc.response is not None else 0
                 if retry_allowed and status in _RETRY_STATUSES and attempt + 1 < attempts:
-                    time.sleep(_retry_after_seconds(exc.response, attempt))
+                    delay = _retry_after_seconds(exc.response, attempt, budget=wait_budget)
+                    wait_budget = max(0.0, wait_budget - delay)
+                    time.sleep(delay)
                     continue
                 break
             except (httpx.HTTPError, OSError) as exc:
                 last_error = exc
                 if retry_allowed and attempt + 1 < attempts:
-                    time.sleep(_retry_after_seconds(None, attempt))
+                    delay = _retry_after_seconds(None, attempt, budget=wait_budget)
+                    wait_budget = max(0.0, wait_budget - delay)
+                    time.sleep(delay)
                     continue
                 break
         status = 0
@@ -162,18 +188,21 @@ class _HTTPAdapter:
             # Client/auth errors are not provider outages.
             if status in _BREAKER_STATUSES:
                 _BREAKER.record_failure()
-            detail = last_error.response.text[:1000]
+            detail = _safe_provider_detail(last_error.response.text)
             logger.warning(
                 "insforge request failed status=%s path=%s request_id=%s",
                 status, path, request_id,
             )
             raise InsForgeUnavailable(
-                f"InsForge request failed ({status}): {detail or last_error}",
+                f"InsForge request failed ({status}): {detail or type(last_error).__name__}",
                 detail=detail,
             ) from last_error
         _BREAKER.record_failure()
         logger.warning("insforge request failed path=%s request_id=%s error=%s", path, request_id, type(last_error).__name__)
-        raise InsForgeUnavailable(f"InsForge request failed: {last_error}", detail=str(last_error)) from last_error
+        raise InsForgeUnavailable(
+            f"InsForge request failed: {type(last_error).__name__}",
+            detail=_safe_provider_detail(str(last_error)),
+        ) from last_error
 
     @staticmethod
     def _json(response: httpx.Response) -> Any:

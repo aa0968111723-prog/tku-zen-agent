@@ -23,14 +23,54 @@ jobs:
         run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
       - name: Syntax check
         run: python -m compileall -q app tests scripts
+      - name: Lint (AST parse)
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          files = list(Path("app").rglob("*.py")) + list(Path("tests").rglob("*.py"))
+          for path in files:
+              ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          print(f"parsed {len(files)} python files")
+          PY
+      - name: Typecheck
+        run: |
+          if python -c "import mypy" 2>/dev/null; then
+            python -m mypy app tests --ignore-missing-imports
+          else
+            echo "BLOCKED_BY_EXTERNAL_DEPENDENCY: mypy is not a project dependency"
+            echo "BLOCKED_BY_EXTERNAL_DEPENDENCY: mypy is not a project dependency" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Unit and integration tests
-        run: python -m pytest tests --maxfail=8
+        run: python -m pytest tests --maxfail=20 -ra
+      - name: Migration check
+        run: |
+          python - <<'PY'
+          import tempfile
+          from pathlib import Path
+          from app.services.visual_assets import VisualAssetStore
+          path = Path(tempfile.mkdtemp()) / "migrate.sqlite3"
+          store = VisualAssetStore(path)
+          versions = {row[0] for row in store._conn.execute("SELECT version FROM visual_schema_migrations")}
+          expected = {
+              "0001_initial_visual_schema",
+              "0002_phase1_media_import",
+              "0003_insforge_visual_backend",
+              "0004_insforge_core_data_sync",
+              "0005_data_organization_depth",
+              "0006_audit_job_and_project_scope",
+          }
+          missing = expected - versions
+          if missing:
+              raise SystemExit(f"missing migrations: {missing}")
+          store.close()
+          print("migrations ok", sorted(versions))
+          PY
       - name: Report skipped browser tests
         if: always()
         run: |
-          if python -m pytest tests/test_mobile_accessibility.py -q --collect-only 2>/dev/null | grep -q skipped; then
-            echo "BLOCKED_BY_EXTERNAL_DEPENDENCY: Chromium/playwright browser smoke is skipped in this runner"
-          fi
+          echo "Playwright Chromium is not installed on this runner."
+          echo "BLOCKED_BY_EXTERNAL_DEPENDENCY: tests/test_mobile_accessibility.py browser smoke is skipped, not PASS." >> "$GITHUB_STEP_SUMMARY"
 
   security-sanity:
     runs-on: ubuntu-latest

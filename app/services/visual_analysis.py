@@ -40,7 +40,7 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
             }
             store.add_observation(asset_id,"scene",label="文件",entity_id=store.scene_id("文件"),status="verified",confidence=1.0,source="local_document_parser",evidence={"mime_type":asset.get("mime_type")})
             store.set_analysis(asset_id,result,status="complete")
-            store.update_job(job_id,status="complete",stage="complete",progress=100)
+            store.update_job(job_id,status="completed",stage="complete",progress=100)
             return store.get_asset(asset_id,user_id) or {}
         if asset.get("asset_type") == "video":
             raise fal.FalError("影片已安全匯入，但伺服器未配置影格解碼器。",code="video_decoder_not_configured")
@@ -49,11 +49,11 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
             raise VisualAssetError("圖片檔案目前無法取得", code="not_found")
         source_path, source_mime, _filename = confined
         target_url = _data_url(source_path, source_mime or asset["mime_type"])
-        store.update_job(job_id,status="running",stage="ocr_and_scene",progress=25)
+        store.update_job(job_id,status="processing",stage="ocr_and_scene",progress=25)
         result = await fal.analyze_visual_asset(target_url)
         source = f"fal_vision:{config.FAL_VISION_MODEL}"
         store.set_analysis(asset_id,result,status="processing_entities")
-        store.update_job(job_id,status="running",stage="entities",progress=62)
+        store.update_job(job_id,status="processing",stage="entities",progress=62)
 
         for scene in result.get("scenes",[]) if isinstance(result.get("scenes"),list) else []:
             if not isinstance(scene,dict):
@@ -145,7 +145,7 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
             except OSError:
                 continue
         if references and int(people.get("count") or len(descriptions) or 0) > 0:
-            store.update_job(job_id,status="running",stage="confirmed_people_comparison",progress=78)
+            store.update_job(job_id,status="processing",stage="confirmed_people_comparison",progress=78)
             for match in await fal.compare_confirmed_people(target_url,references):
                 ref = next((r for r in references if r["person_id"] == match.get("person_id")),None)
                 confidence = _confidence(match.get("confidence"))
@@ -157,7 +157,7 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
                     )
 
         store.set_analysis(asset_id,result,status="complete")
-        store.update_job(job_id,status="complete",stage="complete",progress=100)
+        store.update_job(job_id,status="completed",stage="complete",progress=100)
         store.record_learning(user_id,"analysis_completed",asset_id=asset_id,payload={"model":config.FAL_VISION_MODEL},outcome="success")
         return store.get_asset(asset_id,user_id) or {}
     except fal.FalError as exc:

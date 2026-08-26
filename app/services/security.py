@@ -61,6 +61,8 @@ def audit(
             ok=bool(success),
         )
         return True
+    except TypeError:
+        raise
     except Exception:
         logger.exception("audit write failed action=%s", action)
         return False

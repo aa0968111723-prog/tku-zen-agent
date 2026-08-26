@@ -33,7 +33,7 @@ from .visual_migrations import apply_visual_migrations
 
 
 def now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
 def new_id(prefix: str) -> str:
@@ -275,7 +275,16 @@ DOCUMENT_MIME = {
     "text/plain": ".txt", "text/markdown": ".md", "text/csv": ".csv",
 }
 ALLOWED_MIME = {**IMAGE_MIME, **VIDEO_MIME, **DOCUMENT_MIME}
-STATUS_VALUES = {"verified", "probable", "pending_review", "conflicted", "failed"}
+STATUS_VALUES = {"verified", "probable", "pending_review", "conflicted", "failed", "unknown", "do_not_identify"}
+JOB_STATUS_ALIASES = {"running": "processing", "complete": "completed", "pending": "queued"}
+CANONICAL_JOB_STATUSES = {"queued", "processing", "completed", "partial_failed", "failed", "retrying", "cancelled"}
+
+
+def canonicalize_job_status(status: str) -> str:
+    raw = (status or "").strip()
+    if raw in JOB_STATUS_ALIASES:
+        return JOB_STATUS_ALIASES[raw]
+    return raw if raw in CANONICAL_JOB_STATUSES else raw
 
 
 class VisualAssetError(ValueError):
@@ -493,14 +502,14 @@ class VisualAssetStore:
             self._conn.execute(
                 """UPDATE visual_analysis_jobs SET status='failed',stage='interrupted',progress=100,
                        error_code='interrupted_process',error_message='服務重新啟動，請重試分析',updated_at=?
-                   WHERE status='running'""",(stamp,),
+                   WHERE status IN ('running','processing','queued','retrying')""",(stamp,),
             )
             # Do not overwrite review_status: a verified/probable asset must
             # not become failed just because the process restarted mid-job.
             self._conn.execute(
                 """UPDATE visual_assets SET processing_state='failed',updated_at=?
                    WHERE id IN (SELECT asset_id FROM visual_analysis_jobs WHERE error_code='interrupted_process')
-                     AND processing_state IN ('running','pending','queued','')""",(stamp,),
+                     AND processing_state IN ('running','processing','pending','queued','retrying','')""",(stamp,),
             )
             for name in SCENE_NAMES:
                 self._conn.execute(
@@ -637,6 +646,16 @@ class VisualAssetStore:
                         "INSERT INTO visual_date_candidates(id,asset_id,value,source,confidence,status,evidence,created_at) VALUES(?,?,?,?,?,?,?,?)",
                         (new_id("date"),asset_id,normalized,date_source,confidence,"probable",value,stamp),
                     )
+            if not (project_id or "").strip():
+                # Missing project scope is never guessed; it stays in 待整理.
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO review_queue(id,asset_id,proposed_change,confidence,status,owner_id,created_at) VALUES(?,?,?,?,?,?,?)",
+                    (
+                        new_id("review"), asset_id,
+                        dumps({"reason": "missing_project_id", "action": "needs_organization"}),
+                        0.0, "pending_review", user_id, stamp,
+                    ),
+                )
             self._conn.commit()
         return self.get_asset(asset_id, user_id) or {}
 
@@ -841,27 +860,34 @@ class VisualAssetStore:
             attempts = int(self._conn.execute("SELECT COUNT(*) FROM visual_analysis_jobs WHERE asset_id=?",(asset_id,)).fetchone()[0]) + 1
             self._conn.execute(
                 "INSERT INTO visual_analysis_jobs(id,asset_id,status,stage,progress,attempts,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                (jid,asset_id,"running","preparing",5,attempts,stamp,stamp),
+                (jid,asset_id,"processing","preparing",5,attempts,stamp,stamp),
             )
-            self._conn.execute("UPDATE visual_assets SET analysis_status='analyzing',processing_state='running',updated_at=? WHERE id=?", (stamp,asset_id))
+            self._conn.execute("UPDATE visual_assets SET analysis_status='analyzing',processing_state='processing',updated_at=? WHERE id=?", (stamp,asset_id))
             self._conn.commit()
         return jid
 
     def update_job(self, job_id: str, *, status: str, stage: str, progress: int, error_code: str = "", error_message: str = "") -> None:
+        canonical = canonicalize_job_status(status)
         with self._lock:
             self._conn.execute(
                 "UPDATE visual_analysis_jobs SET status=?,stage=?,progress=?,error_code=?,error_message=?,updated_at=? WHERE id=?",
-                (status,stage,max(0,min(100,progress)),error_code[:80],error_message[:500],now(),job_id),
+                (canonical,stage,max(0,min(100,progress)),error_code[:80],error_message[:500],now(),job_id),
             )
-            if status == "failed":
+            if canonical in {"failed", "partial_failed", "cancelled"}:
+                # Analysis job state is independent of human review_status.
                 self._conn.execute(
-                    "UPDATE visual_assets SET processing_state='failed',review_status='failed',updated_at=? WHERE id=(SELECT asset_id FROM visual_analysis_jobs WHERE id=?)",
-                    (now(),job_id),
+                    "UPDATE visual_assets SET processing_state=?,updated_at=? WHERE id=(SELECT asset_id FROM visual_analysis_jobs WHERE id=?)",
+                    (canonical,now(),job_id),
                 )
-            elif status == "complete":
+            elif canonical == "completed":
                 self._conn.execute(
                     "UPDATE visual_assets SET processing_state='completed',updated_at=? WHERE id=(SELECT asset_id FROM visual_analysis_jobs WHERE id=?)",
                     (now(),job_id),
+                )
+            elif canonical in {"processing", "queued", "retrying"}:
+                self._conn.execute(
+                    "UPDATE visual_assets SET processing_state=?,updated_at=? WHERE id=(SELECT asset_id FROM visual_analysis_jobs WHERE id=?)",
+                    (canonical,now(),job_id),
                 )
             self._conn.commit()
 
@@ -999,6 +1025,7 @@ class VisualAssetStore:
         date_from: str = "", date_to: str = "", ratio: str = "", quality_min: float = 0,
         commercial_use: str = "", privacy: str = "", duplicate: str = "",
         people_min: int = 0, brightness_min: float = 0, verification_status: str = "",
+        project_id: str = "", include_unscoped: bool = False,
     ) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
         q = query.strip().lower()
         school_filter = school or infer_school(query)
@@ -1010,6 +1037,13 @@ class VisualAssetStore:
         # independent search results.  They were never user-authored assets.
         where = ["COALESCE(a.source,'')!='derived_thumbnail'", "(a.user_id=? OR a.privacy IN ('shared','public'))"]
         params: list[Any] = [user_id]
+        scoped_project = (project_id or "").strip()
+        if scoped_project:
+            if include_unscoped:
+                where.append("(a.project_id=? OR a.project_id='')")
+            else:
+                where.append("a.project_id=?")
+            params.append(scoped_project)
         if school_filter:
             where.append("(a.school_id IN (SELECT id FROM visual_schools WHERE canonical_name LIKE ? OR aliases LIKE ?) OR a.id IN (SELECT asset_id FROM visual_observations WHERE entity_type='school' AND label LIKE ? AND review_action!='ignored'))")
             params.extend([f"%{school_filter}%", f"%{school_filter}%", f"%{school_filter}%"])
@@ -1160,15 +1194,20 @@ class VisualAssetStore:
             "ratio": ratio_alias, "quality_min": inferred_quality_min, "commercial_use": commercial_use,
             "people_min": inferred_people_min, "brightness_min": brightness_min,
             "verification_status": verification_status,
+            "project_id": scoped_project,
         }
         return items,total,parsed
 
-    def search_by_image(self, user_id: str, content: bytes, mime_type: str, *, page: int = 1, limit: int = 30) -> tuple[list[dict[str, Any]], int]:
+    def search_by_image(self, user_id: str, content: bytes, mime_type: str, *, page: int = 1, limit: int = 30, project_id: str = "") -> tuple[list[dict[str, Any]], int]:
         probe = inspect_image(content, mime_type)
-        rows = self._rows(
-            "SELECT * FROM visual_assets WHERE user_id=? OR privacy IN ('shared','public') ORDER BY uploaded_at DESC LIMIT 1000",
-            (user_id,),
-        )
+        scoped_project = (project_id or "").strip()
+        sql = "SELECT * FROM visual_assets WHERE (user_id=? OR privacy IN ('shared','public'))"
+        params: list[Any] = [user_id]
+        if scoped_project:
+            sql += " AND project_id=?"
+            params.append(scoped_project)
+        sql += " ORDER BY uploaded_at DESC LIMIT 1000"
+        rows = self._rows(sql, tuple(params))
         ranked = []
         for row in rows:
             distance = hamming_hash(probe.perceptual_hash, str(row.get("perceptual_hash") or ""))
@@ -1378,20 +1417,24 @@ class VisualAssetStore:
         if not asset:
             raise VisualAssetError("找不到可修改的圖片", code="not_found")
         values = values or {}
-        if action == "ignore":
+        if action in {"ignore", "do_not_identify"}:
             if not observation_id:
                 raise VisualAssetError("忽略辨識結果時必須指定 observation_id")
             with self._lock:
                 old = self._conn.execute("SELECT * FROM visual_observations WHERE id=? AND asset_id=?", (observation_id,asset_id)).fetchone()
                 if not old:
                     raise VisualAssetError("找不到辨識結果", code="not_found")
-                self._conn.execute("UPDATE visual_observations SET review_action='ignored',updated_at=? WHERE id=?", (now(),observation_id))
+                status = "do_not_identify" if action == "do_not_identify" else str(old["status"] or "pending_review")
+                self._conn.execute(
+                    "UPDATE visual_observations SET review_action='ignored',status=?,updated_at=? WHERE id=?",
+                    (status, now(), observation_id),
+                )
                 self._conn.commit()
-            self.add_correction(user_id,asset_id,entity_type,dict(old),{"review_action":"ignored"},reason)
-            self.record_learning(user_id,"correction",asset_id=asset_id,payload={"entity_type":entity_type,"action":"ignore"},outcome="reviewed")
+            self.add_correction(user_id,asset_id,entity_type,dict(old),{"review_action":"ignored","status":status},reason)
+            self.record_learning(user_id,"correction",asset_id=asset_id,payload={"entity_type":entity_type,"action":action},outcome="reviewed")
             return self.get_asset(asset_id,user_id) or {}
         if action not in {"confirm","correct"}:
-            raise VisualAssetError("action 必須是 confirm、correct 或 ignore")
+            raise VisualAssetError("action 必須是 confirm、correct、ignore 或 do_not_identify")
 
         school_id = asset.get("school_id")
         final_id = entity_id
@@ -1537,13 +1580,16 @@ class VisualAssetStore:
         return item
 
     def patch_asset(self, asset_id: str, user_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
-        allowed = {"privacy", "commercial_use", "source", "source_metadata", "review_status", "school", "club"}
+        allowed = {"privacy", "commercial_use", "source", "source_metadata", "review_status", "school", "club", "if_match_updated_at"}
         unknown = set(fields) - allowed
         if unknown:
             raise VisualAssetError("不可修改原圖、雜湊或系統分析欄位：" + "、".join(sorted(unknown)), code="immutable_field")
         current = self.owned_asset(asset_id, user_id)
         if not current:
             return None
+        expected = str(fields.get("if_match_updated_at") or "").strip()
+        if expected and str(current.get("updated_at") or "") != expected:
+            raise VisualAssetError("素材已被較新的人工修正更新，請重新載入後再存", code="stale_update")
         updates: dict[str, Any] = {}
         if "privacy" in fields:
             if fields["privacy"] not in {"private","shared","public"}:
