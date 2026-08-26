@@ -18,14 +18,21 @@ from typing import Any, Iterable
 
 from .. import config, retrieval
 from .session_store import SessionStore, get_store
-from .visual_assets import ALLOWED_MIME, VisualAssetStore, dumps, get_visual_store, new_id, now
+from .visual_assets import ALLOWED_MIME, EXTRA_MIME_BY_EXTENSION, VisualAssetStore, dumps, get_visual_store, new_id, now
 
 
 MIGRATION_VERSION = "0005_data_organization_depth"
 VALID_STATUSES = {"verified", "probable", "pending_review", "conflicted", "failed"}
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".avif", ".jfif"}
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}
-DOCUMENT_EXTENSIONS = {".md", ".txt", ".csv", ".pdf", ".docx", ".pptx", ".xlsx", ".gs"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".avif", ".jfif", ".cr2", ".arw", ".psd", ".svg"}
+DECODABLE_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".jfif"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv", ".mts"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma"}
+DOCUMENT_EXTENSIONS = {
+    ".md", ".txt", ".csv", ".pdf", ".docx", ".pptx", ".xlsx", ".gs", ".json", ".yaml", ".yml",
+    ".tsv", ".html", ".xml", ".ini", ".srt", ".edl", ".fcpxml", ".url",
+    ".zip", ".wfp", ".wfpbundle", ".bdm", ".cpi", ".mpl",
+}
+SUPPLEMENTAL_BINARY_EXTENSIONS = {".zip", ".wfp", ".wfpbundle", ".bdm", ".cpi", ".mpl"}
 IGNORED_IMPORT_DIRS = {
     ".git", ".venv", ".pytest_cache", ".playwright-cli", ".claude", ".codex",
     ".codex-remote-attachments", "__pycache__", "node_modules",
@@ -170,6 +177,10 @@ class DataOrganizationService:
             return "image"
         if suffix in VIDEO_EXTENSIONS:
             return "video"
+        if suffix in AUDIO_EXTENSIONS:
+            return "audio"
+        if suffix in SUPPLEMENTAL_BINARY_EXTENSIONS:
+            return "binary"
         if suffix in DOCUMENT_EXTENSIONS:
             return "document"
         return "other"
@@ -275,7 +286,7 @@ class DataOrganizationService:
                 keys.add(f"{root}:{relative}")
         return keys
 
-    def _filesystem_candidates(self, user_id: str = "") -> list[dict[str, Any]]:
+    def _filesystem_candidates(self, user_id: str = "", *, include_other: bool = False) -> list[dict[str, Any]]:
         roots = [
             ("visual_assets", config.VISUAL_ASSET_DIR),
             ("outputs", config.OUTPUT_DIR),
@@ -336,7 +347,7 @@ class DataOrganizationService:
                     # per-file owner metadata.  Never expose them to a
                     # non-local account.
                     continue
-                if resolved in seen or resolved.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
+                if resolved in seen or resolved.suffix.lower() in {".sqlite", ".sqlite3", ".db", ".sqlite3-shm", ".sqlite3-wal", ".sqlite3-journal"}:
                     continue
                 if any(
                     canonical_root != root.resolve() and canonical_root in resolved.parents
@@ -348,11 +359,11 @@ class DataOrganizationService:
                 if root_label in {"outputs", "output"} and relative.startswith("playwright/"):
                     continue
                 kind = self._kind(resolved)
-                if kind == "other":
+                if kind == "other" and not include_other:
                     continue
                 seen.add(resolved)
                 try:
-                    digest = _sha_file(resolved)
+                    digest = _sha_file(resolved) if kind != "other" else ""
                 except OSError:
                     digest = ""
                 records.append({
@@ -380,7 +391,10 @@ class DataOrganizationService:
         visual_scope = self._owned_visual_scope(user_id, project_id)
         snapshot = self.session_store.export_sync_snapshot(user_id, project_id=project_id or None, limit=5000)
         knowledge = self._knowledge_documents()
-        filesystem = self._filesystem_candidates(user_id)
+        scanned_filesystem = self._filesystem_candidates(user_id, include_other=True)
+        filesystem = [row for row in scanned_filesystem if row.get("kind") != "other"]
+        excluded_filesystem = [row for row in scanned_filesystem if row.get("kind") == "other"]
+        excluded_by_extension = Counter(Path(str(row.get("relative_path") or "")).suffix.lower() or "[none]" for row in excluded_filesystem)
 
         # Include retained derivative rows in the path set so their generated
         # files are not reclassified as loose imports after reconciliation.
@@ -454,6 +468,8 @@ class DataOrganizationService:
         statistics = {
             "images": asset_types["image"] + filesystem_types["image"],
             "videos": asset_types["video"] + filesystem_types["video"],
+            "audio": asset_types["audio"] + filesystem_types["audio"],
+            "other_files": asset_types["binary"] + asset_types["other"] + filesystem_types["binary"] + filesystem_types["other"],
             "documents": len(knowledge) + len(snapshot["artifacts"]) + asset_types["document"] + filesystem_types["document"],
             "artifacts": len(snapshot["artifacts"]),
             "knowledge_sources": len(knowledge),
@@ -479,10 +495,18 @@ class DataOrganizationService:
             "social_reference_files": sum(1 for row in knowledge if str(row["relative_path"]).startswith("社群/")),
             "sync_failed": sync_failed,
             "duplicate_groups": duplicate_groups[:20],
+            "excluded_files": len(excluded_filesystem),
+            "excluded_by_extension": dict(excluded_by_extension),
         }
         manifest = {
-            "roots": sorted({str(row["root"]) for row in filesystem}),
+            # Report every scanned root, including roots containing only
+            # intentionally excluded files, so the manifest is a complete
+            # audit of the configured import scope.
+            "roots": sorted({str(row["root"]) for row in scanned_filesystem}),
             "filesystem_candidates": len(filesystem),
+            "scanned_files": len(scanned_filesystem),
+            "excluded_files": len(excluded_filesystem),
+            "excluded_by_extension": dict(excluded_by_extension),
             "unregistered_candidates": len(unregistered),
             "sample_unregistered": [{key: row[key] for key in ("root", "relative_path", "kind", "sha256")} for row in unregistered[:20]],
             "absolute_paths_exposed": False,
@@ -722,19 +746,20 @@ class DataOrganizationService:
                     (user_id, row["sha256"]),
                 )
                 mapped_asset_id = str(duplicate[0]["id"]) if duplicate else ""
-            mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-            if mime_type not in ALLOWED_MIME:
-                mime_type = next((candidate for candidate, suffix in ALLOWED_MIME.items() if suffix == path.suffix.lower()), mime_type)
+            suffix = path.suffix.lower()
+            mime_type = EXTRA_MIME_BY_EXTENSION.get(suffix) or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            if mime_type not in ALLOWED_MIME or mime_type == "application/octet-stream":
+                mime_type = next((candidate for candidate, allowed_suffix in ALLOWED_MIME.items() if allowed_suffix == suffix), mime_type)
             if not mapped_asset_id and mime_type in ALLOWED_MIME:
                 # Keep large local videos and already-organized photo trees in
                 # place.  We inspect image/document bytes for metadata, but
                 # only create managed thumbnails; no second multi-GB binary
                 # tree is written under data/visual-assets.
-                inspection_bytes = path.read_bytes() if row.get("kind") != "video" else b"external-video"
+                inspection_bytes = path.read_bytes() if row.get("kind") == "document" or suffix in DECODABLE_IMAGE_EXTENSIONS else b"external-binary"
                 imported = self.visual_store.create_asset(
                     user_id=user_id, filename=path.name, mime_type=mime_type, content=inspection_bytes,
                     source="existing_data_import", relative_path=str(row.get("relative_path") or ""),
-                    source_metadata={"root": row.get("root"), "relative_path": row.get("relative_path"), "sha256": row.get("sha256")},
+                    source_metadata={"root": row.get("root"), "relative_path": row.get("relative_path"), "sha256": row.get("sha256"), "file_kind": row.get("kind")},
                     external_path=str(path), sha256_override=str(row.get("sha256") or ""),
                 )
                 mapped_asset_id = str(imported["asset_id"])

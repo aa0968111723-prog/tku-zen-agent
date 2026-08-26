@@ -265,7 +265,20 @@ IMAGE_MIME = {
     "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
     "image/gif": ".gif", "image/avif": ".avif", "image/jfif": ".jfif",
 }
-VIDEO_MIME = {"video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm"}
+RAW_IMAGE_MIME = {
+    "image/x-canon-cr2": ".cr2", "image/x-sony-arw": ".arw",
+    "image/vnd.adobe.photoshop": ".psd", "image/svg+xml": ".svg",
+}
+VIDEO_MIME = {
+    "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm",
+    "video/x-m4v": ".m4v", "video/x-msvideo": ".avi", "video/x-matroska": ".mkv",
+    "video/mp2t": ".mts",
+}
+AUDIO_MIME = {
+    "audio/mpeg": ".mp3", "audio/wav": ".wav", "audio/x-wav": ".wav",
+    "audio/mp4": ".m4a", "audio/x-m4a": ".m4a", "audio/flac": ".flac",
+    "audio/ogg": ".ogg", "audio/aac": ".aac", "audio/x-ms-wma": ".wma",
+}
 DOCUMENT_MIME = {
     "application/pdf": ".pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
@@ -273,8 +286,32 @@ DOCUMENT_MIME = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
     "text/x-google-apps-script": ".gs",
     "text/plain": ".txt", "text/markdown": ".md", "text/csv": ".csv",
+    "application/json": ".json", "application/ld+json": ".json",
+    "application/yaml": ".yaml", "application/x-yaml": ".yaml", "text/yaml": ".yaml",
+    "text/tab-separated-values": ".tsv", "text/html": ".html", "application/xhtml+xml": ".html",
+    "text/xml": ".xml", "application/xml": ".xml", "text/ini": ".ini",
+    "application/x-subrip": ".srt", "text/srt": ".srt", "application/x-edl": ".edl",
 }
-ALLOWED_MIME = {**IMAGE_MIME, **VIDEO_MIME, **DOCUMENT_MIME}
+GENERIC_BINARY_MIME = {
+    "application/zip": ".zip", "application/x-zip-compressed": ".zip",
+    "application/x-wondershare-project": ".wfp", "application/x-wondershare-bundle": ".wfpbundle",
+    "application/x-video-sidecar": ".bdm", "application/x-video-index": ".cpi",
+    "application/x-video-playlist": ".mpl", "application/octet-stream": ".bin",
+}
+EXTRA_MIME_BY_EXTENSION = {
+    ".cr2": "image/x-canon-cr2", ".arw": "image/x-sony-arw", ".psd": "image/vnd.adobe.photoshop",
+    ".svg": "image/svg+xml", ".m4v": "video/x-m4v", ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska", ".mts": "video/mp2t", ".mp3": "audio/mpeg",
+    ".wav": "audio/wav", ".m4a": "audio/mp4", ".flac": "audio/flac", ".ogg": "audio/ogg",
+    ".aac": "audio/aac", ".wma": "audio/x-ms-wma", ".wfp": "application/x-wondershare-project",
+    ".wfpbundle": "application/x-wondershare-bundle", ".bdm": "application/x-video-sidecar",
+    ".cpi": "application/x-video-index", ".mpl": "application/x-video-playlist",
+    ".zip": "application/zip", ".json": "application/json", ".yaml": "application/yaml",
+    ".yml": "application/yaml", ".tsv": "text/tab-separated-values", ".html": "text/html",
+    ".ini": "text/ini", ".srt": "application/x-subrip", ".edl": "application/x-edl",
+    ".fcpxml": "application/xml", ".xml": "application/xml", ".url": "text/plain",
+}
+ALLOWED_MIME = {**IMAGE_MIME, **RAW_IMAGE_MIME, **VIDEO_MIME, **AUDIO_MIME, **DOCUMENT_MIME, **GENERIC_BINARY_MIME}
 STATUS_VALUES = {"verified", "probable", "pending_review", "conflicted", "failed"}
 
 
@@ -416,7 +453,7 @@ def _document_text(content: bytes, mime_type: str) -> str:
 
 
 def inspect_media(content: bytes, mime_type: str, filename: str = "") -> ImageInspection:
-    """Inspect an image, video or document while keeping its binary on disk."""
+    """Inspect an image, video, audio or document while keeping its binary on disk."""
     if mime_type in IMAGE_MIME:
         return inspect_image(content, mime_type)
     if mime_type not in ALLOWED_MIME:
@@ -441,13 +478,35 @@ def inspect_media(content: bytes, mime_type: str, filename: str = "") -> ImageIn
             thumbnail=_placeholder_thumbnail("DOCUMENT", filename or mime_type),
             asset_type="document", extracted_text=text,
         )
+    if mime_type in AUDIO_MIME:
+        return ImageInspection(
+            width=0, height=0, orientation="audio", exif_date="", sha256=digest,
+            perceptual_hash=digest[:16], color_embedding=[], blur_score=0,
+            brightness_score=0, quality_score=0,
+            suitability={"poster": False, "video": False, "instagram_cover": False,
+                         "audio": True, "reasons": ["音訊素材已保留；不進行圖片視覺分析"]},
+            thumbnail=_placeholder_thumbnail("AUDIO", filename or mime_type), asset_type="audio",
+        )
+    if mime_type in RAW_IMAGE_MIME:
+        # Camera RAW, PSD and SVG are retained as image files even when the
+        # current Pillow build cannot decode them.  Keep dimensions unknown and
+        # expose the limitation instead of fabricating visual metadata.
+        return ImageInspection(
+            width=0, height=0, orientation="image_file", exif_date="", sha256=digest,
+            perceptual_hash=digest[:16], color_embedding=[], blur_score=0,
+            brightness_score=0, quality_score=0,
+            suitability={"poster": False, "video": False, "instagram_cover": False,
+                         "reasons": ["圖片格式已保留；目前解碼器未配置"]},
+            thumbnail=_placeholder_thumbnail("IMAGE FILE", filename or mime_type), asset_type="image",
+        )
     return ImageInspection(
-        width=0, height=0, orientation="video", exif_date="", sha256=digest,
+        width=0, height=0, orientation="video" if mime_type in VIDEO_MIME else "file", exif_date="", sha256=digest,
         perceptual_hash=digest[:16], color_embedding=[], blur_score=0,
         brightness_score=0, quality_score=0,
-        suitability={"poster": False, "video": True, "instagram_cover": False,
-                     "reasons": ["影片已保留；影格解碼器未配置"]},
-        thumbnail=_placeholder_thumbnail("VIDEO", filename or mime_type), asset_type="video",
+        suitability={"poster": False, "video": mime_type in VIDEO_MIME, "instagram_cover": False,
+                     "reasons": ["影片已保留；影格解碼器未配置"] if mime_type in VIDEO_MIME else ["檔案已保留；目前沒有對應解析器"]},
+        thumbnail=_placeholder_thumbnail("VIDEO" if mime_type in VIDEO_MIME else "FILE", filename or mime_type),
+        asset_type="video" if mime_type in VIDEO_MIME else "document",
     )
 
 
@@ -596,6 +655,8 @@ class VisualAssetStore:
         metadata = dict(source_metadata or {})
         if external_source:
             metadata.setdefault("storage_mode", "external")
+        if inspection.orientation in {"audio", "image_file", "file"}:
+            metadata.setdefault("inspection_mode", "generic")
         duplicate = self._rows(
             "SELECT id FROM visual_assets WHERE sha256=? AND (user_id=? OR privacy IN ('shared','public')) ORDER BY created_at LIMIT 1",
             (digest, user_id),
@@ -715,6 +776,8 @@ class VisualAssetStore:
             raise VisualAssetError("文件與影片目前只支援原始檔及縮圖輸出", code="unsupported_rendition")
         source = Path(asset["storage_path"])
         metadata = loads(asset.get("source_metadata"), {})
+        if isinstance(metadata, dict) and metadata.get("inspection_mode") == "generic":
+            raise VisualAssetError("此圖片格式目前只有原始檔與縮圖輸出", code="unsupported_rendition")
         # External imports must never write a rendition beside the user's
         # original file.  Keep all generated derivatives under our managed
         # visual-assets directory instead.
