@@ -234,3 +234,19 @@ def test_visual_and_core_sync_idempotency_namespaces_do_not_collide(sync_env):
         idempotency_key="same-client-key", asset_ids=[],
     )
     assert repeated["id"] == visual_run["id"]
+
+
+def test_visual_sync_prefers_verified_backend_user_mapping(sync_env, monkeypatch):
+    monkeypatch.setattr(config, "INSFORGE_TRUSTED", True)
+    monkeypatch.setattr(config, "INSFORGE_OWNER_ID", "env-owner-should-lose")
+    store = visual_assets.get_visual_store()
+    stamp = "2026-08-26T00:00:00+00:00"
+    with store._lock:
+        store._conn.execute(
+            "INSERT INTO backend_user_mappings(local_user_id,backend,remote_owner_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            (sync_env["user_id"], "insforge", "mapped-owner-9", "verified", stamp, stamp),
+        )
+        store._conn.commit()
+    visual = InsForgeSyncAdapter(store, service(sync_env)[0].adapters)
+    assert visual._owner_id(sync_env["user_id"]) == "mapped-owner-9"
+    assert visual._owner_id("unknown-user") == "env-owner-should-lose"

@@ -1,6 +1,6 @@
 # Grok 長時間修補狀態
 
-最後更新：2026-08-26T11:20:00Z  
+最後更新：2026-08-26T12:10:00Z  
 分支：`feat/grok-full-repair`（從 `origin/main` `03e21a7` 建立）  
 計畫 PR：https://github.com/aa0968111723-prog/tku-zen-agent/pull/24 （plan-only，不把實作寫進去）
 
@@ -16,6 +16,7 @@ Phase 0 審計完成；Phase 1/6：InsForge HTTP 硬化 + 依 `fetch-docs` REST 
 - **fetch-docs 等價呼叫**：`GET /api/docs/instructions`（MCP 未掛在此 TUI；同一後端文件端點）。後續拉了 `db/rest-api`、`storage/rest-api`、`functions/rest-api`。
 - HTTP adapter：`follow_redirects=False`、circuit breaker、SSRF host check、request id、`Authorization` + `x-api-key`。
 - Storage：先 `upload-strategy`，direct/404 則 PUT fallback；presigned 不帶 InsForge Authorization。
+- P0：本地 `asset_file` 限制在 `VISUAL_ASSET_DIR`（external original 仍可在原位）；`create_asset` 寫入 `project_id`/`owner_id`；視覺同步讀 `backend_user_mappings`。
 
 ## 進行中
 

@@ -157,6 +157,7 @@ async def upload_visual_assets(
     file_created_date: str = Form(default="",max_length=40),
     auto_analyze: bool = Form(default=True),
     idempotency_key: str = Form(default="",max_length=160),
+    project_id: str = Form(default="",max_length=160),
     user_id: str = Depends(auth.require_user),
 ):
     if not files:
@@ -184,12 +185,14 @@ async def upload_visual_assets(
                     user_id=user_id,import_id=upload_job["id"],client_key=f"{index}:{filename}",relative_path=filename,
                     filename=filename,mime_type=mime_type,content=content,last_modified=file_created_date,
                     school=school,club=club,source=source,privacy=privacy,commercial_use=commercial_use,
+                    project_id=project_id,
                 )
             else:
                 item = store.create_asset(
                     user_id=user_id,filename=filename,mime_type=mime_type,content=content,source=source,
                     school=school,club=club,privacy=privacy,commercial_use=commercial_use,
                     file_created_date=file_created_date,source_metadata={"upload_content_type":mime_type},
+                    project_id=project_id,
                 )
             created.append(item)
             skipped_count += int(was_skipped)

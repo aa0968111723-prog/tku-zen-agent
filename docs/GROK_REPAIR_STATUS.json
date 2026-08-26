@@ -4,7 +4,7 @@
   "base_commit": "03e21a7",
   "started_at": "2026-08-26T10:20:00Z",
   "current_phase": "phase1_insforge_docs_aligned_http_hardening",
-  "last_checkpoint": "2026-08-26T11:20:00Z",
+  "last_checkpoint": "2026-08-26T12:10:00Z",
   "completed_steps": [
     "clone_repo",
     "confirm_pr_20_21_22_23_merged",
@@ -17,7 +17,10 @@
     "fetch_docs_instructions_via_rest",
     "fetch_docs_db_storage_functions_rest_api",
     "http_adapter_no_redirect_ssrf_breaker",
-    "storage_upload_strategy_with_put_fallback"
+    "storage_upload_strategy_with_put_fallback",
+    "visual_file_path_confinement",
+    "create_asset_writes_project_id",
+    "visual_sync_reads_backend_user_mappings"
   ],
   "in_progress_steps": [
     "pytest_http_hardening",

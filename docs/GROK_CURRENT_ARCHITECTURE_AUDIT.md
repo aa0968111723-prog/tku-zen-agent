@@ -54,7 +54,7 @@ PR #24 不得承載 implementation。本輪實作在 `feat/grok-full-repair`。
 | 30 | Knowledge base | `knowledge/` + retrieval | 517 份已同步到遠端（PR20 紀錄＋本次 live count） |
 | 31 | Artifact | SessionStore artifacts | 遠端 artifacts 表存在、本次 count 0 |
 | 32 | Document generation | tools artifact / gform / social | app/tools |
-| 33 | Existing bugs | HTTP adapter 曾 `follow_redirects=True`（SSRF 風險） | 本輪已改 False |
+| 33 | Existing bugs | HTTP adapter 曾 `follow_redirects=True`（SSRF 風險）；`asset_file` 未限制本機路徑；`create_asset` 未寫 `project_id`；視覺 sync 未讀 `backend_user_mappings` | 本輪已改 False / 路徑限制 / 寫入 project_id / mapping |
 | 34 | Security risks | 金鑰若貼在聊天室需輪替；前端不得持有 InsForge key | .env.example server-only |
 | 35 | Data loss risks | 無刪原檔 API；rollback 只撤 local refs | insforge_data_sync |
 | 36 | External blockers | 本機無 Windows 素材樹；本 Grok session 無 InsForge MCP 工具 | 見下 |

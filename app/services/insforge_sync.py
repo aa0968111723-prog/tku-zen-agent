@@ -41,8 +41,16 @@ class InsForgeSyncAdapter:
         self.adapters = adapters or get_insforge_adapters()
 
     def _owner_id(self, user_id: str) -> str:
-        # A local ``u_local`` ID is not a valid remote identity.  Require an
-        # explicit mapping instead of silently crossing tenant boundaries.
+        # Prefer the verified mapping used by core data sync so visual and
+        # project/knowledge payloads share one remote owner.  A local
+        # ``u_local`` ID is not a valid remote identity.
+        rows = self.store._rows(
+            "SELECT remote_owner_id FROM backend_user_mappings WHERE local_user_id=? AND backend='insforge' AND status='verified'",
+            (user_id,),
+        )
+        mapped = str(rows[0]["remote_owner_id"] or "") if rows else ""
+        if mapped:
+            return mapped
         return config.INSFORGE_OWNER_ID or (user_id if user_id.count("-") == 4 else "")
 
     def _create_run(self, user_id: str, *, project_id: str, idempotency_key: str, asset_ids: list[str], resumed_from: str = "") -> dict[str, Any]:

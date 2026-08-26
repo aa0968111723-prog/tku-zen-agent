@@ -219,3 +219,37 @@ def test_insforge_sync_is_durable_and_does_not_send_private_asset_without_explic
         assert rollback.json()["rollback_status"] == "complete"
     store = visual_assets.get_visual_store()
     assert store._rows("SELECT status FROM visual_asset_backend_refs WHERE asset_id=?",(asset_id,))[0]["status"] == "rolled_back_local"
+
+
+def test_local_asset_file_cannot_escape_visual_dir(visual_env):
+    with TestClient(main.app) as client:
+        item = upload(client, picture(), auto=False).json()["items"][0]
+        asset_id = item["asset_id"]
+        original = client.get(item["original_url"])
+        assert original.status_code == 200
+        store = visual_assets.get_visual_store()
+        bait = visual_env / "secret.txt"
+        bait.write_text("should-not-be-served", encoding="utf-8")
+        store._conn.execute("UPDATE visual_assets SET storage_path=? WHERE id=?", (str(bait), asset_id))
+        store._conn.commit()
+        escaped = store.asset_file(asset_id, store._rows("SELECT user_id FROM visual_assets WHERE id=?", (asset_id,))[0]["user_id"], "original")
+        assert escaped is None
+        assert client.get(item["original_url"]).status_code == 404
+        assert bait.read_text(encoding="utf-8") == "should-not-be-served"
+
+
+def test_upload_records_project_id_when_provided(visual_env, tmp_db):
+    project_id = tmp_db.create_project(tmp_db.ensure_user("u_local", is_local=True), "招生計畫", "promotion")
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/visual-assets/upload",
+            files=[("files", ("tea.png", picture(), "image/png"))],
+            data={"auto_analyze": "false", "school": "淡江大學", "club": "領袖禪學社", "project_id": project_id},
+        )
+        assert response.status_code == 201
+        item = response.json()["items"][0]
+        assert item["project_id"] == project_id
+        store = visual_assets.get_visual_store()
+        row = store._rows("SELECT project_id,owner_id FROM visual_assets WHERE id=?", (item["asset_id"],))[0]
+        assert row["project_id"] == project_id
+        assert row["owner_id"]
