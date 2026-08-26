@@ -165,7 +165,19 @@ VISUAL_MAX_BATCH = max(1, min(100, int(os.getenv("VISUAL_MAX_BATCH") or 30)))
 VISUAL_SEARCH_LIMIT = max(1, min(200, int(os.getenv("VISUAL_SEARCH_LIMIT") or 60)))
 # 本機資料整理的額外素材根目錄。只會擷取支援的圖片／影片／文件格式；
 # 程式碼、虛擬環境、Git、SQLite 與憑證不會因為加入根目錄而被匯入。
+# 在目前 Windows 工作區若存在同層的社團媒體資料夾，預設也會納入；部署環境
+# 沒有這些資料夾時不會產生額外掃描。可用環境變數完全覆蓋這份白名單。
 _organization_roots = (os.getenv("DATA_ORGANIZATION_IMPORT_ROOTS") or "data,output,outputs,mobile-shots").split(",")
+if not os.getenv("DATA_ORGANIZATION_IMPORT_ROOTS"):
+    _local_media_root_names = (
+        "淡大劇本", "淡大所有照片", "05_Photos", "06_Video", "招生影片", "音樂會",
+        "挑戰營", "場務場刊E310", "聖者影片", "zen-photo-inbox",
+    )
+    _organization_roots.extend(
+        str(ROOT.parent / name)
+        for name in _local_media_root_names
+        if (ROOT.parent / name).exists()
+    )
 DATA_ORGANIZATION_IMPORT_ROOTS = tuple(
     (Path(value.strip()) if Path(value.strip()).is_absolute() else ROOT / value.strip())
     for value in _organization_roots if value.strip()

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import re
 from collections import Counter, defaultdict
 from dataclasses import asdict, is_dataclass
 from pathlib import Path, PurePosixPath
@@ -22,9 +23,13 @@ from .visual_assets import ALLOWED_MIME, VisualAssetStore, dumps, get_visual_sto
 
 MIGRATION_VERSION = "0005_data_organization_depth"
 VALID_STATUSES = {"verified", "probable", "pending_review", "conflicted", "failed"}
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".avif"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".avif", ".jfif"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}
 DOCUMENT_EXTENSIONS = {".md", ".txt", ".csv", ".pdf", ".docx", ".pptx", ".xlsx", ".gs"}
+IGNORED_IMPORT_DIRS = {
+    ".git", ".venv", ".pytest_cache", ".playwright-cli", ".claude", ".codex",
+    ".codex-remote-attachments", "__pycache__", "node_modules",
+}
 
 
 def _stable_id(prefix: str, *parts: object) -> str:
@@ -246,6 +251,30 @@ class DataOrganizationService:
         relative = str(row.get("relative_path") or "").replace(chr(92), "/").strip("/")
         return f"{str(row.get('root') or '').strip()}:{relative}"
 
+    def _lineage_source_keys(self, user_id: str) -> set[str]:
+        """Return source keys recorded for loose files, including SHA dedupes.
+
+        A filesystem duplicate can intentionally reuse an existing visual
+        asset row, so its source metadata belongs to the first file while its
+        own lineage still records the later path.  Inventory must consult both
+        records to avoid reporting those legitimate, already-mapped files as
+        unregistered on every reload.
+        """
+        keys: set[str] = set()
+        rows = self.visual_store._conn.execute(
+            "SELECT metadata FROM data_lineage WHERE owner_id=? AND resource_type='filesystem_asset'",
+            (user_id,),
+        ).fetchall()
+        for row in rows:
+            metadata = _json(row[0], {})
+            if not isinstance(metadata, dict):
+                continue
+            root = str(metadata.get("root") or "").strip()
+            relative = str(metadata.get("relative_path") or "").replace("\\", "/").strip("/")
+            if root and relative:
+                keys.add(f"{root}:{relative}")
+        return keys
+
     def _filesystem_candidates(self, user_id: str = "") -> list[dict[str, Any]]:
         roots = [
             ("visual_assets", config.VISUAL_ASSET_DIR),
@@ -285,6 +314,12 @@ class DataOrganizationService:
             for path in root.rglob("*"):
                 if not path.is_file():
                     continue
+                if any(part in IGNORED_IMPORT_DIRS for part in path.parts):
+                    continue
+                # Office lock files (for example ``~$agenda.pptx``) are
+                # transient implementation details, not user documents.
+                if path.name.startswith("~$"):
+                    continue
                 try:
                     resolved = path.resolve(strict=True)
                     relative = resolved.relative_to(root.resolve()).as_posix()
@@ -295,7 +330,11 @@ class DataOrganizationService:
                 # Loose output files have no owner metadata.  They are only
                 # discoverable by the explicitly designated local owner;
                 # remote users receive their own artifact rows instead.
-                if user_id and root_label in {"outputs", "output", "mobile-shots", "data"} and not local_owner:
+                if user_id and not local_owner and root_label not in {"visual_assets", "knowledge"}:
+                    # Additional roots (including the sibling media trees
+                    # auto-discovered for the local workspace) have no
+                    # per-file owner metadata.  Never expose them to a
+                    # non-local account.
                     continue
                 if resolved in seen or resolved.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
                     continue
@@ -350,6 +389,7 @@ class DataOrganizationService:
             for row in all_assets if row.get("storage_path")
         }
         registered_source_keys = {key for key in (self._source_key(row) for row in all_assets) if key}
+        registered_source_keys.update(self._lineage_source_keys(user_id))
         unregistered = [
             row for row in filesystem
             if row["root"] != "knowledge"
@@ -549,6 +589,7 @@ class DataOrganizationService:
                 )
             ) if key
         }
+        registered_source_keys.update(self._lineage_source_keys(user_id))
         for candidate in self._filesystem_candidates(user_id):
             if candidate["root"] == "knowledge":
                 continue
@@ -566,6 +607,99 @@ class DataOrganizationService:
         for key, resource_type in (("artifacts", "artifact"), ("activities", "activity"), ("research_sources", "research_source")):
             catalog.extend((resource_type, str(row["id"]), row) for row in snapshot[key])
         return catalog
+
+    @staticmethod
+    def _directory_taxonomy(row: dict[str, Any]) -> dict[str, Any]:
+        """Derive conservative, reviewable labels from an organized folder tree.
+
+        The sibling media trees contain useful human curation (for example
+        ``淡大劇本/場景/上學期社課``).  This is evidence about how a file was
+        organized, not proof of a person's identity or a formally verified
+        event.  Keep the result as probable observations with a relative path
+        witness so a reviewer can promote or ignore it later.
+        """
+        root = str(row.get("root") or "").strip()
+        relative = str(row.get("relative_path") or "").replace("\\", "/").strip("/")
+        segments = [part for part in PurePosixPath(relative).parts if part and part not in {".", ".."}]
+        # A filename is often IMG_####; categories are represented by parent
+        # folders, so use parent segments for event candidates.
+        folders = segments[:-1] if segments else []
+        searchable = " ".join([root, *segments])
+        evidence = {
+            "source": "directory_taxonomy",
+            "taxonomy_version": "directory-v1",
+            "root": root,
+            "relative_path": relative,
+        }
+        observations: list[dict[str, Any]] = []
+        tku_roots = {"淡大劇本", "淡大所有照片", "招生影片"}
+        if root in tku_roots:
+            observations.append({"entity_type": "school", "label": "淡江大學", "confidence": 0.94})
+        # The script/scene tree is explicitly the 淡大禪學社 production tree;
+        # keep this probable and never write a verified club identity.
+        if root in {"淡大劇本", "招生影片"}:
+            observations.append({"entity_type": "club", "label": "領袖禪學社", "confidence": 0.88})
+
+        scene_rules = (
+            ("茶會", "茶會"), ("社課", "社課"), ("教室", "教室"),
+            ("禪堂", "禪堂"), ("舞台", "舞台"), ("講座", "講座"),
+            ("演講", "講座"), ("校園", "校園"), ("空景", "校園"),
+            ("報到", "報到區"), ("戶外", "戶外"), ("出遊", "戶外"),
+            ("捷運", "戶外"), ("克難坡", "戶外"), ("排球場", "戶外"),
+            ("大梵寺", "戶外"), ("聚餐", "聚餐"), ("湯圓", "聚餐"),
+            ("場佈", "活動現場"), ("擺攤", "活動現場"), ("社評", "活動現場"),
+            ("社辦", "活動現場"), ("倒數", "活動現場"), ("校友會", "活動現場"),
+        )
+        scene_labels: set[str] = set()
+        for keyword, label in scene_rules:
+            if keyword in searchable:
+                scene_labels.add(label)
+        for label in sorted(scene_labels):
+            observations.append({"entity_type": "scene", "label": label, "confidence": 0.84})
+
+        event_keywords = (
+            "茶會", "社課", "演講", "講座", "社評", "期初", "期中", "期末",
+            "聚餐", "出遊", "校友會", "場佈", "擺攤", "社辦", "呼吸", "倒數",
+            "最後一堂", "第八幕", "校慶",
+        )
+        event_label = next(
+            (segment for segment in reversed(folders) if any(keyword in segment for keyword in event_keywords) and not segment.startswith("_")),
+            "",
+        )
+        if event_label:
+            observations.append({"entity_type": "event", "label": event_label[:300], "confidence": 0.78})
+
+        # Compact Gregorian dates such as 20251206 and ordinary YYYY-MM-DD
+        # names are safe date candidates; academic-year labels without a month
+        # remain only in the event/path evidence to avoid invented dates.
+        date_candidates: list[str] = []
+        for match in re.finditer(r"(?<!\d)(20\d{2})[-_年]?(\d{1,2})[-_月]?(\d{1,2})(?:日)?(?!\d)", searchable):
+            year, month, day = match.groups()
+            date_candidates.append(f"{year}-{month}-{day}")
+        return {"observations": observations, "dates": list(dict.fromkeys(date_candidates)), "evidence": evidence}
+
+    def _apply_directory_taxonomy(self, user_id: str, asset_id: str, row: dict[str, Any]) -> None:
+        taxonomy = self._directory_taxonomy(row)
+        evidence = taxonomy["evidence"]
+        for observation in taxonomy["observations"]:
+            self.visual_store.add_observation(
+                asset_id,
+                str(observation["entity_type"]),
+                label=str(observation["label"]),
+                status="probable",
+                confidence=float(observation["confidence"]),
+                source="directory_taxonomy_v1",
+                evidence=evidence,
+            )
+        for value in taxonomy["dates"]:
+            self.visual_store.add_date(
+                asset_id,
+                value,
+                source="directory_taxonomy_v1",
+                confidence=0.78,
+                status="probable",
+                evidence=json.dumps(evidence, ensure_ascii=False),
+            )
 
     def _map_resource(self, user_id: str, resource_type: str, resource_id: str, row: dict[str, Any]) -> None:
         if resource_type == "filesystem_asset":
@@ -592,10 +726,16 @@ class DataOrganizationService:
             if mime_type not in ALLOWED_MIME:
                 mime_type = next((candidate for candidate, suffix in ALLOWED_MIME.items() if suffix == path.suffix.lower()), mime_type)
             if not mapped_asset_id and mime_type in ALLOWED_MIME:
+                # Keep large local videos and already-organized photo trees in
+                # place.  We inspect image/document bytes for metadata, but
+                # only create managed thumbnails; no second multi-GB binary
+                # tree is written under data/visual-assets.
+                inspection_bytes = path.read_bytes() if row.get("kind") != "video" else b"external-video"
                 imported = self.visual_store.create_asset(
-                    user_id=user_id, filename=path.name, mime_type=mime_type, content=path.read_bytes(),
+                    user_id=user_id, filename=path.name, mime_type=mime_type, content=inspection_bytes,
                     source="existing_data_import", relative_path=str(row.get("relative_path") or ""),
                     source_metadata={"root": row.get("root"), "relative_path": row.get("relative_path"), "sha256": row.get("sha256")},
+                    external_path=str(path), sha256_override=str(row.get("sha256") or ""),
                 )
                 mapped_asset_id = str(imported["asset_id"])
             source_id = self._source(
@@ -612,6 +752,9 @@ class DataOrganizationService:
             )
             if not mapped_asset_id:
                 raise ValueError(f"不支援匯入的素材格式：{path.suffix.lower() or mime_type}")
+            # Apply the human-curated folder taxonomy after the asset exists.
+            # It is idempotent and remains probable/reviewable evidence.
+            self._apply_directory_taxonomy(user_id, mapped_asset_id, row)
             self._edge(
                 user_id, "filesystem_file", resource_id, "asset", mapped_asset_id, "imported_as",
                 confidence=1.0, status="verified", evidence={"sha256": row.get("sha256"), "relative_path": row.get("relative_path")}, source_id=source_id,
@@ -624,6 +767,16 @@ class DataOrganizationService:
             original_path = str(row.get("storage_path") or "")
             source_id = self._source(user_id, source_type=str(row.get("source") or "visual_asset"), original_file=original_path, captured_at=str(row.get("uploaded_at") or ""), reliability=1.0 if row.get("source") else 0.3)
             self._lineage(user_id, resource_type, resource_id, original_path=original_path, original_source=str(row.get("source") or ""), source_id=source_id, sha256=str(row.get("sha256") or ""), confidence=float(row.get("overall_confidence") or 0), verification_status=str(row.get("review_status") or "pending_review"), updated_at=str(row.get("updated_at") or ""), metadata={"relative_path": row.get("relative_path") or "", "manifest_id": row.get("manifest_id") or ""})
+            source_metadata = _json(row.get("source_metadata"), {})
+            if isinstance(source_metadata, dict) and source_metadata.get("root") and source_metadata.get("relative_path"):
+                # Existing external imports may already have lineage, so apply
+                # the folder taxonomy while reconciling the canonical asset
+                # branch as well as during the first loose-file mapping.
+                self._apply_directory_taxonomy(
+                    user_id,
+                    resource_id,
+                    {"root": source_metadata.get("root"), "relative_path": source_metadata.get("relative_path")},
+                )
             for kind, entity_id, relation in (("school", row.get("school_id"), "belongs_to_school"), ("club", row.get("club_id"), "depicts_club")):
                 if entity_id:
                     mapped_id = self._mapped_entity_id(user_id, kind, str(entity_id))

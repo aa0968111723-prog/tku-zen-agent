@@ -63,9 +63,11 @@ Migration 依序為 `0001_initial_visual_schema` 與
 `client_key`、`relative_path`、`last_modified`；伺服器持久化每個項目的成功、失敗、
 錯誤碼與 attempts。同一 key／同一雜湊會安全略過，失敗項目可單獨重送。內容變更時
 必須明確指定 `resync=true`，系統建立新 asset 並填入 `supersedes_asset_id`，不覆寫
-舊檔。binary 只寫入 `VISUAL_ASSET_DIR`，SQLite 僅保存路徑、雜湊與結構化資料。
+舊檔。直接上傳的 binary 只寫入 `VISUAL_ASSET_DIR`；本機外部資料樹則保留原始
+`storage_path`、只在 `VISUAL_ASSET_DIR` 寫入縮圖與衍生圖，SQLite 僅保存路徑、雜湊
+與結構化資料，因此不會為 29GB 級資料再複製一份。
 
-圖片由 Pillow 實際解碼；PDF、DOCX、PPTX 與文字文件使用本機 parser 擷取文字並
+圖片（JPEG/PNG/WebP/GIF/AVIF/JFIF）由 Pillow 實際解碼；PDF、DOCX、PPTX 與文字文件使用本機 parser 擷取文字並
 建立縮圖。MP4、MOV、WebM 原檔可匯入；目前部署未附影格解碼器，因此影片分析會
 明確回報 `BLOCKED_BY_EXTERNAL_DEPENDENCY`，不假造尺寸或標籤。
 
@@ -211,7 +213,9 @@ Zeabur 必須把 SQLite、原圖與衍生圖放在持久化磁碟；只設 DB_PA
 `VISUAL_ASSET_DIR` 會留下資料列但在容器重啟後失去檔案。備份時兩者要一起備份。
 
 本機資料整理可用 `DATA_ORGANIZATION_IMPORT_ROOTS` 擴大素材白名單，預設為
-`data,output,outputs,mobile-shots`。服務只讀取支援的圖片／影片／文件副檔名，並排除
+`data,output,outputs,mobile-shots`；若工作區同層存在 `淡大劇本`、`淡大所有照片`、
+`05_Photos`、`06_Video`、`招生影片` 等內部素材樹，也會自動納入。服務只讀取支援的
+圖片（JPEG/PNG/WebP/GIF/AVIF/JFIF）、影片與文件副檔名，並排除
 SQLite、playwright 暫存、`.git`、`.venv`、程式碼與憑證；相對路徑和 SHA-256 會保存於
 manifest/lineage，原始檔不會被搬移或覆蓋。已匯入檔案會以 `root:relative_path` 與
 SHA-256 做雙重 idempotency 判定；`data/visual-assets` 內的 thumbnail/rendition 只作

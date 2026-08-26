@@ -65,7 +65,7 @@
           <span class="drop-icon" aria-hidden="true">＋</span><strong>拖曳素材到這裡</strong>
           <span>圖片、影片、PDF、Word、PowerPoint 或文字文件</span><span class="muted">一次最多 30 個、每個 20MB</span>
         </label>
-        <input id="visual-files" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm,application/pdf,.docx,.pptx,.xlsx,.gs,text/plain,text/markdown,text/csv" multiple>
+        <input id="visual-files" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif,image/jfif,video/mp4,video/quicktime,video/webm,application/pdf,.docx,.pptx,.xlsx,.gs,text/plain,text/markdown,text/csv" multiple>
         <input id="camera-files" type="file" accept="image/*" capture="environment">
         <input id="folder-files" type="file" accept="image/*,video/*,application/pdf,.docx,.pptx,.xlsx,.gs,.txt,.md,.csv" webkitdirectory directory multiple>
         <div class="upload-source-actions"><label class="ghost" for="camera-files">手機拍照上傳</label><label class="ghost" for="folder-files">匯入資料夾</label><span id="import-mode" class="muted">一般批次上傳</span></div>
@@ -94,7 +94,7 @@
           <label>最低畫質<input id="filter-quality" type="number" min="0" max="100" value="0"></label><label>商用<select id="filter-commercial"><option value="">全部</option><option value="allowed">可商用</option><option value="not_allowed">不可商用</option><option value="unknown">待確認</option></select></label>
         </div>
         <details><summary>日期與重複圖片</summary><div class="search-filters"><label>起始日期<input id="filter-date-from" type="date"></label><label>結束日期<input id="filter-date-to" type="date"></label><label>重複圖片<select id="filter-duplicate"><option value="">全部</option><option value="exclude">排除重複</option><option value="only">只看重複</option></select></label></div></details>
-        <div class="image-query"><label class="ghost" for="query-image">以圖搜圖</label><input id="query-image" type="file" accept="image/jpeg,image/png,image/webp"><span id="query-image-name" class="muted">未選擇查詢圖片</span></div>
+        <div class="image-query"><label class="ghost" for="query-image">以圖搜圖</label><input id="query-image" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif,image/jfif"><span id="query-image-name" class="muted">未選擇查詢圖片</span></div>
       </form>
       <div id="question-card" class="question-card">
         <h2>你要找哪一類照片？</h2><div class="choice-cards"><button data-search="活動現場">活動現場</button><button data-search="人物合照">人物合照</button><button data-search="校園場景">校園場景</button><button data-search="海報">海報</button><button data-search="適合招生影片">適合招生影片</button></div>
