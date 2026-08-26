@@ -484,8 +484,9 @@ class VisualAssetStore:
         self.path = Path(path or config.DB_PATH)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        self._conn = sqlite3.connect(str(self.path), timeout=10.0, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout=10000")
         with self._lock:
             apply_visual_migrations(self._conn, SCHEMA)
             stamp = now()
@@ -494,9 +495,12 @@ class VisualAssetStore:
                        error_code='interrupted_process',error_message='服務重新啟動，請重試分析',updated_at=?
                    WHERE status='running'""",(stamp,),
             )
+            # Do not overwrite review_status: a verified/probable asset must
+            # not become failed just because the process restarted mid-job.
             self._conn.execute(
-                """UPDATE visual_assets SET processing_state='failed',review_status='failed',updated_at=?
-                   WHERE id IN (SELECT asset_id FROM visual_analysis_jobs WHERE error_code='interrupted_process')""",(stamp,),
+                """UPDATE visual_assets SET processing_state='failed',updated_at=?
+                   WHERE id IN (SELECT asset_id FROM visual_analysis_jobs WHERE error_code='interrupted_process')
+                     AND processing_state IN ('running','pending','queued','')""",(stamp,),
             )
             for name in SCENE_NAMES:
                 self._conn.execute(
@@ -559,7 +563,7 @@ class VisualAssetStore:
         source: str = "upload", school: str = "", club: str = "", privacy: str = "private",
         commercial_use: str = "unknown", file_created_date: str = "", source_metadata: dict[str, Any] | None = None,
         relative_path: str = "", manifest_id: str = "", supersedes_asset_id: str = "",
-        external_path: str = "", sha256_override: str = "",
+        external_path: str = "", sha256_override: str = "", project_id: str = "",
     ) -> dict[str, Any]:
         external_source: Path | None = None
         if external_path:
@@ -610,8 +614,8 @@ class VisualAssetStore:
                     semantic_embedding,privacy,commercial_use,analysis_status,quality_score,blur_score,brightness_score,
                     suitability,ocr_text,review_status,school_id,club_id,duplicate_of,created_at,updated_at,
                     asset_type,relative_path,manifest_id,aspect_ratio,people_count,overall_confidence,processing_state,
-                    last_confirmed_at,supersedes_asset_id
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    last_confirmed_at,supersedes_asset_id,project_id,owner_id
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     asset_id,user_id,filename[:240],str(original_path),str(thumb_path),mime_type,safe_ext,
                     inspection.width,inspection.height,inspection.orientation,stamp,source[:120],dumps(metadata),
@@ -621,7 +625,7 @@ class VisualAssetStore:
                     dumps(inspection.suitability),inspection.extracted_text,"pending_review",school_id,club_id,duplicate_of,stamp,stamp,
                     inspection.asset_type,relative_path[:1000],manifest_id[:100],
                     round(inspection.width / inspection.height, 6) if inspection.height else 0,
-                    0,0,"completed","",supersedes_asset_id[:80],
+                    0,0,"completed","",supersedes_asset_id[:80],(project_id or "")[:160],user_id,
                 ),
             )
             for value, date_source, confidence in (
@@ -678,7 +682,7 @@ class VisualAssetStore:
             "exif_date","file_created_date","privacy","commercial_use","analysis_status","quality_score",
             "blur_score","brightness_score","ocr_text","review_status","duplicate_of","school_id","club_id","created_at","updated_at",
             "asset_type","relative_path","manifest_id","aspect_ratio","people_count","overall_confidence",
-            "processing_state","last_confirmed_at","supersedes_asset_id",
+            "processing_state","last_confirmed_at","supersedes_asset_id","project_id",
         )}
         result["asset_id"] = result.pop("id")
         result["thumbnail_url"] = f"/api/visual-assets/{result['asset_id']}/file?variant=thumbnail"
@@ -700,25 +704,82 @@ class VisualAssetStore:
             result["analysis_job"] = job
         return result
 
+    def _is_external_asset(self, asset: dict[str, Any]) -> bool:
+        metadata = loads(asset.get("source_metadata"), {})
+        return isinstance(metadata, dict) and metadata.get("storage_mode") == "external"
+
+    def _confine_visual_file(
+        self, raw: Path, mime: str, filename: str, *, allow_external: bool,
+    ) -> tuple[Path, str, str] | None:
+        """Serve only files we manage, or original bytes of an external import.
+
+        Local assets must stay under VISUAL_ASSET_DIR. External originals may
+        live outside that tree; derivatives still cannot. Missing files return
+        None (HTTP 404) rather than leaking path validity.
+        """
+        try:
+            resolved = Path(raw).resolve()
+        except (OSError, RuntimeError):
+            return None
+        try:
+            root = config.VISUAL_ASSET_DIR.resolve()
+        except (OSError, RuntimeError):
+            return None
+        under_library = resolved == root or root in resolved.parents
+        if not under_library:
+            if not allow_external or not resolved.is_file():
+                return None
+            try:
+                db_path = Path(config.DB_PATH).resolve()
+            except (OSError, RuntimeError):
+                db_path = None
+            if db_path is not None and resolved == db_path:
+                return None
+            app_root = (config.ROOT / "app").resolve()
+            git_root = (config.ROOT / ".git").resolve()
+            if app_root in resolved.parents or git_root in resolved.parents or resolved == app_root:
+                return None
+            return resolved, mime, filename
+        if not resolved.is_file():
+            return None
+        return resolved, mime, filename
+
     def asset_file(self, asset_id: str, user_id: str, variant: str) -> tuple[Path, str, str] | None:
         asset = self.visible_asset(asset_id,user_id)
         if not asset:
             return None
+        external = self._is_external_asset(asset)
         if variant == "original":
-            return Path(asset["storage_path"]),asset["mime_type"],asset["original_filename"]
+            return self._confine_visual_file(
+                Path(asset["storage_path"]), asset["mime_type"], asset["original_filename"], allow_external=external,
+            )
         if variant == "thumbnail":
-            return Path(asset["thumbnail_path"]),"image/jpeg",f"{asset_id}-thumbnail.jpg"
+            return self._confine_visual_file(
+                Path(asset["thumbnail_path"]), "image/jpeg", f"{asset_id}-thumbnail.jpg", allow_external=False,
+            )
         ratios = {"1:1":(1,1),"4:5":(4,5),"9:16":(9,16),"16:9":(16,9)}
         if variant not in ratios:
             raise VisualAssetError("variant 必須是 original、thumbnail、1:1、4:5、9:16 或 16:9")
         if asset.get("asset_type") != "image":
             raise VisualAssetError("文件與影片目前只支援原始檔及縮圖輸出", code="unsupported_rendition")
-        source = Path(asset["storage_path"])
+        confined = self._confine_visual_file(
+            Path(asset["storage_path"]), asset["mime_type"], asset["original_filename"], allow_external=external,
+        )
+        if not confined:
+            return None
+        source = confined[0]
         metadata = loads(asset.get("source_metadata"), {})
         # External imports must never write a rendition beside the user's
         # original file.  Keep all generated derivatives under our managed
         # visual-assets directory instead.
         target_parent = Path(asset["thumbnail_path"]).parent if isinstance(metadata, dict) and metadata.get("storage_mode") == "external" else source.parent
+        try:
+            target_parent = target_parent.resolve()
+        except (OSError, RuntimeError):
+            return None
+        library_root = config.VISUAL_ASSET_DIR.resolve()
+        if library_root not in target_parent.parents and target_parent != library_root:
+            return None
         target = target_parent / f"rendition-{variant.replace(':','x')}.jpg"
         if not target.exists():
             with Image.open(source) as raw:
@@ -738,7 +799,10 @@ class VisualAssetStore:
                     image.thumbnail((max_width,round(max_width/target_ratio)),Image.Resampling.LANCZOS)
                 # 衍生圖可重建；原圖永不被開啟為寫入目標。
                 image.save(target,format="JPEG",quality=91,optimize=True)
-        return target,"image/jpeg",f"{Path(asset['original_filename']).stem}-{variant.replace(':','x')}.jpg"
+        return self._confine_visual_file(
+            target, "image/jpeg", f"{Path(asset['original_filename']).stem}-{variant.replace(':','x')}.jpg",
+            allow_external=False,
+        )
 
     def export_package(self, user_id: str, asset_ids: list[str], *, rendition: str = "original") -> Path:
         unique_ids = list(dict.fromkeys(asset_ids))[:100]
@@ -833,15 +897,19 @@ class VisualAssetStore:
         with self._lock:
             # 同一輪重跑分析時不累積完全相同的 AI observation。
             current = self._conn.execute(
-                "SELECT id FROM visual_observations WHERE asset_id=? AND entity_type=? AND entity_id=? AND label=? AND source=?",
+                "SELECT id,status,review_action FROM visual_observations WHERE asset_id=? AND entity_type=? AND entity_id=? AND label=? AND source=?",
                 (asset_id,entity_type,entity_id,label,source),
             ).fetchone()
             if current:
-                self._conn.execute(
-                    "UPDATE visual_observations SET status=?,confidence=?,evidence=?,updated_at=? WHERE id=?",
-                    (status,max(0,min(1,float(confidence))),dumps(evidence or {}),stamp,current[0]),
-                )
-                oid = str(current[0])
+                oid = str(current["id"])
+                # Re-running AI/directory taxonomy must not undo human review.
+                if current["status"] == "verified" or current["review_action"] == "ignored":
+                    pass
+                else:
+                    self._conn.execute(
+                        "UPDATE visual_observations SET status=?,confidence=?,evidence=?,updated_at=? WHERE id=?",
+                        (status,max(0,min(1,float(confidence))),dumps(evidence or {}),stamp,oid),
+                    )
             else:
                 self._conn.execute(
                     "INSERT INTO visual_observations(id,asset_id,entity_type,entity_id,label,status,confidence,source,evidence,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -1159,6 +1227,7 @@ class VisualAssetStore:
         filename: str, mime_type: str, content: bytes, last_modified: str = "",
         school: str = "", club: str = "", source: str = "folder_import",
         privacy: str = "private", commercial_use: str = "unknown", resync: bool = False,
+        project_id: str = "",
     ) -> tuple[dict[str, Any], bool]:
         current_import = self._rows("SELECT * FROM visual_imports WHERE id=? AND user_id=?", (import_id,user_id))
         if not current_import:
@@ -1198,6 +1267,7 @@ class VisualAssetStore:
                 file_created_date=last_modified,source_metadata={"import_id":import_id,"client_key":key},
                 relative_path=rel,manifest_id=import_id,
                 supersedes_asset_id=str(existing.get("asset_id") or "") if existing and resync else "",
+                project_id=project_id,
             )
             with self._lock:
                 self._conn.execute(

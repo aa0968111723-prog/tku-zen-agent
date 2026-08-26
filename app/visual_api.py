@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import mimetypes
 from typing import Any, Literal
 
@@ -17,13 +18,14 @@ from .services import audit, auth, fal, permissions
 from .services.visual_analysis import analyze_asset
 from .services.visual_assets import VisualAssetError, get_visual_store
 from .services.insforge_adapters import BLOCKED_BY_EXTERNAL_DEPENDENCY, InsForgeUnavailable, get_insforge_adapters
-from .services.insforge_sync import InsForgeSyncAdapter
+from .services.insforge_sync import InsForgeSyncAdapter, resolved_insforge_owner
 from .services.insforge_data_sync import InsForgeDataSyncAdapter
 from .services.data_organization import DataOrganizationService
 from .services.library_context import LibraryContextResolver
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(auth.require_user)], tags=["visual-assets"])
+logger = logging.getLogger(__name__)
 
 
 def _http_error(exc: VisualAssetError) -> HTTPException:
@@ -32,8 +34,10 @@ def _http_error(exc: VisualAssetError) -> HTTPException:
 
 
 async def _safe_analyze(asset_id: str, user_id: str) -> None:
-    with contextlib.suppress(Exception):
-        await analyze_asset(asset_id,user_id)
+    try:
+        await analyze_asset(asset_id, user_id)
+    except Exception:
+        logger.warning("background visual analysis failed asset_id=%s", asset_id, exc_info=True)
 
 
 class StrictRequest(BaseModel):
@@ -157,6 +161,7 @@ async def upload_visual_assets(
     file_created_date: str = Form(default="",max_length=40),
     auto_analyze: bool = Form(default=True),
     idempotency_key: str = Form(default="",max_length=160),
+    project_id: str = Form(default="",max_length=160),
     user_id: str = Depends(auth.require_user),
 ):
     if not files:
@@ -184,12 +189,14 @@ async def upload_visual_assets(
                     user_id=user_id,import_id=upload_job["id"],client_key=f"{index}:{filename}",relative_path=filename,
                     filename=filename,mime_type=mime_type,content=content,last_modified=file_created_date,
                     school=school,club=club,source=source,privacy=privacy,commercial_use=commercial_use,
+                    project_id=project_id,
                 )
             else:
                 item = store.create_asset(
                     user_id=user_id,filename=filename,mime_type=mime_type,content=content,source=source,
                     school=school,club=club,privacy=privacy,commercial_use=commercial_use,
                     file_created_date=file_created_date,source_metadata={"upload_content_type":mime_type},
+                    project_id=project_id,
                 )
             created.append(item)
             skipped_count += int(was_skipped)
@@ -301,7 +308,7 @@ async def search_visual_assets(
     people_min: int = Query(default=0,ge=0,le=1000),
     brightness_min: float = Query(default=0,ge=0,le=100),
     verification_status: str = Query(default="",pattern=r"^(|verified|probable|pending_review|conflicted|failed)$"),
-    page: int = Query(default=1,ge=1,le=10000), limit: int = Query(default=30,ge=1),
+    page: int = Query(default=1,ge=1,le=10000), limit: int = Query(default=30,ge=1,le=100),
     user_id: str = Depends(auth.require_user),
 ) -> dict[str,Any]:
     capped = min(limit,config.VISUAL_SEARCH_LIMIT)
@@ -319,7 +326,7 @@ async def search_visual_assets(
     # assets already visible to this user can be hydrated into the response.
     if config.INSFORGE_SYNC_MODE in {"dual", "insforge"}:
         try:
-            remote = get_insforge_adapters().search.search({"query": q[:1000], "filters": parsed, "owner_id": config.INSFORGE_OWNER_ID or user_id, "page": page, "limit": capped})
+            remote = get_insforge_adapters().search.search({"query": q[:1000], "filters": parsed, "owner_id": resolved_insforge_owner(store, user_id) or user_id, "page": page, "limit": capped})
             local_by_id = {str(item["asset_id"]): item for item in items}
             remote_items: list[dict[str,Any]] = []
             for row in remote:
@@ -344,7 +351,7 @@ async def search_visual_assets(
 
 @router.post("/visual-assets/search-by-image")
 async def search_visual_assets_by_image(
-    request: Request,file: UploadFile = File(...),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),
+    request: Request,file: UploadFile = File(...),page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),
     user_id: str = Depends(auth.require_user),
 ) -> dict[str,Any]:
     try:
@@ -364,7 +371,7 @@ async def search_visual_assets_by_image(
 @router.get("/visual-assets/review-queue")
 async def visual_review_queue(
     status: str = Query(default="",pattern=r"^(|verified|probable|pending_review|conflicted|failed)$"),
-    page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),
+    page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),
     user_id: str = Depends(auth.require_user),
 ) -> dict[str,Any]:
     capped = min(limit,config.VISUAL_SEARCH_LIMIT)
@@ -432,7 +439,7 @@ async def patch_visual_asset(asset_id: str,req: AssetPatch,request: Request,user
 
 @router.get("/visual-assets/{asset_id}/file")
 async def visual_asset_file(
-    asset_id: str,request: Request,variant: str = Query(default="original"),download: bool = Query(default=False),
+    asset_id: str,request: Request,variant: str = Query(default="original",pattern=r"^(original|thumbnail|1:1|4:5|9:16|16:9)$"),download: bool = Query(default=False),
     user_id: str = Depends(auth.require_user),
 ):
     try:
@@ -451,7 +458,7 @@ async def visual_asset_file(
 
 
 @router.post("/visual-assets/{asset_id}/usage")
-async def record_visual_usage(asset_id: str,req: UsageRequest,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+async def record_visual_usage(asset_id: str,req: UsageRequest,request: Request,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
     if not get_visual_store().visible_asset(asset_id,user_id):
         raise HTTPException(status_code=404,detail="找不到圖片或沒有權限")
     get_visual_store().record_learning(user_id,req.action,asset_id=asset_id,payload=req.context,outcome="recorded")
@@ -461,13 +468,14 @@ async def record_visual_usage(asset_id: str,req: UsageRequest,user_id: str = Dep
             user_id,asset_id,kind=req.action,note=str(req.context.get("note") or ""),
             rendition=str(req.context.get("rendition") or "original"),
         )
+    audit.write_audit(action="visual.usage",actor_user_id=user_id,resource=asset_id,detail={"action":req.action},request=request)
     return {"ok":True,"collection":collection}
 
 
 @router.get("/visual-collections")
 async def list_visual_collections(
     kind: str = Query(default="",pattern=r"^(|material_pack|storyboard|social_post|poster)$"),
-    page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),
+    page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),
     user_id: str = Depends(auth.require_user),
 ) -> dict[str,Any]:
     capped = min(limit,config.VISUAL_SEARCH_LIMIT)
@@ -527,22 +535,22 @@ async def _entity_list(kind: str,query: str,school: str,page: int,limit: int,use
 
 
 @router.get("/people")
-async def list_people(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),user_id: str = Depends(auth.require_user)):
+async def list_people(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)):
     return await _entity_list("people",q,school,page,limit,user_id)
 
 
 @router.get("/clubs")
-async def list_clubs(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),user_id: str = Depends(auth.require_user)):
+async def list_clubs(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)):
     return await _entity_list("clubs",q,school,page,limit,user_id)
 
 
 @router.get("/events")
-async def list_events(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),user_id: str = Depends(auth.require_user)):
+async def list_events(q: str = Query(default="",max_length=200),school: str = Query(default="",max_length=120),page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)):
     return await _entity_list("events",q,school,page,limit,user_id)
 
 
 @router.get("/scenes")
-async def list_scenes(q: str = Query(default="",max_length=200),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),user_id: str = Depends(auth.require_user)):
+async def list_scenes(q: str = Query(default="",max_length=200),page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)):
     return await _entity_list("scenes",q,"",page,limit,user_id)
 
 
@@ -552,7 +560,7 @@ async def learning_insights(user_id: str = Depends(auth.require_user)) -> dict[s
 
 
 @router.get("/learning/corrections")
-async def learning_corrections(page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+async def learning_corrections(page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
     capped = min(limit,config.VISUAL_SEARCH_LIMIT)
     items,total = get_visual_store().corrections(user_id,page=page,limit=capped)
     return {"items":items,"total":total,"page":page,"limit":capped}
@@ -717,7 +725,7 @@ async def retry_data_organization_run(run_id: str,request: Request,user_id: str 
 
 
 @router.get("/data-organization/queue")
-async def data_organization_queue(category: str = Query(default="pending_review",max_length=30),page: int = Query(default=1,ge=1),limit: int = Query(default=30,ge=1),user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+async def data_organization_queue(category: str = Query(default="pending_review",max_length=30),page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
     capped = min(limit,config.VISUAL_SEARCH_LIMIT)
     items,total = DataOrganizationService().list_queue(user_id,category=category,page=page,limit=capped)
     return {"items":items,"total":total,"page":page,"limit":capped,"category":category}

@@ -38,7 +38,7 @@ def _headers() -> dict[str, str]:
 async def _post_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     """呼叫 fal REST API；不將 request payload（可能含圖片）寫入日誌。"""
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0), follow_redirects=False) as client:
             response = await client.post(path, headers=_headers(), json=payload)
     except httpx.TimeoutException as exc:
         raise FalError("視覺服務回應逾時，請稍後重試或改以文字描述。", code="vision_timeout") from exc

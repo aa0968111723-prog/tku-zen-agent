@@ -31,6 +31,18 @@ def _vector(value: Any, size: int = 1536) -> list[float]:
     return (result + [0.0] * size)[:size] if result else []
 
 
+def resolved_insforge_owner(store: VisualAssetStore, user_id: str) -> str:
+    """Shared owner mapping for visual sync and optional InsForge search."""
+    rows = store._rows(
+        "SELECT remote_owner_id FROM backend_user_mappings WHERE local_user_id=? AND backend='insforge' AND status='verified'",
+        (user_id,),
+    )
+    mapped = str(rows[0]["remote_owner_id"] or "") if rows else ""
+    if mapped:
+        return mapped
+    return config.INSFORGE_OWNER_ID or (user_id if user_id.count("-") == 4 else "")
+
+
 class InsForgeSyncAdapter:
     """Coordinates local truth, remote adapters and durable sync state."""
 
@@ -41,9 +53,7 @@ class InsForgeSyncAdapter:
         self.adapters = adapters or get_insforge_adapters()
 
     def _owner_id(self, user_id: str) -> str:
-        # A local ``u_local`` ID is not a valid remote identity.  Require an
-        # explicit mapping instead of silently crossing tenant boundaries.
-        return config.INSFORGE_OWNER_ID or (user_id if user_id.count("-") == 4 else "")
+        return resolved_insforge_owner(self.store, user_id)
 
     def _create_run(self, user_id: str, *, project_id: str, idempotency_key: str, asset_ids: list[str], resumed_from: str = "") -> dict[str, Any]:
         scoped_key = f"insforge_visual:{idempotency_key}"[:160]
