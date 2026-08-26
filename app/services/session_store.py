@@ -770,6 +770,64 @@ class SessionStore:
             self._conn.commit()
         return self.get_activity_task(task_id, user_id)
 
+    # ── safe backend sync snapshot ─────────────────────────
+
+    def export_sync_snapshot(
+        self, user_id: str, *, project_id: str | None = None, limit: int = 500,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Return durable, user-owned records that are safe to synchronize.
+
+        Chat messages, working memory, retrieval cache, audit IP addresses and
+        authentication material are deliberately absent.  Artifact absolute
+        paths are returned only to the server-side sync service and must never
+        be included in a public manifest or remote metadata payload.
+        """
+        capped = max(1, min(int(limit), 5000))
+        if project_id and not self.get_project(project_id, user_id):
+            raise ValueError("project 不屬於目前使用者")
+        project_clause = " AND id=?" if project_id else ""
+        project_params: tuple[Any, ...] = (user_id, project_id, capped) if project_id else (user_id, capped)
+        child_clause = " AND project_id=?" if project_id else ""
+        child_params: tuple[Any, ...] = (user_id, project_id, capped) if project_id else (user_id, capped)
+        with self._lock:
+            projects = self._conn.execute(
+                f"SELECT * FROM projects WHERE user_id=?{project_clause} ORDER BY updated_at DESC LIMIT ?",
+                project_params,
+            ).fetchall()
+            artifacts = self._conn.execute(
+                f"SELECT * FROM artifacts WHERE user_id=?{child_clause} ORDER BY created_at DESC,version DESC LIMIT ?",
+                child_params,
+            ).fetchall()
+            activities = self._conn.execute(
+                f"SELECT * FROM activities WHERE user_id=?{child_clause} ORDER BY updated_at DESC LIMIT ?",
+                child_params,
+            ).fetchall()
+            activity_tasks = self._conn.execute(
+                "SELECT t.* FROM activity_tasks t JOIN activities a ON a.id=t.activity_id "
+                "WHERE a.user_id=?" + (" AND a.project_id=?" if project_id else "") +
+                " ORDER BY t.updated_at DESC LIMIT ?",
+                child_params,
+            ).fetchall()
+            research_sources = self._conn.execute(
+                "SELECT r.* FROM research_sources r JOIN projects p ON p.id=r.project_id "
+                "WHERE p.user_id=?" + (" AND r.project_id=?" if project_id else "") +
+                " ORDER BY r.created_at DESC LIMIT ?",
+                child_params,
+            ).fetchall()
+        artifact_rows = [dict(row) for row in artifacts]
+        for row in artifact_rows:
+            try:
+                row["meta"] = json.loads(row.get("meta") or "{}")
+            except (TypeError, ValueError):
+                row["meta"] = {}
+        return {
+            "projects": [dict(row) for row in projects],
+            "artifacts": artifact_rows,
+            "activities": [dict(row) for row in activities],
+            "activity_tasks": [dict(row) for row in activity_tasks],
+            "research_sources": [dict(row) for row in research_sources],
+        }
+
     # ── working memory ───────────────────────────────────────
 
     def remember(

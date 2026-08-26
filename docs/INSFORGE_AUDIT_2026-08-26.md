@@ -57,3 +57,26 @@ InsForge 適合作為「視覺資料庫與 AI 後端資料層」的試點：它�
 - [InsForge SDK](https://github.com/InsForge/InsForge-sdk-js)
 - [InsForge Database SDK Reference](https://insforge-468ccf39.mintlify.app/sdks/typescript/database)
 - [InsForge platform repository](https://github.com/InsForge/insforge)
+
+## 2026-08-26 實際整合結果
+
+已透過 `@insforge/mcp` 的 `fetch-docs("instructions")`、REST API 文件與 infrastructure
+tools 核對後端 2.3.1。遠端原本是空專案，已成功套用
+`001_visual_backend.sql`、`002_core_data_layer.sql`，並建立 private
+`visual-assets` bucket。
+
+首次可重複同步完成後，由 MCP `run-raw-sql` 與 backend metadata 驗證：
+
+- projects：11
+- knowledge_documents：517
+- knowledge_chunks：2,430
+- visual_assets：1
+- embeddings：1
+- private Storage objects：518（517 份知識原檔＋1 份視覺原檔）
+- 本機 backend_resource_refs：2,959 筆 completed
+
+目前本機 artifacts、activities、activity_tasks、research_sources 均為 0，因此遠端表已
+建立但沒有假造資料。13 個 session、18 則 messages、working_memory、retrieval_cache、
+audit logs 與所有 credentials 依設計未同步。同步過程曾有 250 個 chunks 因原始內容含
+PostgreSQL 不接受的 NUL 控制字元而失敗；修正 payload 邊界清理後只重試失敗項目並
+完成，原始本機文件未被修改。
