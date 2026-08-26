@@ -3,8 +3,8 @@
   "branch": "feat/grok-full-repair",
   "base_commit": "03e21a7",
   "started_at": "2026-08-26T10:20:00Z",
-  "current_phase": "phase1_defect_scan_p0_p1_fixes",
-  "last_checkpoint": "2026-08-26T13:40:00Z",
+  "current_phase": "phase1_defect_scan_observation_sqlite_owner",
+  "last_checkpoint": "2026-08-26T14:20:00Z",
   "completed_steps": [
     "clone_repo",
     "confirm_pr_20_21_22_23_merged",
@@ -25,7 +25,11 @@
     "analyze_uses_confined_asset_file",
     "api_query_limit_capped",
     "fal_llm_no_follow_redirects",
-    "background_analyze_logs_failures"
+    "background_analyze_logs_failures",
+    "observation_rerun_preserves_verified_and_ignored",
+    "sqlite_busy_timeout_10s",
+    "data_sync_uses_resolved_insforge_owner",
+    "visual_usage_audit"
   ],
   "in_progress_steps": [
     "defect_scan_remaining_non_p0"
@@ -85,7 +89,8 @@
     "api_key_in_git": false
   },
   "test_results": [
-    {"name": "visual_insforge_fal_phase1", "passed": 42, "failed": 0, "at": "2026-08-26T13:40:00Z"}
+    {"name": "visual_insforge_fal_phase1", "passed": 42, "failed": 0, "at": "2026-08-26T13:40:00Z"},
+    {"name": "phase1_observation_sqlite_sync", "passed": 48, "failed": 0, "at": "2026-08-26T14:20:00Z"}
   ],
   "commands_executed": [
     "git clone https://github.com/aa0968111723-prog/tku-zen-agent.git",

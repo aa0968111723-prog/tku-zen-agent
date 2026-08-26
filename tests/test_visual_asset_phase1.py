@@ -296,3 +296,38 @@ def test_visual_search_limit_is_rejected_above_cap(visual_env):
     with TestClient(main.app) as client:
         response = client.get("/api/visual-assets/search", params={"limit": 1000})
         assert response.status_code == 422
+
+
+def test_rerun_does_not_downgrade_verified_or_ignored_observations(visual_env):
+    with TestClient(main.app) as client:
+        item = upload(client, picture(), auto=False).json()["items"][0]
+        asset_id = item["asset_id"]
+    store = visual_assets.get_visual_store()
+    verified_id = store.add_observation(
+        asset_id, "scene", label="社課", status="probable",
+        confidence=0.7, source="directory_taxonomy_v1",
+        evidence={"path": "場景/上學期社課"},
+    )
+    with store._lock:
+        store._conn.execute("UPDATE visual_observations SET status='verified' WHERE id=?", (verified_id,))
+        store._conn.commit()
+    store.add_observation(
+        asset_id, "scene", label="社課", status="probable",
+        confidence=0.4, source="directory_taxonomy_v1",
+        evidence={"path": "場景/上學期社課"},
+    )
+    assert store._rows("SELECT status,confidence FROM visual_observations WHERE id=?", (verified_id,))[0]["status"] == "verified"
+    ignored_id = store.add_observation(
+        asset_id, "scene", label="其他", status="probable",
+        confidence=0.5, source="directory_taxonomy_v1",
+    )
+    with store._lock:
+        store._conn.execute("UPDATE visual_observations SET review_action='ignored' WHERE id=?", (ignored_id,))
+        store._conn.commit()
+    store.add_observation(
+        asset_id, "scene", label="其他", status="probable",
+        confidence=0.9, source="directory_taxonomy_v1",
+    )
+    row = store._rows("SELECT status,review_action FROM visual_observations WHERE id=?", (ignored_id,))[0]
+    assert row["review_action"] == "ignored"
+    assert store._rows("SELECT COUNT(*) AS n FROM visual_observations WHERE asset_id=? AND label='其他'", (asset_id,))[0]["n"] == 1

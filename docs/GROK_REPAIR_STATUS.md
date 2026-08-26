@@ -1,6 +1,6 @@
 # Grok 長時間修補狀態
 
-最後更新：2026-08-26T13:40:00Z  
+最後更新：2026-08-26T14:20:00Z  
 分支：`feat/grok-full-repair`（從 `origin/main` `03e21a7` 建立）  
 計畫 PR：https://github.com/aa0968111723-prog/tku-zen-agent/pull/24 （plan-only，不把實作寫進去）
 
@@ -18,6 +18,7 @@ Phase 0 完成；Phase 1 缺陷掃描進行中並已修 P0/P1：路徑、重啟�
 - Storage：先 `upload-strategy`，direct/404 則 PUT fallback；presigned 不帶 InsForge Authorization。
 - P0：本地 `asset_file` 限制在 `VISUAL_ASSET_DIR`（external original 仍可在原位）；`create_asset` 寫入 `project_id`/`owner_id`；視覺同步讀 `backend_user_mappings`。
 - Phase 1：重啟中斷分析 **不再** 把 `review_status` 改成 failed；Vision 讀檔走 `asset_file` 限制；搜尋/列表 `limit` 上限 100；fal/LLM `follow_redirects=False`；背景分析失敗會寫 log 而非完全吞掉。
+- 重跑 taxonomy/AI **不會** 把 verified 或 ignored observation 降級；SessionStore/VisualAssetStore `busy_timeout=10s`；core 與 visual sync 共用 `resolved_insforge_owner`；usage API 寫 audit。
 
 ## 進行中
 

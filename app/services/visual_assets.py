@@ -484,8 +484,9 @@ class VisualAssetStore:
         self.path = Path(path or config.DB_PATH)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        self._conn = sqlite3.connect(str(self.path), timeout=10.0, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout=10000")
         with self._lock:
             apply_visual_migrations(self._conn, SCHEMA)
             stamp = now()
@@ -896,15 +897,19 @@ class VisualAssetStore:
         with self._lock:
             # 同一輪重跑分析時不累積完全相同的 AI observation。
             current = self._conn.execute(
-                "SELECT id FROM visual_observations WHERE asset_id=? AND entity_type=? AND entity_id=? AND label=? AND source=?",
+                "SELECT id,status,review_action FROM visual_observations WHERE asset_id=? AND entity_type=? AND entity_id=? AND label=? AND source=?",
                 (asset_id,entity_type,entity_id,label,source),
             ).fetchone()
             if current:
-                self._conn.execute(
-                    "UPDATE visual_observations SET status=?,confidence=?,evidence=?,updated_at=? WHERE id=?",
-                    (status,max(0,min(1,float(confidence))),dumps(evidence or {}),stamp,current[0]),
-                )
-                oid = str(current[0])
+                oid = str(current["id"])
+                # Re-running AI/directory taxonomy must not undo human review.
+                if current["status"] == "verified" or current["review_action"] == "ignored":
+                    pass
+                else:
+                    self._conn.execute(
+                        "UPDATE visual_observations SET status=?,confidence=?,evidence=?,updated_at=? WHERE id=?",
+                        (status,max(0,min(1,float(confidence))),dumps(evidence or {}),stamp,oid),
+                    )
             else:
                 self._conn.execute(
                     "INSERT INTO visual_observations(id,asset_id,entity_type,entity_id,label,status,confidence,source,evidence,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",

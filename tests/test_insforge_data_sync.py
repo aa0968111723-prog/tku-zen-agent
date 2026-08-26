@@ -248,5 +248,7 @@ def test_visual_sync_prefers_verified_backend_user_mapping(sync_env, monkeypatch
         )
         store._conn.commit()
     visual = InsForgeSyncAdapter(store, service(sync_env)[0].adapters)
+    core,_db,_files = service(sync_env)
     assert visual._owner_id(sync_env["user_id"]) == "mapped-owner-9"
+    assert core._remote_owner(sync_env["user_id"]) == "mapped-owner-9"
     assert visual._owner_id("unknown-user") == "env-owner-should-lose"

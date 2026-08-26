@@ -439,7 +439,7 @@ async def patch_visual_asset(asset_id: str,req: AssetPatch,request: Request,user
 
 @router.get("/visual-assets/{asset_id}/file")
 async def visual_asset_file(
-    asset_id: str,request: Request,variant: str = Query(default="original"),download: bool = Query(default=False),
+    asset_id: str,request: Request,variant: str = Query(default="original",pattern=r"^(original|thumbnail|1:1|4:5|9:16|16:9)$"),download: bool = Query(default=False),
     user_id: str = Depends(auth.require_user),
 ):
     try:
@@ -458,7 +458,7 @@ async def visual_asset_file(
 
 
 @router.post("/visual-assets/{asset_id}/usage")
-async def record_visual_usage(asset_id: str,req: UsageRequest,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+async def record_visual_usage(asset_id: str,req: UsageRequest,request: Request,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
     if not get_visual_store().visible_asset(asset_id,user_id):
         raise HTTPException(status_code=404,detail="找不到圖片或沒有權限")
     get_visual_store().record_learning(user_id,req.action,asset_id=asset_id,payload=req.context,outcome="recorded")
@@ -468,6 +468,7 @@ async def record_visual_usage(asset_id: str,req: UsageRequest,user_id: str = Dep
             user_id,asset_id,kind=req.action,note=str(req.context.get("note") or ""),
             rendition=str(req.context.get("rendition") or "original"),
         )
+    audit.write_audit(action="visual.usage",actor_user_id=user_id,resource=asset_id,detail={"action":req.action},request=request)
     return {"ok":True,"collection":collection}
 
 
