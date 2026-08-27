@@ -6,7 +6,7 @@ import inspect
 import logging
 from typing import Any, Callable
 
-from . import activity, artifact, document, examples, gform, knowledge, slides, social, spreadsheet, term, visual_library
+from . import activity, artifact, document, examples, gform, knowledge, public_sources, slides, social, spreadsheet, term, visual_library
 
 logger = logging.getLogger(__name__)
 Permission = str  # general | admin_confirm
@@ -27,6 +27,10 @@ _REGISTRY: dict[str, tuple[Callable[..., dict], dict, Permission]] = {
     "create_social_story": (social.create_social_story, social.STORY_SCHEMA, "general"),
     "create_reels_script": (social.create_reels_script, social.REELS_SCHEMA, "general"),
     "create_social_content_calendar": (social.create_social_content_calendar, social.CALENDAR_SCHEMA, "general"),
+    "list_tku_public_sources": (public_sources.list_tku_public_sources, public_sources.LIST_SCHEMA, "general"),
+    "search_tku_public_info": (public_sources.search_tku_public_info, public_sources.SEARCH_SCHEMA, "general"),
+    "fetch_tku_public_source": (public_sources.fetch_tku_public_source, public_sources.FETCH_SCHEMA, "general"),
+    "search_instagram_public_hashtag": (public_sources.search_instagram_public_hashtag, public_sources.HASHTAG_SCHEMA, "general"),
     "create_social_ab_test": (social.create_social_ab_test, social.AB_TEST_SCHEMA, "general"),
     "create_social_image_prompt": (social.create_social_image_prompt, social.IMAGE_SCHEMA, "general"),
     "create_social_video_prompt": (social.create_social_video_prompt, social.VIDEO_SCHEMA, "general"),
@@ -68,6 +72,10 @@ LABELS = {
     "create_social_story": "建立限動草稿",
     "create_reels_script": "建立 Reels 腳本",
     "create_social_content_calendar": "建立內容月曆",
+    "list_tku_public_sources": "列出淡江公開來源",
+    "search_tku_public_info": "搜尋淡江公開資訊",
+    "fetch_tku_public_source": "讀取淡江官方來源",
+    "search_instagram_public_hashtag": "搜尋 Instagram 公開標籤",
     "create_social_ab_test": "建立 A/B 測試草稿",
     "create_social_image_prompt": "建立圖像提示詞",
     "create_social_video_prompt": "建立影片提示詞",
