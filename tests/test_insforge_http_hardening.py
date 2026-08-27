@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -125,7 +126,12 @@ class _ScriptedClient:
         return False
 
     def request(self, method, path, **kwargs):
-        self._captured.append({"method": method, "path": path, "headers": kwargs.get("headers") or {}})
+        self._captured.append({
+            "method": method,
+            "path": path,
+            "headers": kwargs.get("headers") or {},
+            "json": kwargs.get("json"),
+        })
         item = self._script.pop(0)
         status, body = item[0], item[1]
         extra_headers = item[2] if len(item) > 2 else None
@@ -374,3 +380,61 @@ def test_error_body_does_not_leak_api_key(monkeypatch):
     assert "ik_supersecret_key_value" not in message
     assert "ik_test" not in message
     _BREAKER.record_success()
+
+
+def test_visual_hybrid_search_migration_defines_acl_first_rpc():
+    sql = (Path(__file__).resolve().parents[1] / "migrations/insforge/004_visual_hybrid_search.sql").read_text(encoding="utf-8")
+    assert "CREATE OR REPLACE FUNCTION visual_hybrid_search(" in sql
+    assert "p_owner_id text" in sql
+    assert "p_query_embedding vector(1536)" in sql
+    assert "a.owner_id = p_owner_id" in sql
+    assert "CREATE POLICY sources_owner ON sources" in sql
+    assert "CREATE POLICY events_owner ON events" in sql
+    assert "BEGIN" not in sql.splitlines()[0]
+    assert not any(line.strip() in {"BEGIN;", "COMMIT;", "ROLLBACK;"} for line in sql.splitlines())
+
+
+def test_search_adapter_maps_payload_to_visual_hybrid_search_args(monkeypatch):
+    reset_insforge_adapters()
+    _BREAKER.record_success()
+    captured: list[dict] = []
+    script = [(200, [{"asset_id": "va_1", "score": 0.8, "match_reason": "keyword"}])]
+    monkeypatch.setattr("app.services.insforge_adapters.httpx.Client", lambda *a, **k: _ScriptedClient(script, captured))
+    monkeypatch.setattr("app.services.insforge_adapters.assert_public_https_url", lambda url: url)
+    monkeypatch.setattr("app.config.INSFORGE_TRUSTED", True)
+    monkeypatch.setattr("app.config.INSFORGE_BASE_URL", "https://example.insforge.app")
+    monkeypatch.setattr("app.config.INSFORGE_SERVICE_KEY", "ik_test")
+    from app.services.insforge_adapters import InsForgeSearchAdapter
+
+    adapter = InsForgeSearchAdapter()
+    rows = adapter.search({
+        "query": "淡江領袖禪學社",
+        "filters": {"school": "淡江大學", "club": "領袖禪學社"},
+        "owner_id": "remote-owner-1",
+        "page": 2,
+        "limit": 15,
+        "query_embedding": [0.1, 0.2],
+    })
+    assert rows == [{"asset_id": "va_1", "score": 0.8, "match_reason": "keyword"}]
+    assert captured[0]["path"] == "/api/database/rpc/visual_hybrid_search"
+    body = captured[0]["json"]
+    assert body["p_query"] == "淡江領袖禪學社"
+    assert body["p_owner_id"] == "remote-owner-1"
+    assert body["p_filters"] == {"school": "淡江大學", "club": "領袖禪學社"}
+    assert body["p_page"] == 2
+    assert body["p_limit"] == 15
+    assert len(body["p_query_embedding"]) == 1536
+    assert body["p_query_embedding"][:2] == [0.1, 0.2]
+    _BREAKER.record_success()
+
+
+def test_search_adapter_requires_trusted_flag(monkeypatch):
+    reset_insforge_adapters()
+    monkeypatch.setattr("app.config.INSFORGE_TRUSTED", False)
+    from app.services.insforge_adapters import InsForgeSearchAdapter
+
+    adapter = InsForgeSearchAdapter()
+    adapter.base_url = "https://example.insforge.app"
+    adapter.key = "ik_test"
+    with pytest.raises(InsForgeUnavailable, match="trusted"):
+        adapter.search({"query": "x", "owner_id": "o"})

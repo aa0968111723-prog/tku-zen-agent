@@ -7,6 +7,7 @@ structured ``BLOCKED_BY_EXTERNAL_DEPENDENCY`` result when InsForge is absent.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -404,14 +405,58 @@ class InsForgeStorageAdapter(_HTTPAdapter):
             raise ValueError("invalid InsForge bucket name")
 
 
+def _rpc_vector(value: Any, size: int = 1536) -> list[float] | None:
+    """Pad a local deterministic embedding to the remote pgvector(1536) width."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    if not isinstance(value, list) or not value:
+        return None
+    try:
+        values = [float(item) for item in value[:size]]
+    except (TypeError, ValueError):
+        return None
+    return (values + [0.0] * size)[:size]
+
+
 class InsForgeSearchAdapter(_HTTPAdapter):
     def search(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         if not config.INSFORGE_TRUSTED:
             raise InsForgeUnavailable("InsForge search 尚未標記為 trusted")
-        result = InsForgeDatabaseAdapter().rpc(config.INSFORGE_SEARCH_RPC, payload)
+        result = InsForgeDatabaseAdapter().rpc(config.INSFORGE_SEARCH_RPC, self._rpc_payload(payload))
         if isinstance(result, dict):
             result = result.get("data", result.get("results", []))
         return result if isinstance(result, list) else []
+
+    @staticmethod
+    def _rpc_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        """Map the FastAPI search payload onto visual_hybrid_search arguments."""
+        query = str(payload.get("query") or payload.get("p_query") or "")[:1000]
+        raw_embedding = payload.get("query_embedding") or payload.get("p_query_embedding")
+        embedding = _rpc_vector(raw_embedding)
+        if embedding is None and query:
+            from .visual_assets import semantic_embedding
+            embedding = _rpc_vector(semantic_embedding(query))
+        try:
+            page = max(1, int(payload.get("page") or payload.get("p_page") or 1))
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            limit = max(1, min(100, int(payload.get("limit") or payload.get("p_limit") or 30)))
+        except (TypeError, ValueError):
+            limit = 30
+        body: dict[str, Any] = {
+            "p_query": query,
+            "p_filters": payload.get("filters") or payload.get("p_filters") or {},
+            "p_owner_id": str(payload.get("owner_id") or payload.get("p_owner_id") or ""),
+            "p_page": page,
+            "p_limit": limit,
+        }
+        if embedding:
+            body["p_query_embedding"] = embedding
+        return body
 
 
 class InsForgeFunctionAdapter(_HTTPAdapter):

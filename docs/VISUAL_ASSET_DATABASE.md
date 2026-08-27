@@ -188,6 +188,11 @@ Library → Project → Scene → Shot context，沒有重建既有 people/club/
 與 current-version 判定包含 project scope，避免不同專案同路徑互相覆蓋；所有 sync
 idempotency key 也包含 sync source，避免 visual/core/organization 互撞。
 
+`004_visual_hybrid_search.sql` 補上 app 預設 RPC `visual_hybrid_search`（ACL 先於
+keyword／pgvector 排序）、以及 001 漏掉的 `sources`／`events` owner RLS。搜尋 payload
+會被 server-only adapter 對應成 `p_query`／`p_filters`／`p_owner_id`／`p_page`／
+`p_limit`／`p_query_embedding`，本機 deterministic embedding 會 pad 成 1536 維。
+
 知識文件採相對路徑＋SHA-256 版本化；原始 Markdown 存 private Storage，chunks 批次
 upsert。PostgreSQL 不接受的 NUL 控制字元只在遠端 payload 邊界清除，本機原檔不修改。
 
