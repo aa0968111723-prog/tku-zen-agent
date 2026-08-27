@@ -225,6 +225,13 @@ INSTAGRAM_APP_ID = (os.getenv("INSTAGRAM_APP_ID") or "").strip()
 # ── 公開來源與 Instagram 公開 hashtag 搜尋（server-only）────────────
 INSTAGRAM_GRAPH_API_VERSION = (os.getenv("INSTAGRAM_GRAPH_API_VERSION") or "v21.0").strip()
 INSTAGRAM_PUBLIC_SEARCH_ENABLED = _bool("INSTAGRAM_PUBLIC_SEARCH_ENABLED", False)
+
+# ── Perplexity 公開網路研究（server-only）──────────────────────
+PERPLEXITY_API_KEY = _secret("PERPLEXITY_API_KEY")
+PERPLEXITY_BASE_URL = (os.getenv("PERPLEXITY_BASE_URL") or "https://api.perplexity.ai").strip().rstrip("/")
+PERPLEXITY_SEARCH_ENABLED = _bool("PERPLEXITY_SEARCH_ENABLED", False)
+PERPLEXITY_SEARCH_TIMEOUT_SECONDS = max(3.0, float(os.getenv("PERPLEXITY_SEARCH_TIMEOUT_SECONDS") or 20))
+PERPLEXITY_SEARCH_ATTEMPTS = max(1, min(3, int(os.getenv("PERPLEXITY_SEARCH_ATTEMPTS") or 2)))
 INSTAGRAM_API_TIMEOUT_SECONDS = max(3.0, float(os.getenv("INSTAGRAM_API_TIMEOUT_SECONDS") or 15))
 PUBLIC_SOURCE_TIMEOUT_SECONDS = max(3.0, float(os.getenv("PUBLIC_SOURCE_TIMEOUT_SECONDS") or 12))
 PUBLIC_SOURCE_MAX_BYTES = max(100_000, min(5_000_000, int(os.getenv("PUBLIC_SOURCE_MAX_BYTES") or 2_000_000)))
