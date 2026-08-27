@@ -969,6 +969,11 @@ class PublicSourceSearchRequest(BaseModel):
     limit: int = Field(default=4, ge=1, le=8)
 
 
+class InstagramPublicAccountRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=30)
+    limit: int = Field(default=10, ge=1, le=25)
+
+
 class InstagramHashtagSearchRequest(BaseModel):
     hashtag: str = Field(min_length=1, max_length=100)
     limit: int = Field(default=10, ge=1, le=25)
@@ -990,6 +995,11 @@ async def fetch_public_source(source_id: str, query: str = "") -> dict[str, Any]
     if not result.get("ok") and result.get("code") == "NOT_FOUND":
         raise HTTPException(status_code=404, detail=result["message"])
     return result
+
+
+@general_router.post("/instagram/public/account-search")
+async def search_instagram_public_account(req: InstagramPublicAccountRequest) -> dict[str, Any]:
+    return public_sources_service.search_instagram_public_account(req.username, req.limit)
 
 
 @general_router.post("/instagram/public/hashtag-search")
