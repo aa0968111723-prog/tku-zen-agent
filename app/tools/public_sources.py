@@ -28,6 +28,14 @@ FETCH_SCHEMA = {
     },
     "required": ["source_id"],
 }
+ACCOUNT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "username": {"type": "string", "description": "指定公開 Instagram 專業帳號，例如 tku"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 25},
+    },
+    "required": ["username"],
+}
 HASHTAG_SCHEMA = {
     "type": "object",
     "properties": {
@@ -57,6 +65,13 @@ def fetch_tku_public_source(args: dict[str, Any]) -> dict[str, Any]:
     return public_sources.fetch_public_source(
         str(args.get("source_id") or ""),
         str(args.get("query") or ""),
+    )
+
+
+def search_instagram_public_account(args: dict[str, Any]) -> dict[str, Any]:
+    return public_sources.search_instagram_public_account(
+        str(args.get("username") or ""),
+        int(args.get("limit") or 10),
     )
 
 
