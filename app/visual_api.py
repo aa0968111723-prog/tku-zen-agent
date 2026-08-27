@@ -17,7 +17,7 @@ from . import config
 from .services import audit, auth, fal, permissions
 from .services.visual_analysis import analyze_asset
 from .services.session_store import get_store
-from .services.visual_assets import VisualAssetError, get_visual_store
+from .services.visual_assets import EXTRA_MIME_BY_EXTENSION, VisualAssetError, get_visual_store
 from .services.insforge_adapters import BLOCKED_BY_EXTERNAL_DEPENDENCY, InsForgeUnavailable, get_insforge_adapters
 from .services.insforge_sync import InsForgeSyncAdapter, resolved_insforge_owner
 from .services.insforge_data_sync import InsForgeDataSyncAdapter
@@ -156,7 +156,11 @@ def _media_type(upload: UploadFile) -> str:
     supplied = (upload.content_type or "").lower()
     if supplied and supplied != "application/octet-stream":
         return supplied
-    return (mimetypes.guess_type(upload.filename or "")[0] or supplied).lower()
+    filename = (upload.filename or "").lower()
+    suffix = ""
+    if "." in filename:
+        suffix = "." + filename.rsplit(".", 1)[-1]
+    return (EXTRA_MIME_BY_EXTENSION.get(suffix) or mimetypes.guess_type(filename)[0] or supplied).lower()
 
 
 @router.post("/visual-assets/upload",status_code=201)

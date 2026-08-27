@@ -68,8 +68,12 @@ Migration 依序為 `0001_initial_visual_schema` 與
 與結構化資料，因此不會為 29GB 級資料再複製一份。
 
 圖片（JPEG/PNG/WebP/GIF/AVIF/JFIF）由 Pillow 實際解碼；PDF、DOCX、PPTX 與文字文件使用本機 parser 擷取文字並
-建立縮圖。MP4、MOV、WebM 原檔可匯入；目前部署未附影格解碼器，因此影片分析會
-明確回報 `BLOCKED_BY_EXTERNAL_DEPENDENCY`，不假造尺寸或標籤。
+建立縮圖。CR2/ARW/DNG/RAW/HEIC/PSD/SVG 等 RAW／設計檔、MP4/MOV/WebM/M4V/AVI/MKV/MTS/
+M2TS/3GP/WMV/FLV/MXF/RM 影片、MP3/WAV/M4A/FLAC/OGG/AAC/WMA/AIFF/OPUS/MIDI 音訊，以及
+ZIP/7Z/WFP/WFPBUNDLE/BDM/CPI/MPL、After Effects／Premiere／PowerDirector／motion template／3D／字型剪輯／封裝檔
+也會被目錄化；它們保留外部原始路徑並使用安全占位縮圖，不把大型 binary 複製進 SQLite。
+目前部署未附影片影格或 RAW 解碼器，因此只會明確回報
+`BLOCKED_BY_EXTERNAL_DEPENDENCY`／generic inspection，不假造尺寸、OCR 或標籤。
 
 ## 圖片分析
 
@@ -213,9 +217,11 @@ Zeabur 必須把 SQLite、原圖與衍生圖放在持久化磁碟；只設 DB_PA
 `VISUAL_ASSET_DIR` 會留下資料列但在容器重啟後失去檔案。備份時兩者要一起備份。
 
 本機資料整理可用 `DATA_ORGANIZATION_IMPORT_ROOTS` 擴大素材白名單，預設為
-`data,output,outputs,mobile-shots`；若工作區同層存在 `淡大劇本`、`淡大所有照片`、
-`05_Photos`、`06_Video`、`招生影片` 等內部素材樹，也會自動納入。服務只讀取支援的
-圖片（JPEG/PNG/WebP/GIF/AVIF/JFIF）、影片與文件副檔名，並排除
+`data,output,outputs,mobile-shots`；若工作區同層存在 `00_Inbox`、`01_Projects`、
+`02_Club_淡大禪學社`、`03_Documents`、`04_Design`、`05_Photos`、`06_Video`、
+`07_Audio`、`08_AI`、`09_Resources`、`90_Archive`、`99_ToReview`、`資源`、`對話`、
+`淡大劇本`、`招生影片` 等內部資料樹，也會自動納入。服務只讀取支援的
+圖片（含 TIFF/BMP/ICO、CR2/ARW/DNG/RAW/HEIC/PSD/SVG）、影片、音訊與文件／專案副檔名，並排除
 SQLite、playwright 暫存、`.git`、`.venv`、程式碼與憑證；相對路徑和 SHA-256 會保存於
 manifest/lineage，原始檔不會被搬移或覆蓋。已匯入檔案會以 `root:relative_path` 與
 SHA-256 做雙重 idempotency 判定；`data/visual-assets` 內的 thumbnail/rendition 只作

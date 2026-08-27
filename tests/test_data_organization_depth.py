@@ -14,6 +14,7 @@ from openpyxl import Workbook
 
 from app import config, main
 from app.services import auth, visual_assets
+from app.services import data_organization
 from app.services.data_organization import DataOrganizationService
 from app.services.library_context import LibraryContextResolver
 from app.services.visual_assets import VisualAssetStore, dumps, new_id, now
@@ -342,3 +343,105 @@ def test_curated_scene_tree_becomes_reviewable_taxonomy_and_searchable(organizat
     assert total == 1 and items[0]["asset_id"] == asset_id
     assert parsed["school"] == "淡江大學" and parsed["club"] == "領袖禪學社" and parsed["scene"] == "社課"
     assert any("社課" in reason for reason in items[0]["recommendation_reasons"])
+
+
+def test_supplemental_folder_media_and_project_files_are_catalogued_without_copying(organization_env, monkeypatch):
+    sessions, store, service = organization_env
+    user_id = sessions.ensure_user("supplemental_media", is_local=True)
+    source_root = Path(config.VISUAL_ASSET_DIR).parent / "淡大劇本"
+    source_root.mkdir(parents=True, exist_ok=True)
+    files = {
+        "音樂/片頭.mp3": b"audio-original",
+        "相機/RAW_001.cr2": b"raw-original",
+        "剪輯/timeline.json": json.dumps({"scene": "上學期社課"}, ensure_ascii=False).encode("utf-8"),
+        "剪輯/project.zip": b"zip-original",
+    }
+    for relative, content in files.items():
+        path = source_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    (source_root / "scripts").mkdir(parents=True, exist_ok=True)
+    (source_root / "scripts" / "helper.py").write_text("print('not a media asset')", encoding="utf-8")
+    monkeypatch.setattr(config, "DATA_ORGANIZATION_IMPORT_ROOTS", (source_root,))
+
+    result = service.run(user_id, idempotency_key="supplemental-media-catalog")
+    assert result["status"] == "completed", result.get("error_log")
+    rows = store._rows(
+        "SELECT original_filename,storage_path,thumbnail_path,asset_type,orientation,source_metadata FROM visual_assets WHERE user_id=? ORDER BY original_filename",
+        (user_id,),
+    )
+    assert {row["original_filename"] for row in rows} == {"片頭.mp3", "RAW_001.cr2", "timeline.json", "project.zip"}
+    by_name = {row["original_filename"]: row for row in rows}
+    assert by_name["片頭.mp3"]["asset_type"] == "audio"
+    assert by_name["RAW_001.cr2"]["asset_type"] == "image"
+    assert by_name["project.zip"]["asset_type"] == "document"
+    for relative, content in files.items():
+        source = source_root / relative
+        row = by_name[source.name]
+        assert Path(row["storage_path"]).resolve() == source.resolve()
+        assert source.read_bytes() == content
+        assert Path(row["thumbnail_path"]).exists()
+        metadata = json.loads(row["source_metadata"])
+        assert metadata["storage_mode"] == "external" and metadata["file_kind"] in {"audio", "image", "document", "binary"}
+
+    report = service.inventory(user_id, persist=False)
+    assert report["statistics"]["audio"] == 1
+    assert report["manifest"]["excluded_files"] == 1
+    assert report["manifest"]["excluded_by_extension"] == {".py": 1}
+    items, total, _ = store.search(user_id, query="timeline.json")
+    assert total >= 1 and any(item["original_filename"] == "timeline.json" for item in items)
+
+
+def test_reinventory_reuses_lineage_fingerprint_for_unchanged_external_media(organization_env, monkeypatch):
+    sessions, store, service = organization_env
+    user_id = sessions.ensure_user("fingerprint_cache", is_local=True)
+    source_root = Path(config.VISUAL_ASSET_DIR).parent / "淡大劇本"
+    source_root.mkdir(parents=True, exist_ok=True)
+    source = source_root / "影片" / "unchanged.mp4"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"small-external-video")
+    monkeypatch.setattr(config, "DATA_ORGANIZATION_IMPORT_ROOTS", (source_root,))
+    assert service.run(user_id, idempotency_key="fingerprint-cache-run")["status"] == "completed"
+
+    service._filesystem_scan_cache.clear()
+    original_hash = data_organization._sha_file
+    hashed_paths = []
+    def probe_hash(path):
+        hashed_paths.append(Path(path).resolve())
+        return original_hash(path)
+    monkeypatch.setattr(data_organization, "_sha_file", probe_hash)
+    candidates = service._filesystem_candidates(user_id)
+    assert any(row["relative_path"] == "影片/unchanged.mp4" for row in candidates)
+    assert source.resolve() not in hashed_paths
+
+
+def test_failed_filesystem_mapping_is_lineaged_and_not_reported_as_new_candidate(organization_env, monkeypatch):
+    sessions, store, service = organization_env
+    user_id = sessions.ensure_user("failed_lineage", is_local=True)
+    source_root = Path(config.VISUAL_ASSET_DIR).parent / "failed-media"
+    source_root.mkdir(parents=True, exist_ok=True)
+    source = source_root / "broken.mp4"
+    source.write_bytes(b"not-a-real-video")
+    monkeypatch.setattr(config, "DATA_ORGANIZATION_IMPORT_ROOTS", (source_root,))
+
+    def fail_mapping(*_args, **_kwargs):
+        raise ValueError("synthetic decoder failure")
+
+    monkeypatch.setattr(service, "_map_resource", fail_mapping)
+    result = service.run(user_id, idempotency_key="failed-lineage-run")
+    assert result["status"] == "failed" and result["failed_count"] == 1
+    lineage = store._conn.execute(
+        "SELECT verification_status,metadata FROM data_lineage WHERE owner_id=? AND resource_type='filesystem_asset'",
+        (user_id,),
+    ).fetchone()
+    assert lineage["verification_status"] == "failed"
+    metadata = json.loads(lineage["metadata"])
+    assert metadata["relative_path"] == "broken.mp4"
+    report = service.inventory(user_id, persist=False)
+    assert report["manifest"]["unregistered_candidates"] == 0
+    assert report["statistics"]["analysis_failed"] == 1
+
+
+def test_acl_id_queries_are_chunked_for_large_asset_scopes():
+    chunks = list(DataOrganizationService._id_chunks((f"asset-{index}" for index in range(1001))))
+    assert [len(chunk) for chunk in chunks] == [400, 400, 201]

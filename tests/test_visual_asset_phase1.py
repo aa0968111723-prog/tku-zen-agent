@@ -82,6 +82,24 @@ def test_direct_upload_idempotency_and_video_external_blocker(visual_env):
         assert blocked.json()["detail"]["code"] == "BLOCKED_BY_EXTERNAL_DEPENDENCY"
 
 
+def test_direct_upload_catalogues_audio_and_camera_raw_without_decoding(visual_env):
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/visual-assets/upload",
+            files=[
+                ("files", ("field-recording.mp3", b"audio-original", "application/octet-stream")),
+                ("files", ("camera-shot.cr2", b"raw-original", "application/octet-stream")),
+            ],
+            data={"auto_analyze": "false"},
+        )
+        assert response.status_code == 201, response.text
+        by_name = {item["original_filename"]: item for item in response.json()["items"]}
+        assert by_name["field-recording.mp3"]["asset_type"] == "audio"
+        assert by_name["camera-shot.cr2"]["asset_type"] == "image"
+        assert by_name["field-recording.mp3"]["source_metadata"]["inspection_mode"] == "generic"
+        assert by_name["camera-shot.cr2"]["source_metadata"]["inspection_mode"] == "generic"
+
+
 def test_folder_import_partial_failure_resume_idempotency_and_resync(visual_env):
     entries = [
         {"client_key":"a","relative_path":"茶會/第一張.png","last_modified":"2026-09-18"},

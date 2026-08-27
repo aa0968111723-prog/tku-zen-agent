@@ -264,8 +264,27 @@ SCENE_NAMES = (
 IMAGE_MIME = {
     "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
     "image/gif": ".gif", "image/avif": ".avif", "image/jfif": ".jfif",
+    "image/tiff": ".tiff", "image/bmp": ".bmp", "image/x-icon": ".ico", "image/x-portable-pixmap": ".ppm",
 }
-VIDEO_MIME = {"video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm"}
+RAW_IMAGE_MIME = {
+    "image/x-canon-cr2": ".cr2", "image/x-sony-arw": ".arw",
+    "image/vnd.adobe.photoshop": ".psd", "image/svg+xml": ".svg",
+    "image/x-adobe-dng": ".dng", "image/x-raw": ".raw", "image/heic": ".heic", "image/heif": ".heif",
+}
+VIDEO_MIME = {
+    "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm",
+    "video/x-m4v": ".m4v", "video/x-msvideo": ".avi", "video/x-matroska": ".mkv",
+    "video/mp2t": ".mts", "video/x-m2ts": ".m2ts", "video/3gpp": ".3gp",
+    "video/x-ms-wmv": ".wmv", "video/x-flv": ".flv", "application/mxf": ".mxf",
+    "video/vnd.rn-realmedia": ".rm",
+}
+AUDIO_MIME = {
+    "audio/mpeg": ".mp3", "audio/wav": ".wav", "audio/x-wav": ".wav",
+    "audio/mp4": ".m4a", "audio/x-m4a": ".m4a", "audio/flac": ".flac",
+    "audio/ogg": ".ogg", "audio/aac": ".aac", "audio/x-ms-wma": ".wma",
+    "audio/aiff": ".aiff", "audio/x-aiff": ".aif", "audio/opus": ".opus",
+    "audio/midi": ".mid", "audio/x-midi": ".midi",
+}
 DOCUMENT_MIME = {
     "application/pdf": ".pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
@@ -273,8 +292,71 @@ DOCUMENT_MIME = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
     "text/x-google-apps-script": ".gs",
     "text/plain": ".txt", "text/markdown": ".md", "text/csv": ".csv",
+    "application/json": ".json", "application/ld+json": ".json",
+    "application/yaml": ".yaml", "application/x-yaml": ".yaml", "text/yaml": ".yaml",
+    "text/tab-separated-values": ".tsv", "text/html": ".html", "application/xhtml+xml": ".html",
+    "text/xml": ".xml", "application/xml": ".xml", "text/ini": ".ini",
+    "application/x-subrip": ".srt", "text/srt": ".srt", "application/x-edl": ".edl",
+    "application/msword": ".doc", "text/rtf": ".rtf", "application/rtf": ".rtf",
+    "application/vnd.oasis.opendocument.text": ".odt",
+    "application/vnd.oasis.opendocument.spreadsheet": ".ods",
+    "application/vnd.oasis.opendocument.presentation": ".odp",
+    "application/oxps": ".oxps", "application/x-ole-storage": ".odc",
+    "text/x-log": ".log", "text/calendar": ".ics", "application/x-7z-compressed": ".7z",
+    "application/vnd.ms-powerpoint": ".ppt", "application/illustrator": ".ai",
+    "application/x-subtitle": ".lrc", "text/x-jsonl": ".jsonl", "application/x-xml-sidecar": ".sxml",
+    "application/oxps-package": ".xps", "application/x-relation-sidecar": ".rels",
 }
-ALLOWED_MIME = {**IMAGE_MIME, **VIDEO_MIME, **DOCUMENT_MIME}
+GENERIC_BINARY_MIME = {
+    "application/zip": ".zip", "application/x-zip-compressed": ".zip",
+    "application/x-wondershare-project": ".wfp", "application/x-wondershare-bundle": ".wfpbundle",
+    "application/x-video-sidecar": ".bdm", "application/x-video-index": ".cpi",
+    "application/x-video-playlist": ".mpl", "application/octet-stream": ".bin",
+    "application/x-after-effects": ".aep", "application/x-notion-effect": ".nbeffect",
+    "application/x-creative-preset": ".cfpreset", "application/x-motion-template": ".mogrt",
+    "application/x-premiere-preset": ".prm", "application/x-3d-object": ".obj",
+    "model/gltf+json": ".gltf", "model/gltf-binary": ".glb", "model/obj": ".obj",
+    "application/x-blender": ".blend", "application/x-fbx": ".fbx", "model/vnd.collada+xml": ".dae",
+    "model/stl": ".stl", "application/x-3ds": ".3ds", "font/ttf": ".ttf", "font/otf": ".otf",
+    "font/woff": ".woff", "font/woff2": ".woff2",
+    "application/x-premiere-project": ".prproj", "application/x-powerdirector-project": ".pds",
+    "application/x-premiere-preset-binary": ".prfpset", "application/x-editing-cache": ".ewc2",
+    "application/x-editing-cache-v1": ".ewc", "application/x-title-sidecar": ".nbtitle",
+    "application/x-marker-sidecar": ".mrk", "application/x-peak-file": ".pk",
+    "application/x-wordpress-export": ".wpress", "font/collection": ".ttc",
+    "video/vnd.rn-realmedia": ".rm", "application/x-gzip": ".gz", "application/x-7z-compressed": ".7z",
+}
+EXTRA_MIME_BY_EXTENSION = {
+    ".cr2": "image/x-canon-cr2", ".arw": "image/x-sony-arw", ".psd": "image/vnd.adobe.photoshop",
+    ".svg": "image/svg+xml", ".dng": "image/x-adobe-dng", ".raw": "image/x-raw", ".heic": "image/heic", ".heif": "image/heif",
+    ".tif": "image/tiff", ".tiff": "image/tiff", ".bmp": "image/bmp", ".ico": "image/x-icon", ".ppm": "image/x-portable-pixmap",
+    ".m4v": "video/x-m4v", ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska", ".mts": "video/mp2t", ".m2ts": "video/x-m2ts", ".3gp": "video/3gpp",
+    ".wmv": "video/x-ms-wmv", ".flv": "video/x-flv", ".mxf": "application/mxf", ".mp3": "audio/mpeg",
+    ".wav": "audio/wav", ".m4a": "audio/mp4", ".flac": "audio/flac", ".ogg": "audio/ogg",
+    ".aac": "audio/aac", ".wma": "audio/x-ms-wma", ".aiff": "audio/aiff", ".aif": "audio/x-aiff",
+    ".opus": "audio/opus", ".mid": "audio/midi", ".midi": "audio/x-midi", ".wfp": "application/x-wondershare-project",
+    ".wfpbundle": "application/x-wondershare-bundle", ".bdm": "application/x-video-sidecar",
+    ".cpi": "application/x-video-index", ".mpl": "application/x-video-playlist",
+    ".zip": "application/zip", ".json": "application/json", ".yaml": "application/yaml",
+    ".yml": "application/yaml", ".tsv": "text/tab-separated-values", ".html": "text/html",
+    ".ini": "text/ini", ".srt": "application/x-subrip", ".edl": "application/x-edl",
+    ".fcpxml": "application/xml", ".xml": "application/xml", ".url": "text/plain", ".doc": "application/msword",
+    ".rtf": "text/rtf", ".odt": "application/vnd.oasis.opendocument.text", ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+    ".odp": "application/vnd.oasis.opendocument.presentation", ".oxps": "application/oxps", ".odc": "application/x-ole-storage",
+    ".log": "text/x-log", ".ics": "text/calendar", ".ppt": "application/vnd.ms-powerpoint", ".ai": "application/illustrator",
+    ".lrc": "application/x-subtitle", ".jsonl": "text/x-jsonl", ".sxml": "application/x-xml-sidecar", ".xps": "application/oxps-package", ".rels": "application/x-relation-sidecar",
+    ".aep": "application/x-after-effects", ".nbeffect": "application/x-notion-effect",
+    ".cfpreset": "application/x-creative-preset", ".mogrt": "application/x-motion-template", ".prm": "application/x-premiere-preset",
+    ".obj": "model/obj", ".gltf": "model/gltf+json", ".glb": "model/gltf-binary", ".blend": "application/x-blender",
+    ".fbx": "application/x-fbx", ".dae": "model/vnd.collada+xml", ".stl": "model/stl", ".3ds": "application/x-3ds",
+    ".ttf": "font/ttf", ".otf": "font/otf", ".woff": "font/woff", ".woff2": "font/woff2",
+    ".prproj": "application/x-premiere-project", ".pds": "application/x-powerdirector-project", ".prfpset": "application/x-premiere-preset-binary",
+    ".ewc2": "application/x-editing-cache", ".ewc": "application/x-editing-cache-v1", ".nbtitle": "application/x-title-sidecar",
+    ".mrk": "application/x-marker-sidecar", ".pk": "application/x-peak-file", ".wpress": "application/x-wordpress-export",
+    ".ttc": "font/collection", ".rm": "video/vnd.rn-realmedia", ".gz": "application/x-gzip", ".7z": "application/x-7z-compressed",
+}
+ALLOWED_MIME = {**IMAGE_MIME, **RAW_IMAGE_MIME, **VIDEO_MIME, **AUDIO_MIME, **DOCUMENT_MIME, **GENERIC_BINARY_MIME}
 STATUS_VALUES = {"verified", "probable", "pending_review", "conflicted", "failed", "unknown", "do_not_identify"}
 JOB_STATUS_ALIASES = {"running": "processing", "complete": "completed", "pending": "queued"}
 CANONICAL_JOB_STATUSES = {"queued", "processing", "completed", "partial_failed", "failed", "retrying", "cancelled"}
@@ -425,7 +507,7 @@ def _document_text(content: bytes, mime_type: str) -> str:
 
 
 def inspect_media(content: bytes, mime_type: str, filename: str = "") -> ImageInspection:
-    """Inspect an image, video or document while keeping its binary on disk."""
+    """Inspect an image, video, audio or document while keeping its binary on disk."""
     if mime_type in IMAGE_MIME:
         return inspect_image(content, mime_type)
     if mime_type not in ALLOWED_MIME:
@@ -436,6 +518,19 @@ def inspect_media(content: bytes, mime_type: str, filename: str = "") -> ImageIn
     if not content:
         raise VisualAssetError("素材內容是空的", code="empty_file")
     digest = hashlib.sha256(content).hexdigest()
+    if content == b"external-binary" and mime_type in DOCUMENT_MIME:
+        # Data-folder imports may intentionally avoid loading a very large
+        # document into memory.  Keep a truthful catalogue row and an explicit
+        # generic inspection marker; OCR/parser retry can be scheduled later.
+        return ImageInspection(
+            width=0, height=0, orientation="file", exif_date="", sha256=digest,
+            perceptual_hash=digest[:16], color_embedding=[], blur_score=0,
+            brightness_score=0, quality_score=0,
+            suitability={"poster": False, "video": False, "instagram_cover": False,
+                         "reasons": ["文件過大，已完成 metadata 目錄化；OCR 延後"]},
+            thumbnail=_placeholder_thumbnail("DOCUMENT", filename or mime_type),
+            asset_type="document",
+        )
     if mime_type in DOCUMENT_MIME:
         try:
             text = _document_text(content, mime_type)[:20000]
@@ -450,13 +545,35 @@ def inspect_media(content: bytes, mime_type: str, filename: str = "") -> ImageIn
             thumbnail=_placeholder_thumbnail("DOCUMENT", filename or mime_type),
             asset_type="document", extracted_text=text,
         )
+    if mime_type in AUDIO_MIME:
+        return ImageInspection(
+            width=0, height=0, orientation="audio", exif_date="", sha256=digest,
+            perceptual_hash=digest[:16], color_embedding=[], blur_score=0,
+            brightness_score=0, quality_score=0,
+            suitability={"poster": False, "video": False, "instagram_cover": False,
+                         "audio": True, "reasons": ["音訊素材已保留；不進行圖片視覺分析"]},
+            thumbnail=_placeholder_thumbnail("AUDIO", filename or mime_type), asset_type="audio",
+        )
+    if mime_type in RAW_IMAGE_MIME:
+        # Camera RAW, PSD and SVG are retained as image files even when the
+        # current Pillow build cannot decode them.  Keep dimensions unknown and
+        # expose the limitation instead of fabricating visual metadata.
+        return ImageInspection(
+            width=0, height=0, orientation="image_file", exif_date="", sha256=digest,
+            perceptual_hash=digest[:16], color_embedding=[], blur_score=0,
+            brightness_score=0, quality_score=0,
+            suitability={"poster": False, "video": False, "instagram_cover": False,
+                         "reasons": ["圖片格式已保留；目前解碼器未配置"]},
+            thumbnail=_placeholder_thumbnail("IMAGE FILE", filename or mime_type), asset_type="image",
+        )
     return ImageInspection(
-        width=0, height=0, orientation="video", exif_date="", sha256=digest,
+        width=0, height=0, orientation="video" if mime_type in VIDEO_MIME else "file", exif_date="", sha256=digest,
         perceptual_hash=digest[:16], color_embedding=[], blur_score=0,
         brightness_score=0, quality_score=0,
-        suitability={"poster": False, "video": True, "instagram_cover": False,
-                     "reasons": ["影片已保留；影格解碼器未配置"]},
-        thumbnail=_placeholder_thumbnail("VIDEO", filename or mime_type), asset_type="video",
+        suitability={"poster": False, "video": mime_type in VIDEO_MIME, "instagram_cover": False,
+                     "reasons": ["影片已保留；影格解碼器未配置"] if mime_type in VIDEO_MIME else ["檔案已保留；目前沒有對應解析器"]},
+        thumbnail=_placeholder_thumbnail("VIDEO" if mime_type in VIDEO_MIME else "FILE", filename or mime_type),
+        asset_type="video" if mime_type in VIDEO_MIME else "document",
     )
 
 
@@ -609,6 +726,8 @@ class VisualAssetStore:
         metadata = dict(source_metadata or {})
         if external_source:
             metadata.setdefault("storage_mode", "external")
+        if inspection.orientation in {"audio", "image_file", "file"}:
+            metadata.setdefault("inspection_mode", "generic")
         duplicate = self._rows(
             "SELECT id FROM visual_assets WHERE sha256=? AND (user_id=? OR privacy IN ('shared','public')) ORDER BY created_at LIMIT 1",
             (digest, user_id),
@@ -788,6 +907,8 @@ class VisualAssetStore:
             return None
         source = confined[0]
         metadata = loads(asset.get("source_metadata"), {})
+        if isinstance(metadata, dict) and metadata.get("inspection_mode") == "generic":
+            raise VisualAssetError("此圖片格式目前只有原始檔與縮圖輸出", code="unsupported_rendition")
         # External imports must never write a rendition beside the user's
         # original file.  Keep all generated derivatives under our managed
         # visual-assets directory instead.

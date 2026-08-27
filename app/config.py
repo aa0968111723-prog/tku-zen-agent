@@ -163,15 +163,26 @@ VISUAL_EXPORT_DIR = _path("VISUAL_EXPORT_DIR", "outputs/visual-exports")
 VISUAL_MAX_FILE_BYTES = max(1_000_000, int(os.getenv("VISUAL_MAX_FILE_BYTES") or 20_000_000))
 VISUAL_MAX_BATCH = max(1, min(100, int(os.getenv("VISUAL_MAX_BATCH") or 30)))
 VISUAL_SEARCH_LIMIT = max(1, min(200, int(os.getenv("VISUAL_SEARCH_LIMIT") or 60)))
-# 本機資料整理的額外素材根目錄。只會擷取支援的圖片／影片／文件格式；
+# External archive documents can be hundreds of MB; catalogue them without
+# loading/parsing their full payload, while normal uploads retain the existing
+# 20MB safety limit.  OCR can be retried later after a dedicated parser is
+# configured.
+DATA_ORGANIZATION_MAX_DOCUMENT_INSPECTION_BYTES = max(1_000_000, int(os.getenv("DATA_ORGANIZATION_MAX_DOCUMENT_INSPECTION_BYTES") or 32_000_000))
+# 本機資料整理的額外素材根目錄。只會擷取支援的圖片／影片／音訊／文件與專案格式；
 # 程式碼、虛擬環境、Git、SQLite 與憑證不會因為加入根目錄而被匯入。
 # 在目前 Windows 工作區若存在同層的社團媒體資料夾，預設也會納入；部署環境
 # 沒有這些資料夾時不會產生額外掃描。可用環境變數完全覆蓋這份白名單。
 _organization_roots = (os.getenv("DATA_ORGANIZATION_IMPORT_ROOTS") or "data,output,outputs,mobile-shots").split(",")
 if not os.getenv("DATA_ORGANIZATION_IMPORT_ROOTS"):
     _local_media_root_names = (
+        # Workspace collections used by the club/media workflow.  Keep the
+        # repository itself, software installers and runtime logs out of this
+        # list; the scanner still applies extension and ignored-directory
+        # safeguards below.
+        "00_Inbox", "01_Projects", "02_Club_淡大禪學社", "03_Documents", "04_Design",
         "淡大劇本", "淡大所有照片", "05_Photos", "06_Video", "招生影片", "音樂會",
-        "挑戰營", "場務場刊E310", "聖者影片", "zen-photo-inbox",
+        "挑戰營", "場務場刊E310", "聖者影片", "zen-photo-inbox", "07_Audio", "08_AI",
+        "09_Resources", "90_Archive", "99_ToReview", "資源", "對話", "zen-public",
     )
     _organization_roots.extend(
         str(ROOT.parent / name)
