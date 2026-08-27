@@ -16,9 +16,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -29,6 +31,7 @@ from ..research import verifier as research_verifier
 from ..research.claims import SourceRecord
 from ..research.entities import ResearchMode, ResearchScope
 from ..services import activities as activity_service
+from ..services import audit as audit_service
 from ..services import context as ctx_mod
 from ..services import current_term as term_service
 from ..services import fal as fal_service
@@ -58,13 +61,23 @@ READ_ONLY_CACHEABLE_TOOLS = {
     "search_knowledge", "search_previous_examples", "get_current_term",
     "search_visual_library",
     "search_social_references", "compare_social_strategies", "analyze_social_positioning",
+    "search_perplexity_web", "search_instagram_public_hashtag", "search_instagram_public_account",
+    "list_tku_public_sources", "search_tku_public_info", "fetch_tku_public_source",
     "get_activity_status", "list_activities", "read_artifact",
 }
 
 # 外校研究工具 —— 回傳的 references 會登記成本輪的來源紀錄
 RESEARCH_TOOLS = {
     "search_social_references", "compare_social_strategies", "analyze_social_positioning",
+    "search_perplexity_web", "search_instagram_public_hashtag", "search_instagram_public_account",
+    "list_tku_public_sources", "search_tku_public_info", "fetch_tku_public_source",
 }
+
+EXTERNAL_RESEARCH_TOOLS = {
+    "search_social_references", "compare_social_strategies", "analyze_social_positioning",
+    "search_perplexity_web", "search_instagram_public_hashtag", "search_instagram_public_account",
+}
+TKU_PUBLIC_TOOLS = {"list_tku_public_sources", "search_tku_public_info", "fetch_tku_public_source"}
 
 # 只有淡江內部資料的檢索工具 —— 外部研究模式下不得使用（不能拿淡江資料當外校證據）。
 # get_current_term 也在列：淡江本學期的社長／社課時間一旦在外校研究回合流進
@@ -78,7 +91,7 @@ def _scope_tool_guard(scope: ResearchScope, name: str) -> dict[str, Any] | None:
     工具 schema 已經按範圍縮限，但 dispatch 會執行任何註冊過的工具，
     模型手滑呼叫沒暴露的工具時，這裡是最後一道閘門（稽核殘餘路徑 B）。
     """
-    if scope.mode == ResearchMode.EXTERNAL and name in INTERNAL_RETRIEVAL_TOOLS:
+    if scope.mode == ResearchMode.EXTERNAL and (name in INTERNAL_RETRIEVAL_TOOLS or name in TKU_PUBLIC_TOOLS):
         return {
             "ok": False,
             "code": "scope_blocked",
@@ -89,7 +102,7 @@ def _scope_tool_guard(scope: ResearchScope, name: str) -> dict[str, Any] | None:
                 "查不到就誠實說找不到可靠來源。"
             ),
         }
-    if scope.mode == ResearchMode.INTERNAL and name in RESEARCH_TOOLS:
+    if scope.mode == ResearchMode.INTERNAL and name in EXTERNAL_RESEARCH_TOOLS:
         return {
             "ok": False,
             "code": "scope_blocked",
@@ -109,7 +122,7 @@ def _preview(args: dict[str, Any]) -> str:
 
 
 def _step_index_for_tool(state: OrchestrationState, name: str) -> int | None:
-    if name in {"search_social_references", "compare_social_strategies", "analyze_social_positioning"}:
+    if name in RESEARCH_TOOLS:
         wanted = ("research", "研究")
     elif name in ACTIVITY_TOOLS:
         wanted = ("activity", "活動")
@@ -194,12 +207,92 @@ def _tool_cache_key(name: str, arguments: dict[str, Any]) -> str:
     return name + ":" + json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
 
 
+_MODEL_RESULT_KEYS = {
+    "ok", "message", "query", "provider", "results", "references", "source_records", "filters",
+    "search_id", "server_time", "retrieved_at", "external_reference_warning", "privacy_note", "code", "error_code",
+    "alternative", "activity_brief", "readiness", "activities", "task", "artifact", "content", "truncated",
+    "source", "text", "matched", "failures", "profile", "username", "hashtag", "paging",
+}
+_SECRET_KEY_RE = re.compile(r"(token|authorization|api[_-]?key|secret|password|passwd|credential)", re.I)
+
+
+def _safe_model_value(value: Any, *, depth: int = 0) -> Any:
+    """Bound and redact provider payloads before they become model messages."""
+    if depth > 4:
+        return None
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for raw_key, raw_value in list(value.items())[:80]:
+            key = str(raw_key)
+            if _SECRET_KEY_RE.search(key):
+                continue
+            cleaned = _safe_model_value(raw_value, depth=depth + 1)
+            if cleaned is not None:
+                out[key[:80]] = cleaned
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_safe_model_value(item, depth=depth + 1) for item in list(value)[:20]]
+    if isinstance(value, str):
+        return value[:2000]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return str(value)[:500]
+
+
 def _tool_result_for_model(result: dict[str, Any]) -> dict[str, Any]:
-    payload = {"ok": result.get("ok", True), "message": result.get("message", "")}
-    for key in ("activity_brief", "readiness", "activities", "task", "artifact", "content", "truncated", "alternative", "code"):
+    # Explicit allowlist prevents binary/HTML/provider internals from being
+    # forwarded, while retaining enough provenance for grounded synthesis.
+    payload: dict[str, Any] = {"ok": bool(result.get("ok", True)), "message": str(result.get("message") or "")[:2000]}
+    for key in _MODEL_RESULT_KEYS - {"ok", "message"}:
         if result.get(key) is not None:
-            payload[key] = result[key]
+            payload[key] = _safe_model_value(result[key])
     return payload
+
+
+def _external_cache_key(project_id: str, name: str, arguments: dict[str, Any]) -> str:
+    normalized = {
+        "provider": "perplexity" if name == "search_perplexity_web" else ("meta" if name.startswith("search_instagram") else "tku_official"),
+        "query": arguments.get("query") or arguments.get("username") or arguments.get("hashtag") or arguments.get("source_id") or "",
+        "domains": sorted(str(v) for v in (arguments.get("domains") or [])),
+        "recency": arguments.get("recency") or "",
+        "project_id": project_id,
+    }
+    digest = hashlib.sha256(json.dumps(normalized, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    return f"{name}:{digest}"
+
+
+def _record_external_search_metrics(
+    state: OrchestrationState, *, name: str, arguments: dict[str, Any], result: dict[str, Any],
+    project_id: str, session_id: str, cache_hit: bool = False,
+) -> None:
+    query = str(arguments.get("query") or arguments.get("username") or arguments.get("hashtag") or arguments.get("source_id") or "")
+    query_hash = hashlib.sha256(query.encode()).hexdigest()
+    provider = str(result.get("provider") or ("perplexity" if name == "search_perplexity_web" else "meta_instagram"))
+    event = {
+        "provider": provider, "search_id": result.get("search_id") or "", "query_hash": query_hash,
+        "attempt_count": int(result.get("attempt_count") or 1), "latency_ms": int(result.get("latency_ms") or 0),
+        "result_count": len(result.get("results") or []) if isinstance(result.get("results"), list) else 0,
+        "recency": arguments.get("recency"), "domains": arguments.get("domains") or [],
+        "success": bool(result.get("ok")), "error_code": result.get("code") if not result.get("ok") else "",
+        "retrieved_at": result.get("retrieved_at") or datetime.now(timezone.utc).isoformat(),
+        "project_id": project_id, "session_id": session_id,
+        "correlation_id": hashlib.sha256(f"{session_id}:{query_hash}".encode()).hexdigest()[:24],
+        "cache_hit": cache_hit,
+        "cost_status": "unknown" if not getattr(config, "PERPLEXITY_SEARCH_COST_PER_1000", None) else "estimated",
+    }
+    rate = getattr(config, "PERPLEXITY_SEARCH_COST_PER_1000", None)
+    if rate is not None and provider == "perplexity":
+        event["cost_estimate_usd"] = round(float(rate) / 1000.0, 8)
+    state.metrics.setdefault("external_searches", []).append(event)
+    current = ctx_mod.current()
+    if not cache_hit:
+        audit_service.write_audit(
+            action="research.external_search",
+            actor_user_id=current.user_id if current else "",
+            resource=f"project/{project_id}",
+            detail=event,
+            ok=bool(result.get("ok")),
+        )
 
 
 def _tool_alternative(name: str, code: str) -> str:
@@ -694,10 +787,19 @@ async def _run(
             cache_key = _tool_cache_key(tc.name, tc.arguments)
             cached_tool_result = tc.name in READ_ONLY_CACHEABLE_TOOLS and cache_key in tool_cache
             attempts = 0
+            external_cache_key = _external_cache_key(project_id, tc.name, tc.arguments) if tc.name in RESEARCH_TOOLS else ""
+            external_cache_hit = False
             scope_blocked = _scope_tool_guard(scope, tc.name)
+            cached_row = store.get_external_search_cache(project_id, external_cache_key) if external_cache_key else None
             if scope_blocked is not None:
                 result = dict(scope_blocked)
                 cached_tool_result = False
+            elif external_cache_key and cached_row and isinstance(cached_row.get("payload"), dict):
+                result = dict(cached_row["payload"])
+                cached_tool_result = True
+                external_cache_hit = True
+                attempts = int(result.get("attempt_count") or 1)
+                state.metrics["tool_cache_hits"] = int(state.metrics.get("tool_cache_hits", 0)) + 1
             elif cached_tool_result:
                 result = dict(tool_cache[cache_key])
                 state.metrics["tool_cache_hits"] = int(state.metrics.get("tool_cache_hits", 0)) + 1
@@ -749,9 +851,16 @@ async def _run(
             else:
                 successful_tools.add(tc.name)
 
+            if tc.name in RESEARCH_TOOLS and result.get("code") != "scope_blocked":
+                _record_external_search_metrics(
+                    state, name=tc.name, arguments=tc.arguments, result=result,
+                    project_id=project_id, session_id=session_id, cache_hit=external_cache_hit,
+                )
+
             # 外校研究工具的回傳帶有來源明細，收進本輪來源清單給閘門與來源卡用
-            if tc.name in RESEARCH_TOOLS and result.get("ok") and result.get("references"):
-                for ref in result["references"]:
+            if tc.name in RESEARCH_TOOLS and result.get("ok"):
+                refs = result.get("references") or result.get("source_records") or []
+                for ref in refs:
                     record = _source_from_reference(ref)
                     if record is not None:
                         turn_sources.append(record)
@@ -804,18 +913,36 @@ async def _run(
                 state.mark_step(step_index, result.get("message", "活動資料已更新")[:160])
                 memory_service.save_state(store, project_id, state)
 
-            if tc.name in {"search_social_references", "compare_social_strategies", "analyze_social_positioning"}:
+            if tc.name in RESEARCH_TOOLS and not external_cache_hit:
                 source_ids = memory_service.record_research_sources(store, project_id, session_id, result)
                 if source_ids:
                     yield {"type": "research_sources_saved", "source_ids": source_ids, "count": len(source_ids)}
                 if step_index is not None:
-                    state.mark_step(step_index, f"{len(result.get('references') or [])} 個來源")
+                    state.mark_step(step_index, f"{len(result.get('references') or result.get('source_records') or [])} 個來源")
                     # 確定性研究工具已完成來源整理，下一節點可以直接使用。
                     for i, step in enumerate(state.plan_steps):
                         if step.kind == "synthesis":
                             state.mark_step(i, "研究結果已可供後續產出使用")
                             break
                     memory_service.save_state(store, project_id, state)
+
+                # Persist the cache only after provenance has been written. If
+                # a process stops between these operations, a retry must not
+                # hide a successful external result without its source rows.
+                if result.get("ok") and external_cache_key:
+                    from datetime import timedelta
+
+                    expires = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+                    query_text = str(tc.arguments.get("query") or tc.arguments.get("username") or tc.arguments.get("hashtag") or tc.arguments.get("source_id") or "")
+                    store.save_external_search_cache(
+                        project_id, external_cache_key,
+                        provider=str(result.get("provider") or "external"),
+                        query_hash=hashlib.sha256(query_text.encode()).hexdigest(),
+                        query_text=query_text,
+                        params={k: tc.arguments.get(k) for k in ("domains", "recency", "source_ids", "limit", "max_results") if tc.arguments.get(k) is not None},
+                        payload=result,
+                        expires_at=expires,
+                    )
 
             # ── Verify（產檔類工具才有）──────────────────
             if tc.name in ARTIFACT_TOOLS and result.get("local_path"):
@@ -1040,17 +1167,21 @@ async def _run(
 # ── 研究驗證輔助 ─────────────────────────────────────────────
 
 def _source_from_reference(ref: dict[str, Any]) -> SourceRecord | None:
-    """把 social 研究工具回傳的 reference 轉成來源紀錄。"""
-    if not isinstance(ref, dict) or not ref.get("excerpt"):
+    """Normalize legacy references and new provider source records."""
+    if not isinstance(ref, dict):
+        return None
+    excerpt = str(ref.get("excerpt") or ref.get("snippet") or ref.get("summary") or "")
+    if not excerpt:
         return None
     # 預設值一律保守：工具真的有標 official 才算 official，
     # 沒標的來源不能靠預設值變成「已驗證」（稽核項：預設值改保守）。
     return SourceRecord(
-        title=str(ref.get("source") or ref.get("source_file") or ""),
-        url=str(ref.get("source_url") or ""),
-        publisher=str(ref.get("organization") or ref.get("school") or ""),
-        captured_at=str(ref.get("captured_at") or ""),
-        excerpt=str(ref.get("excerpt") or ""),
+        title=str(ref.get("title") or ref.get("source") or ref.get("source_file") or ""),
+        url=str(ref.get("url") or ref.get("source_url") or ""),
+        publisher=str(ref.get("publisher") or ref.get("organization") or ref.get("school") or ref.get("provider") or ""),
+        published_at=str(ref.get("published_at") or ref.get("date") or ""),
+        captured_at=str(ref.get("captured_at") or ref.get("retrieved_at") or ""),
+        excerpt=excerpt,
         source_type=str(ref.get("source_type") or "external_reference"),
         entity_id=str(ref.get("entity_id") or ""),
         school=str(ref.get("school") or ""),

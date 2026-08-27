@@ -107,14 +107,32 @@ SKILLS: tuple[Skill, ...] = (
             "北科", "北藝", "北醫", "台大", "臺大", "政大", "東吳", "世新", "東華",
             "策略比較", "社群研究", "公開 IG", "公開IG", "公開ig",
         ),
-        tools=("search_social_references", "compare_social_strategies", "analyze_social_positioning"),
+        tools=(
+            "search_social_references", "compare_social_strategies", "analyze_social_positioning",
+            "search_perplexity_web", "search_instagram_public_hashtag", "search_instagram_public_account",
+        ),
         task_type="social_research",
         playbook_hints=("外校社群比較", "社群研究"),
         extra_guidance=(
             "外校資料只能當公開參考；研究結果必須完整保留工具回傳的來源清單"
             "（含網址、發布者、檢索日期），不得寫出清單以外的校名、社團、講師或活動；"
-            "禁止照抄或當作淡江事實。這些資料來自內部整理的公開參考庫，"
-            "不是即時網路搜尋，不可以寫成「剛搜尋到」或「目前現況」。"
+            "禁止照抄或當作淡江事實。既有整理的外校參考庫不是即時網路搜尋；"
+            "Perplexity 是即時公開網路搜尋，Meta Instagram "
+            "只代表授權範圍內的公開內容；所有摘要都必須附原始網址與檢索時間，"
+            "不可把帳號或相似名稱當成人物身分。"
+        ),
+    ),
+    Skill(
+        name="official_public_research",
+        label="淡江官方公開研究",
+        deliverables=("校務資訊", "官方資訊", "學事曆", "公開來源"),
+        keywords=("淡江官方", "淡江校務", "淡江大學最新", "校方公告", "官方來源"),
+        tools=("list_tku_public_sources", "search_tku_public_info", "fetch_tku_public_source"),
+        task_type="knowledge",
+        playbook_hints=("淡江官方公開來源",),
+        extra_guidance=(
+            "只使用淡江官方公開網域；來源是公開證據，不可用來推斷外校資料，"
+            "每項結論都要附來源網址、取得時間與待確認狀態。"
         ),
     ),
     Skill(
@@ -273,6 +291,11 @@ def has_external_intent(message: str) -> bool:
         or research_entities.mentions_external_school(message)
     )
 
+
+def has_public_research_intent(message: str) -> bool:
+    """是否明確要求即時公開網路／Instagram 研究。"""
+    return bool(re.search(r"(Perplexity|Instagram|instagram|公開網路|公開資訊|hashtag|標籤|公開帳號|官方帳號)", message or ""))
+
 _ACTIVITY_OPERATION_QUERY = re.compile(
     r"(活動.*(?:缺什麼|進度|待辦|分工|負責|逾期|還剩|未完成)|"
     r"誰負責什麼|哪些工作逾期|還剩哪些事項|新增待辦|更新待辦|建立活動|列出活動)"
@@ -370,6 +393,36 @@ def route(message: str) -> Routing:
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     continuation = bool(re.search(r"(接續|繼續|剛才|上一份|上次|沿用|改成|轉成|轉為)", message))
     preferred_tool, preferred_artifact = _preferred_output(message)
+
+    # 官方淡江資料要走 allowlisted TKU sources，而不是把一般知識庫當成
+    # 即時校務資料。這個判斷放在 is_lookup 前，避免「最新校務資訊」被
+    # 純查詢路由吞掉。
+    if re.search(r"淡江|淡大", message) and re.search(r"(官方|校務|校方|學事曆|公開來源|最新)", message):
+        official = SKILL_BY_NAME["official_public_research"]
+        return Routing(
+            skill=official,
+            score=max(scores.get(official.name, 0.0), 1.0),
+            runner_up="knowledge",
+            produce_artifact=False,
+            scores=scores,
+            continuation=continuation,
+            preferred_tool=preferred_tool,
+            preferred_artifact=preferred_artifact,
+        )
+
+    # 沒有學校名稱的 Instagram／公開網路查詢也不能靜默落到內部知識庫。
+    if has_public_research_intent(message) and not wants_artifact(message) and not re.search(r"淡江.*(官方|校務)", message):
+        public = SKILL_BY_NAME["social_research"]
+        return Routing(
+            skill=public,
+            score=max(scores.get(public.name, 0.0), 1.0),
+            runner_up="knowledge",
+            produce_artifact=False,
+            scores=scores,
+            continuation=continuation,
+            preferred_tool=preferred_tool,
+            preferred_artifact=preferred_artifact,
+        )
 
     # 複合任務要把依賴關係寫進 routing，而不是讓模型自行猜「研究」何時完成。
     if (

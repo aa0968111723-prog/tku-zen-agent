@@ -991,12 +991,12 @@ async def list_public_sources(query: str = "") -> dict[str, Any]:
 
 @general_router.post("/public-sources/search")
 async def search_public_sources(req: PublicSourceSearchRequest) -> dict[str, Any]:
-    return public_sources_service.search_public_info(req.query, req.source_ids, req.limit)
+    return await asyncio.to_thread(public_sources_service.search_public_info, req.query, req.source_ids, req.limit)
 
 
 @general_router.get("/public-sources/{source_id}")
 async def fetch_public_source(source_id: str, query: str = "") -> dict[str, Any]:
-    result = public_sources_service.fetch_public_source(source_id, query)
+    result = await asyncio.to_thread(public_sources_service.fetch_public_source, source_id, query)
     if not result.get("ok") and result.get("code") == "NOT_FOUND":
         raise HTTPException(status_code=404, detail=result["message"])
     return result
@@ -1004,12 +1004,12 @@ async def fetch_public_source(source_id: str, query: str = "") -> dict[str, Any]
 
 @general_router.post("/instagram/public/account-search")
 async def search_instagram_public_account(req: InstagramPublicAccountRequest) -> dict[str, Any]:
-    return public_sources_service.search_instagram_public_account(req.username, req.limit)
+    return await asyncio.to_thread(public_sources_service.search_instagram_public_account, req.username, req.limit)
 
 
 @general_router.post("/instagram/public/hashtag-search")
 async def search_instagram_public_hashtag(req: InstagramHashtagSearchRequest) -> dict[str, Any]:
-    return public_sources_service.search_instagram_public_hashtag(req.hashtag, req.limit)
+    return await asyncio.to_thread(public_sources_service.search_instagram_public_hashtag, req.hashtag, req.limit)
 
 
 class PerplexitySearchRequest(BaseModel):
@@ -1021,7 +1021,8 @@ class PerplexitySearchRequest(BaseModel):
 
 @general_router.post("/public-web-search")
 async def search_public_web(req: PerplexitySearchRequest) -> dict[str, Any]:
-    return perplexity_service.search_web(
+    return await asyncio.to_thread(
+        perplexity_service.search_web,
         req.query,
         domains=req.domains,
         recency=req.recency,
