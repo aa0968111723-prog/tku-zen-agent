@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..research.claims import SourceRecord, source_from_chunk
+from ..research.types import SourceRecord
 from ..research.entities import ResearchMode, ResearchScope
 from .conflicts import detect_conflicts
 from .hybrid import Scored, hybrid_search
@@ -70,6 +70,10 @@ class ContextBundle:
 
     def source_records(self, current_year: str | None = None) -> list[SourceRecord]:
         if self._source_records is None:
+            # Evidence conversion belongs to the feature path, not retrieval
+            # startup. This keeps package import free of research integration.
+            from ..research.claims import source_from_chunk
+
             # 有明確研究對象時，把對象傳給來源分級：不屬於研究對象的外校
             # 來源會標 wrong_entity，而不是掛著 verified 混進來源卡。
             targets: list[str] | None = None

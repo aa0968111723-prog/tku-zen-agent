@@ -1,37 +1,45 @@
-"""研究驗證引擎：實體解析、來源證據模型、回答品質閘門。
+"""Research package facade.
 
-這一層回答三個問題，缺一不可才能宣稱「研究完成」：
-
-  1. 研究對象是誰？（entities —— 不確定就反問，不猜）
-  2. 證據是什麼？（claims —— 沒有 source_url/title/excerpt 不得標 verified）
-  3. 回答有沒有超出證據？（verifier —— 混淆、冒充、推測當事實，一律擋下）
-
-公開研究地圖（public_map）是附加層：只登記已核對的 HTTPS 公開入口，
-不是社團 SSOT，也不取代 entities.py。
+Importing ``app.research`` is side-effect free. Historical public names are
+kept through lazy attributes for compatibility; submodules do not initialize
+RAG, providers, databases or network clients during package import.
 """
 
-from .entities import (  # noqa: F401
-    HOME_ENTITY_ID,
-    ClarificationRequest,
-    Entity,
-    EntityResolution,
-    ResearchMode,
-    ResearchScope,
-    decide_scope,
-    entity_by_id,
-    external_name_lexicon,
-    resolve,
-)
-from .claims import (  # noqa: F401
-    ClaimRecord,
-    SourceRecord,
-    classify_source,
-    source_from_chunk,
-)
-from .verifier import AnswerReview, review_answer  # noqa: F401
-from . import public_map  # noqa: F401
-from .public_map import (  # noqa: F401
-    PUBLIC_SOURCE_ENTITIES,
-    REQUIRED_CATEGORIES,
-    is_fetchable_url,
-)
+from __future__ import annotations
+
+from importlib import import_module
+
+_LAZY_EXPORTS = {
+    "public_map": ("public_map", "*"),
+    "HOME_ENTITY_ID": ("entities", "HOME_ENTITY_ID"),
+    "ClarificationRequest": ("entities", "ClarificationRequest"),
+    "Entity": ("entities", "Entity"),
+    "EntityResolution": ("entities", "EntityResolution"),
+    "ResearchMode": ("entities", "ResearchMode"),
+    "ResearchScope": ("entities", "ResearchScope"),
+    "decide_scope": ("entities", "decide_scope"),
+    "entity_by_id": ("entities", "entity_by_id"),
+    "external_name_lexicon": ("entities", "external_name_lexicon"),
+    "resolve": ("entities", "resolve"),
+    "ClaimRecord": ("types", "ClaimRecord"),
+    "SourceRecord": ("types", "SourceRecord"),
+    "classify_source": ("types", "classify_source"),
+    "source_from_chunk": ("claims", "source_from_chunk"),
+    "AnswerReview": ("verifier", "AnswerReview"),
+    "review_answer": ("verifier", "review_answer"),
+    "PUBLIC_SOURCE_ENTITIES": ("public_map", "PUBLIC_SOURCE_ENTITIES"),
+    "REQUIRED_CATEGORIES": ("public_map", "REQUIRED_CATEGORIES"),
+    "is_fetchable_url": ("public_map", "is_fetchable_url"),
+}
+
+__all__ = tuple(_LAZY_EXPORTS)
+
+
+def __getattr__(name: str):
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = import_module(f"{__name__}.{target[0]}")
+    value = module if target[1] == "*" else getattr(module, target[1])
+    globals()[name] = value
+    return value

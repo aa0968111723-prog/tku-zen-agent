@@ -46,7 +46,29 @@ _REGISTRY: dict[str, tuple[Callable[..., dict], dict, Permission]] = {
     "search_visual_library": (visual_library.search_visual_library, visual_library.SCHEMA, "general"),
 }
 
-SCHEMAS: list[dict] = [schema for _, schema, _ in _REGISTRY.values()]
+def _model_schema(name: str, schema: dict) -> dict:
+    """Normalize legacy object schemas to the OpenAI tool envelope.
+
+    Public-source integrations predate the current registry contract and
+    expose only the JSON Schema body. Keep their internal definitions intact,
+    but ensure every schema offered to a model has ``function.name`` and
+    ``function.parameters``.
+    """
+    if "function" in schema:
+        return schema
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": schema.get("description", ""),
+            "parameters": schema,
+        },
+    }
+
+
+SCHEMAS: list[dict] = [
+    _model_schema(name, schema) for name, (_, schema, _) in _REGISTRY.items()
+]
 
 # 使用者看得到的工具名稱一律繁體中文 —— 內部英文工具名（create_social_carousel
 # 之類）絕不能直接呈現在介面上。tests/test_ui_language.py 會掃這份表。
@@ -102,14 +124,14 @@ def register(
     # fallback 不用英文內部名——那會原封不動出現在前端進度列（稽核不可靠 #42）
     LABELS[name] = label or "執行工具"
     SCHEMAS.clear()
-    SCHEMAS.extend(s for _, s, _ in _REGISTRY.values())
+    SCHEMAS.extend(_model_schema(n, s) for n, (_, s, _) in _REGISTRY.items())
 
 
 def unregister(name: str) -> None:
     _REGISTRY.pop(name, None)
     LABELS.pop(name, None)
     SCHEMAS.clear()
-    SCHEMAS.extend(s for _, s, _ in _REGISTRY.values())
+    SCHEMAS.extend(_model_schema(n, s) for n, (_, s, _) in _REGISTRY.items())
 
 
 def all_names() -> list[str]:
@@ -123,7 +145,7 @@ def permission_for(name: str) -> Permission | None:
 
 def schemas_for(names: tuple[str, ...] | list[str]) -> list[dict]:
     """Return only explicitly requested known schemas; empty means none."""
-    return [_REGISTRY[name][1] for name in names if name in _REGISTRY]
+    return [_model_schema(name, _REGISTRY[name][1]) for name in names if name in _REGISTRY]
 
 
 def _auth_level() -> str:
