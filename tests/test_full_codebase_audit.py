@@ -266,6 +266,80 @@ def test_audit_typeerror_is_not_swallowed(tmp_db, monkeypatch):
         audit.write_audit(action="acl.denied", actor_user_id="u_local", ok=False)
 
 
+def test_asset_confirm_does_not_verify_probable_people(visual_env, tmp_db, monkeypatch):
+    user_id = tmp_db.ensure_user("u_local", is_local=True)
+
+    async def fake_analysis(_url):
+        return {
+            "summary": "人物", "ocr_text": "", "dates": [],
+            "scenes": [{"label": "校園", "confidence": 0.9, "evidence": "校園"}],
+            "event": {}, "clubs": [],
+            "people": {"count": 1, "descriptions": [{"label": "未辨識人物", "confidence": 0.7, "evidence": "一人"}]},
+            "objects": [], "logos": [], "quality_notes": [], "is_poster": False,
+        }
+
+    monkeypatch.setattr(visual_analysis.fal, "analyze_visual_asset", fake_analysis)
+    with TestClient(main.app) as client:
+        item = upload(client, picture(), auto=False).json()["items"][0]
+        analyzed = client.post(f"/api/visual-assets/{item['asset_id']}/analyze")
+        assert analyzed.status_code == 200
+        confirmed = client.post(f"/api/visual-assets/{item['asset_id']}/confirm", json={"reason": "確認場景即可"})
+        assert confirmed.status_code == 200
+        assert confirmed.json()["review_status"] == "verified"
+        people = [obs for obs in confirmed.json()["observations"] if obs["entity_type"] == "person"]
+        assert people
+        assert all(obs["status"] != "verified" for obs in people)
+
+
+def test_organize_does_not_guess_project_for_unscoped_assets(visual_env, tmp_db):
+    from app.services.data_organization import DataOrganizationService
+
+    user_id = tmp_db.ensure_user("u_local", is_local=True)
+    project_id = tmp_db.create_project(user_id, "招生影片", "recruitment")
+    with TestClient(main.app) as client:
+        item = upload(client, picture(color=(9, 9, 9)), name="unscoped.png").json()["items"][0]
+        assert item["project_id"] == ""
+    service = DataOrganizationService()
+    service.run(user_id, idempotency_key="organize-no-guess", project_id=project_id)
+    store = visual_assets.get_visual_store()
+    row = store._rows("SELECT project_id FROM visual_assets WHERE id=?", (item["asset_id"],))[0]
+    assert row["project_id"] == ""
+    queued = store._rows("SELECT proposed_change FROM review_queue WHERE asset_id=?", (item["asset_id"],))
+    assert any("missing_project_id" in str(row["proposed_change"]) for row in queued)
+
+
+def test_same_path_across_import_keys_still_supersedes(visual_env, tmp_db):
+    tmp_db.ensure_user("u_local", is_local=True)
+    entries = [{"client_key": "same", "relative_path": "A/image.png"}]
+    with TestClient(main.app) as client:
+        first = client.post(
+            "/api/visual-assets/import",
+            **folder_payload(entries, [("image.png", picture(color=(1, 2, 3)), "image/png")], key="folder-key-one"),
+        )
+        second = client.post(
+            "/api/visual-assets/import",
+            **folder_payload(entries, [("image.png", picture(color=(200, 2, 3)), "image/png")], key="folder-key-two"),
+        )
+    assert first.status_code == second.status_code == 201
+    old_id = first.json()["items"][0]["asset_id"]
+    newest = second.json()["items"][0]
+    assert newest["asset_id"] != old_id
+    assert newest["supersedes_asset_id"] == old_id
+
+
+def test_cancel_analysis_job_does_not_touch_review_status(visual_env, tmp_db):
+    tmp_db.ensure_user("u_local", is_local=True)
+    with TestClient(main.app) as client:
+        item = upload(client, picture(), auto=False).json()["items"][0]
+        store = visual_assets.get_visual_store()
+        store.create_job(item["asset_id"])
+        cancelled = client.post(f"/api/visual-assets/{item['asset_id']}/cancel")
+        assert cancelled.status_code == 200
+        body = cancelled.json()
+        assert body["processing_state"] == "cancelled"
+        assert body["review_status"] == "pending_review"
+
+
 def test_audit_masks_tokens(tmp_db):
     assert security.audit(
         "acl.denied",

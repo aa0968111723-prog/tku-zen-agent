@@ -254,7 +254,7 @@ async def import_visual_assets(
         raise HTTPException(status_code=422,detail={"code":"manifest_file_mismatch","message":"manifest 項目少於本次檔案數"})
     scoped_project = _owned_project_id(project_id, user_id)
     store = get_visual_store()
-    job = store.start_import(user_id,idempotency_key=idempotency_key,root_name=root_name,manifest=data,total_count=int(data.get("total_count") or len(entries)))
+    job = store.start_import(user_id,idempotency_key=idempotency_key,root_name=root_name,manifest=data,total_count=int(data.get("total_count") or len(entries)),project_id=scoped_project)
     created,errors,skipped = [],[],[]
     for index,upload in enumerate(files):
         entry = entries[index] if isinstance(entries[index],dict) else {}
@@ -407,6 +407,16 @@ async def analyze_one_visual_asset(asset_id: str,request: Request,user_id: str =
     except VisualAssetError as exc:
         raise _http_error(exc) from exc
     audit.write_audit(action="visual.analyze",actor_user_id=user_id,resource=asset_id,request=request)
+    return item
+
+
+@router.post("/visual-assets/{asset_id}/cancel")
+async def cancel_visual_asset_job(asset_id: str,request: Request,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    try:
+        item = get_visual_store().cancel_job(asset_id,user_id)
+    except VisualAssetError as exc:
+        raise _http_error(exc) from exc
+    audit.write_audit(action="visual.cancel",actor_user_id=user_id,resource=asset_id,request=request)
     return item
 
 

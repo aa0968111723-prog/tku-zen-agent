@@ -264,7 +264,8 @@ function uploadFiles() {
 async function uploadFolderBatches() {
   const files = visualState.uploadFiles;
   const allItems = files.map((file, index) => ({ client_key: file.webkitRelativePath || `${index}:${file.name}`, relative_path: file.webkitRelativePath || file.name, filename: file.name, size: file.size, last_modified: new Date(file.lastModified).toISOString() }));
-  const signature = allItems.map((item) => `${item.relative_path}:${item.size}:${item.last_modified}`).join("|");
+  const rootName = (files[0].webkitRelativePath || "folder").split("/")[0];
+  const signature = `${rootName}|${allItems.map((item) => item.relative_path).sort().join("|")}`;
   let hash = 2166136261; for (let i = 0; i < signature.length; i += 1) hash = Math.imul(hash ^ signature.charCodeAt(i), 16777619);
   const key = `folder-${(hash >>> 0).toString(16)}-${files.length}`;
   const created = []; const errors = [];

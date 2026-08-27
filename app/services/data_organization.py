@@ -773,10 +773,18 @@ class DataOrganizationService:
             if mime_type not in ALLOWED_MIME:
                 mime_type = next((candidate for candidate, suffix in ALLOWED_MIME.items() if suffix == path.suffix.lower()), mime_type)
             if mapped_asset_id and project_id:
-                self.visual_store._conn.execute(
-                    "UPDATE visual_assets SET project_id=?,updated_at=? WHERE id=? AND user_id=? AND (project_id='' OR project_id IS NULL)",
-                    (project_id[:160], now(), mapped_asset_id, user_id),
+                existing_scope = self.visual_store._rows(
+                    "SELECT project_id FROM visual_assets WHERE id=? AND user_id=?",
+                    (mapped_asset_id, user_id),
                 )
+                current_project = str((existing_scope[0]["project_id"] if existing_scope else "") or "")
+                if not current_project.strip():
+                    # Never guess project scope for old unscoped rows.
+                    self._review(
+                        user_id, mapped_asset_id,
+                        {"reason": "missing_project_id", "action": "needs_organization", "not_auto_assigned_to": project_id},
+                        0.0,
+                    )
             if not mapped_asset_id and mime_type in ALLOWED_MIME:
                 # Keep large local videos and already-organized photo trees in
                 # place.  We inspect image/document bytes for metadata, but

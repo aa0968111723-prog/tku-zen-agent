@@ -57,7 +57,7 @@ def test_migration_ledger_and_document_media_are_persistent(visual_env):
         assert "期初茶會" in item["ocr_text"]
         store = visual_assets.get_visual_store()
         versions = {row[0] for row in store._conn.execute("SELECT version FROM visual_schema_migrations")}
-        assert versions == {"0001_initial_visual_schema","0002_phase1_media_import","0003_insforge_visual_backend","0004_insforge_core_data_sync","0005_data_organization_depth","0006_audit_job_and_project_scope"}
+        assert versions == {"0001_initial_visual_schema","0002_phase1_media_import","0003_insforge_visual_backend","0004_insforge_core_data_sync","0005_data_organization_depth","0006_audit_job_and_project_scope","0007_import_project_and_cancel"}
         assert store._conn.execute("SELECT length(storage_path)>0 FROM visual_assets WHERE id=?",(item["asset_id"],)).fetchone()[0] == 1
         assert store._conn.execute("SELECT typeof(storage_path) FROM visual_assets WHERE id=?",(item["asset_id"],)).fetchone()[0] == "text"
 

@@ -39,6 +39,16 @@ def test_circuit_breaker_opens_after_threshold():
     assert breaker.allow()
 
 
+def test_circuit_breaker_closes_after_reset_window():
+    clock = {"now": 1.0}
+    breaker = CircuitBreaker(failure_threshold=2, reset_after_seconds=30, _now=lambda: clock["now"])
+    breaker.record_failure()
+    breaker.record_failure()
+    assert breaker.allow() is False
+    clock["now"] = 40.0
+    assert breaker.allow() is True
+
+
 def test_insforge_refuses_private_base_url(monkeypatch):
     reset_insforge_adapters()
     monkeypatch.setattr("app.config.INSFORGE_BASE_URL", "https://127.0.0.1:7130")

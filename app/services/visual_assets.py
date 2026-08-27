@@ -854,9 +854,15 @@ class VisualAssetStore:
         return out
 
     def create_job(self, asset_id: str) -> str:
-        jid = new_id("job")
         stamp = now()
         with self._lock:
+            inflight = self._conn.execute(
+                "SELECT id FROM visual_analysis_jobs WHERE asset_id=? AND status IN ('queued','processing','running','retrying') ORDER BY created_at DESC LIMIT 1",
+                (asset_id,),
+            ).fetchone()
+            if inflight:
+                return str(inflight[0])
+            jid = new_id("job")
             attempts = int(self._conn.execute("SELECT COUNT(*) FROM visual_analysis_jobs WHERE asset_id=?",(asset_id,)).fetchone()[0]) + 1
             self._conn.execute(
                 "INSERT INTO visual_analysis_jobs(id,asset_id,status,stage,progress,attempts,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -865,6 +871,26 @@ class VisualAssetStore:
             self._conn.execute("UPDATE visual_assets SET analysis_status='analyzing',processing_state='processing',updated_at=? WHERE id=?", (stamp,asset_id))
             self._conn.commit()
         return jid
+
+    def cancel_job(self, asset_id: str, user_id: str) -> dict[str, Any]:
+        asset = self.owned_asset(asset_id, user_id)
+        if not asset:
+            raise VisualAssetError("找不到可取消的素材", code="not_found")
+        stamp = now()
+        with self._lock:
+            self._conn.execute(
+                """UPDATE visual_analysis_jobs SET status='cancelled',stage='cancelled',progress=100,error_code='cancelled',
+                       error_message='使用者取消分析',updated_at=?
+                   WHERE asset_id=? AND status IN ('queued','processing','running','retrying')""",
+                (stamp, asset_id),
+            )
+            self._conn.execute(
+                """UPDATE visual_assets SET processing_state='cancelled',analysis_status='cancelled',updated_at=?
+                   WHERE id=? AND user_id=? AND processing_state IN ('queued','processing','running','retrying')""",
+                (stamp, asset_id, user_id),
+            )
+            self._conn.commit()
+        return self.get_asset(asset_id, user_id) or {}
 
     def update_job(self, job_id: str, *, status: str, stage: str, progress: int, error_code: str = "", error_message: str = "") -> None:
         canonical = canonicalize_job_status(status)
@@ -1235,11 +1261,12 @@ class VisualAssetStore:
 
     def start_import(
         self, user_id: str, *, idempotency_key: str, root_name: str,
-        manifest: dict[str, Any], total_count: int,
+        manifest: dict[str, Any], total_count: int, project_id: str = "",
     ) -> dict[str, Any]:
         key = idempotency_key.strip()[:160]
         if len(key) < 8:
             raise VisualAssetError("idempotency_key 至少需要 8 個字元", code="invalid_idempotency_key")
+        scoped_project = (project_id or "")[:160]
         with self._lock:
             row = self._conn.execute(
                 "SELECT id FROM visual_imports WHERE user_id=? AND idempotency_key=?", (user_id,key),
@@ -1248,15 +1275,15 @@ class VisualAssetStore:
             if row:
                 import_id = str(row[0])
                 self._conn.execute(
-                    "UPDATE visual_imports SET manifest_json=?,total_count=MAX(total_count,?),updated_at=? WHERE id=?",
-                    (dumps(manifest),total_count,stamp,import_id),
+                    "UPDATE visual_imports SET manifest_json=?,total_count=MAX(total_count,?),project_id=CASE WHEN project_id='' THEN ? ELSE project_id END,updated_at=? WHERE id=?",
+                    (dumps(manifest),total_count,scoped_project,stamp,import_id),
                 )
             else:
                 import_id = new_id("import")
                 self._conn.execute(
-                    """INSERT INTO visual_imports(id,user_id,idempotency_key,root_name,manifest_json,status,total_count,created_at,updated_at)
-                       VALUES(?,?,?,?,?,'pending_review',?,?,?)""",
-                    (import_id,user_id,key,root_name[:240],dumps(manifest),total_count,stamp,stamp),
+                    """INSERT INTO visual_imports(id,user_id,idempotency_key,root_name,manifest_json,status,total_count,project_id,created_at,updated_at)
+                       VALUES(?,?,?,?,?,'pending_review',?,?,?,?)""",
+                    (import_id,user_id,key,root_name[:240],dumps(manifest),total_count,scoped_project,stamp,stamp),
                 )
             self._conn.commit()
         return self.get_import(import_id,user_id) or {}
@@ -1271,6 +1298,8 @@ class VisualAssetStore:
         current_import = self._rows("SELECT * FROM visual_imports WHERE id=? AND user_id=?", (import_id,user_id))
         if not current_import:
             raise VisualAssetError("找不到匯入工作或沒有權限", code="not_found")
+        if not (project_id or "").strip():
+            project_id = str(current_import[0].get("project_id") or "")
         rel = self.safe_relative_path(relative_path, filename)
         key = (client_key or rel)[:240]
         digest = hashlib.sha256(content).hexdigest()
@@ -1286,6 +1315,21 @@ class VisualAssetStore:
         # Same relative path with a new digest is a new version, not an overwrite.
         # Keep the previous asset row; supersedes_asset_id records the lineage.
         previous_asset_id = str((existing or {}).get("asset_id") or "") if existing and (content_replaced or resync) else ""
+        if not previous_asset_id:
+            prior = self._rows(
+                """SELECT id,sha256 FROM visual_assets
+                   WHERE user_id=? AND relative_path=? AND COALESCE(source,'')!='derived_thumbnail'
+                   ORDER BY created_at DESC LIMIT 1""",
+                (user_id, rel),
+            )
+            if prior:
+                prior_digest = str(prior[0].get("sha256") or "")
+                if prior_digest == digest:
+                    item = self.get_asset(str(prior[0]["id"]), user_id)
+                    if item:
+                        return item, True
+                elif prior_digest:
+                    previous_asset_id = str(prior[0]["id"])
         stamp = now()
         item_id = str(existing.get("id")) if existing else new_id("import_item")
         attempts = int(existing.get("attempts") or 0) + 1 if existing else 1
@@ -1396,8 +1440,9 @@ class VisualAssetStore:
                 "UPDATE visual_assets SET review_status='verified',last_confirmed_at=?,updated_at=? WHERE id=? AND user_id=?",
                 (stamp,stamp,asset_id,user_id),
             )
+            # Person identity must stay probable until an explicit person confirm.
             self._conn.execute(
-                "UPDATE visual_observations SET status='verified',updated_at=? WHERE asset_id=? AND status IN ('probable','pending_review') AND review_action!='ignored'",
+                "UPDATE visual_observations SET status='verified',updated_at=? WHERE asset_id=? AND entity_type!='person' AND status IN ('probable','pending_review') AND review_action!='ignored'",
                 (stamp,asset_id),
             )
             self._conn.execute(
