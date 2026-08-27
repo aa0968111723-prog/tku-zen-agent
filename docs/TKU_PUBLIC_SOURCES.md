@@ -10,6 +10,7 @@
 | search_tku_public_info | 讀取白名單來源並抽取可搜尋文字 |
 | fetch_tku_public_source | 讀取指定官方來源，含網域白名單與雜湊 |
 | search_instagram_public_hashtag | 透過 Meta Graph API 搜尋授權範圍內的公開 hashtag 內容 |
+| search_instagram_public_account | 讀取指定公開專業帳號的公開資料與貼文 |
 
 ## 安全邊界
 
@@ -40,5 +41,6 @@ Instagram 公開 hashtag 搜尋需要 Meta App Review 與相應權限。未完�
 - POST /api/public-sources/search
 - GET /api/public-sources/{source_id}
 - POST /api/instagram/public/hashtag-search
+- POST /api/instagram/public/account-search
 
 以上 endpoint 會使用既有登入保護；Instagram 搜尋不會提供發文、留言、私訊或私人資料能力。
