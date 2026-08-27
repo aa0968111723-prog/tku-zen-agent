@@ -30,8 +30,17 @@ logger = logging.getLogger(__name__)
 
 
 def _http_error(exc: VisualAssetError) -> HTTPException:
-    status = 404 if exc.code == "not_found" else 413 if exc.code == "file_too_large" else 409 if exc.code in {"school_conflict","immutable_field","date_conflict","resync_required"} else 422
+    status = 404 if exc.code == "not_found" else 413 if exc.code == "file_too_large" else 409 if exc.code in {"school_conflict","immutable_field","date_conflict","resync_required","stale_update"} else 422
     return HTTPException(status_code=status,detail={"code":exc.code,"message":str(exc)})
+
+
+def _owned_project_id(project_id: str, user_id: str) -> str:
+    scoped = (project_id or "").strip()
+    if not scoped:
+        return ""
+    if not get_store().get_project(scoped, user_id):
+        raise HTTPException(status_code=422, detail={"code": "unknown_project", "message": "project 不屬於目前使用者"})
+    return scoped
 
 
 async def _safe_analyze(asset_id: str, user_id: str) -> None:
@@ -50,9 +59,10 @@ class AssetPatch(StrictRequest):
     commercial_use: Literal["allowed","not_allowed","unknown"] | None = None
     source: str | None = Field(default=None,max_length=120)
     source_metadata: dict[str,Any] | None = None
-    review_status: Literal["verified","probable","pending_review","conflicted","failed"] | None = None
+    review_status: Literal["verified","probable","pending_review","conflicted","failed","unknown","do_not_identify"] | None = None
     school: str | None = Field(default=None,max_length=120)
     club: str | None = Field(default=None,max_length=160)
+    if_match_updated_at: str | None = Field(default=None,max_length=40)
 
 
 class AnalyzeRequest(StrictRequest):
@@ -62,7 +72,7 @@ class AnalyzeRequest(StrictRequest):
 class ConfirmRequest(StrictRequest):
     asset_id: str = Field(min_length=8,max_length=80)
     entity_type: Literal["person","scene","event","club","date"]
-    action: Literal["confirm","correct","ignore"]
+    action: Literal["confirm","correct","ignore","do_not_identify"]
     entity_id: str = Field(default="",max_length=80)
     candidate_label: str = Field(default="",max_length=300)
     observation_id: str = Field(default="",max_length=80)
@@ -165,9 +175,7 @@ async def upload_visual_assets(
     project_id: str = Form(default="",max_length=160),
     user_id: str = Depends(auth.require_user),
 ):
-    scoped_project = (project_id or "").strip()
-    if scoped_project and not get_store().get_project(scoped_project, user_id):
-        raise HTTPException(status_code=422,detail={"code":"unknown_project","message":"project 不屬於目前使用者"})
+    scoped_project = _owned_project_id(project_id, user_id)
     if not files:
         raise HTTPException(status_code=422,detail="至少選擇一張圖片")
     if len(files) > config.VISUAL_MAX_BATCH:
@@ -244,11 +252,9 @@ async def import_visual_assets(
         raise HTTPException(status_code=422,detail={"code":"invalid_manifest","message":"manifest 必須含 items 陣列"}) from exc
     if len(entries) < len(files):
         raise HTTPException(status_code=422,detail={"code":"manifest_file_mismatch","message":"manifest 項目少於本次檔案數"})
-    scoped_project = (project_id or "").strip()
-    if scoped_project and not get_store().get_project(scoped_project, user_id):
-        raise HTTPException(status_code=422,detail={"code":"unknown_project","message":"project 不屬於目前使用者"})
+    scoped_project = _owned_project_id(project_id, user_id)
     store = get_visual_store()
-    job = store.start_import(user_id,idempotency_key=idempotency_key,root_name=root_name,manifest=data,total_count=int(data.get("total_count") or len(entries)))
+    job = store.start_import(user_id,idempotency_key=idempotency_key,root_name=root_name,manifest=data,total_count=int(data.get("total_count") or len(entries)),project_id=scoped_project)
     created,errors,skipped = [],[],[]
     for index,upload in enumerate(files):
         entry = entries[index] if isinstance(entries[index],dict) else {}
@@ -315,17 +321,19 @@ async def search_visual_assets(
     duplicate: str = Query(default="",pattern=r"^(|only|exclude)$"),
     people_min: int = Query(default=0,ge=0,le=1000),
     brightness_min: float = Query(default=0,ge=0,le=100),
-    verification_status: str = Query(default="",pattern=r"^(|verified|probable|pending_review|conflicted|failed)$"),
+    verification_status: str = Query(default="",pattern=r"^(|verified|probable|pending_review|conflicted|failed|unknown|do_not_identify)$"),
+    project_id: str = Query(default="",max_length=160),
     page: int = Query(default=1,ge=1,le=10000), limit: int = Query(default=30,ge=1,le=100),
     user_id: str = Depends(auth.require_user),
 ) -> dict[str,Any]:
     capped = min(limit,config.VISUAL_SEARCH_LIMIT)
+    scoped_project = _owned_project_id(project_id, user_id)
     store = get_visual_store()
     items,total,parsed = store.search(
         user_id,query=q,page=page,limit=capped,school=school,club=club,person=person,scene=scene,event=event,
         date_from=date_from,date_to=date_to,ratio=ratio,quality_min=quality_min,commercial_use=commercial_use,
         privacy=privacy,duplicate=duplicate,people_min=people_min,brightness_min=brightness_min,
-        verification_status=verification_status,
+        verification_status=verification_status,project_id=scoped_project,
     )
     store.record_learning(user_id,"search",query=q,payload={"filters":parsed,"result_ids":[i["asset_id"] for i in items]},outcome=str(total))
     audit.write_audit(action="visual.search",actor_user_id=user_id,resource="visual-assets",detail={"query":q[:200],"count":total},request=request)
@@ -334,7 +342,7 @@ async def search_visual_assets(
     # assets already visible to this user can be hydrated into the response.
     if config.INSFORGE_SYNC_MODE in {"dual", "insforge"}:
         try:
-            remote = get_insforge_adapters().search.search({"query": q[:1000], "filters": parsed, "owner_id": resolved_insforge_owner(store, user_id) or user_id, "page": page, "limit": capped})
+            remote = get_insforge_adapters().search.search({"query": q[:1000], "filters": parsed, "owner_id": resolved_insforge_owner(store, user_id) or user_id, "page": page, "limit": capped, "project_id": scoped_project})
             local_by_id = {str(item["asset_id"]): item for item in items}
             remote_items: list[dict[str,Any]] = []
             for row in remote:
@@ -353,20 +361,23 @@ async def search_visual_assets(
                 items = items[:capped]
             backend = {"name":"insforge","status":"active","remote_count":len(remote_items)}
         except InsForgeUnavailable as exc:
-            backend = {"name":"insforge","status":"blocked","code":BLOCKED_BY_EXTERNAL_DEPENDENCY,"message":str(exc),"fallback":"local"}
+            backend = {"name":"insforge","status":"blocked","code":BLOCKED_BY_EXTERNAL_DEPENDENCY,"message":"InsForge 無法使用，已改成本機搜尋","fallback":"local"}
+            logger.warning("insforge search blocked request_id_safe=%s", type(exc).__name__)
     return {"items":items,"total":total,"page":page,"limit":capped,"parsed_conditions":parsed,"backend":backend}
 
 
 @router.post("/visual-assets/search-by-image")
 async def search_visual_assets_by_image(
     request: Request,file: UploadFile = File(...),page: int = Query(default=1,ge=1,le=10000),limit: int = Query(default=30,ge=1,le=100),
+    project_id: str = Query(default="",max_length=160),
     user_id: str = Depends(auth.require_user),
 ) -> dict[str,Any]:
     try:
         content = await file.read(config.VISUAL_MAX_FILE_BYTES + 1)
         if len(content) > config.VISUAL_MAX_FILE_BYTES:
             raise VisualAssetError("查詢圖片超過大小限制",code="file_too_large")
-        items,total = get_visual_store().search_by_image(user_id,content,(file.content_type or "").lower(),page=page,limit=min(limit,config.VISUAL_SEARCH_LIMIT))
+        scoped_project = _owned_project_id(project_id, user_id)
+        items,total = get_visual_store().search_by_image(user_id,content,(file.content_type or "").lower(),page=page,limit=min(limit,config.VISUAL_SEARCH_LIMIT),project_id=scoped_project)
     except VisualAssetError as exc:
         raise _http_error(exc) from exc
     finally:
@@ -396,6 +407,16 @@ async def analyze_one_visual_asset(asset_id: str,request: Request,user_id: str =
     except VisualAssetError as exc:
         raise _http_error(exc) from exc
     audit.write_audit(action="visual.analyze",actor_user_id=user_id,resource=asset_id,request=request)
+    return item
+
+
+@router.post("/visual-assets/{asset_id}/cancel")
+async def cancel_visual_asset_job(asset_id: str,request: Request,user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
+    try:
+        item = get_visual_store().cancel_job(asset_id,user_id)
+    except VisualAssetError as exc:
+        raise _http_error(exc) from exc
+    audit.write_audit(action="visual.cancel",actor_user_id=user_id,resource=asset_id,request=request)
     return item
 
 
@@ -639,11 +660,12 @@ async def rollback_visual_sync(run_id: str, request: Request, user_id: str = Dep
 async def run_backend_sync(req: BackendSyncRequest, request: Request, user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
     service = InsForgeDataSyncAdapter()
     groups = set(req.resource_types)
+    scoped_project = _owned_project_id(req.project_id, user_id)
     try:
         if req.dry_run:
-            return await run_in_threadpool(service.preview,user_id,groups=groups,project_id=req.project_id)
+            return await run_in_threadpool(service.preview,user_id,groups=groups,project_id=scoped_project)
         result = await run_in_threadpool(
-            service.run, user_id, groups=groups, project_id=req.project_id,
+            service.run, user_id, groups=groups, project_id=scoped_project,
             idempotency_key=req.idempotency_key,
         )
     except ValueError as exc:
@@ -685,6 +707,7 @@ async def rollback_backend_sync(run_id: str, request: Request, user_id: str = De
 @router.get("/data-organization/inventory")
 async def get_data_inventory(refresh: bool = Query(default=False), project_id: str = Query(default="",max_length=160), user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
     service = DataOrganizationService()
+    project_id = _owned_project_id(project_id, user_id)
     if not refresh:
         existing = service.latest_inventory(user_id,project_id)
         if existing:
@@ -698,7 +721,7 @@ async def get_data_inventory(refresh: bool = Query(default=False), project_id: s
 @router.post("/data-organization/inventory",status_code=201)
 async def run_data_inventory(req: InventoryRequest, request: Request, user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
     try:
-        result = await run_in_threadpool(DataOrganizationService().inventory,user_id,project_id=req.project_id,persist=True)
+        result = await run_in_threadpool(DataOrganizationService().inventory,user_id,project_id=_owned_project_id(req.project_id, user_id),persist=True)
     except ValueError as exc:
         raise HTTPException(status_code=422,detail=str(exc)) from exc
     audit.write_audit(action="data.inventory",actor_user_id=user_id,resource=result["id"],detail={"statistics":result["statistics"]},request=request)
@@ -708,7 +731,7 @@ async def run_data_inventory(req: InventoryRequest, request: Request, user_id: s
 @router.post("/data-organization/organize",status_code=202)
 async def organize_existing_data(req: OrganizeRequest, request: Request, user_id: str = Depends(auth.require_user)) -> dict[str,Any]:
     try:
-        result = await run_in_threadpool(DataOrganizationService().run,user_id,idempotency_key=req.idempotency_key,project_id=req.project_id)
+        result = await run_in_threadpool(DataOrganizationService().run,user_id,idempotency_key=req.idempotency_key,project_id=_owned_project_id(req.project_id, user_id))
     except ValueError as exc:
         raise HTTPException(status_code=422,detail=str(exc)) from exc
     audit.write_audit(action="data.organize",actor_user_id=user_id,resource=result.get("id", ""),detail={"status":result.get("status"),"failed":result.get("failed_count",0)},request=request,ok=result.get("status") in {"completed","partial"})

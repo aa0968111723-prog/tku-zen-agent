@@ -157,6 +157,7 @@ class LibraryContextResolver:
             ratio=str(requirements.get("ratio") or ""), people_min=int(requirements.get("people_min") or 0),
             quality_min=float(requirements.get("quality_min") or 0), brightness_min=float(requirements.get("brightness_min") or 0),
             commercial_use=str(requirements.get("commercial_use") or ""), duplicate="exclude",
+            project_id=str(project.get("id") or ""), include_unscoped=True,
         )
         for item in items:
             item.setdefault("recommendation_reasons", []).insert(0, "符合 Library → Project → Scene → Shot 任務脈絡")

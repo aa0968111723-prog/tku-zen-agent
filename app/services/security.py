@@ -24,9 +24,11 @@ def mask_secret(value: str | None, *, keep: int = 4) -> str:
 
 
 def client_ip(request: Request | None) -> str:
-    if request is None or request.client is None:
+    if request is None:
         return "unknown"
-    return request.client.host or "unknown"
+    from .clientip import client_ip as real_client_ip
+
+    return real_client_ip(request) or "unknown"
 
 
 def audit(
@@ -61,6 +63,8 @@ def audit(
             ok=bool(success),
         )
         return True
+    except TypeError:
+        raise
     except Exception:
         logger.exception("audit write failed action=%s", action)
         return False

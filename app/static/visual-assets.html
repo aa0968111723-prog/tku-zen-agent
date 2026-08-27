@@ -73,6 +73,7 @@
         <div class="metadata-grid">
           <label><span>學校</span><input id="upload-school" value="淡江大學" maxlength="120"></label>
           <label><span>社團</span><input id="upload-club" value="領袖禪學社" maxlength="160"></label>
+          <label><span>專案 ID（空白則待整理，不會猜測）</span><input id="upload-project-id" maxlength="160" placeholder="選填，必須是自己的 project"></label>
           <label><span>原始來源</span><input id="upload-source" value="使用者上傳" maxlength="120"></label>
           <label><span>隱私</span><select id="upload-privacy"><option value="private">私人</option><option value="shared">登入成員共用</option><option value="public">公開資產</option></select></label>
           <label><span>商用權限</span><select id="upload-commercial"><option value="unknown">未知／待確認</option><option value="allowed">可商用</option><option value="not_allowed">不可商用</option></select></label>
@@ -90,6 +91,7 @@
         <div class="search-filters">
           <label>人物<input id="filter-person" maxlength="160"></label><label>場景<select id="filter-scene"><option value="">全部</option><option>校園</option><option>教室</option><option>禪堂</option><option>舞台</option><option>茶會</option><option>講座</option><option>社課</option><option>活動現場</option><option>海報</option></select></label>
           <label>學校<input id="filter-school" maxlength="120"></label><label>社團<input id="filter-club" maxlength="160"></label>
+          <label>專案 ID<input id="filter-project" maxlength="160"></label>
           <label>活動<input id="filter-event" maxlength="200"></label><label>比例<select id="filter-ratio"><option value="">全部</option><option>1:1</option><option>4:5</option><option>9:16</option><option>16:9</option><option value="landscape">橫式</option><option value="portrait">直式</option></select></label>
           <label>最低畫質<input id="filter-quality" type="number" min="0" max="100" value="0"></label><label>商用<select id="filter-commercial"><option value="">全部</option><option value="allowed">可商用</option><option value="not_allowed">不可商用</option><option value="unknown">待確認</option></select></label>
         </div>
