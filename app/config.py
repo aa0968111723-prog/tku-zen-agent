@@ -222,6 +222,15 @@ INSTAGRAM_ACCESS_TOKEN = _secret("INSTAGRAM_ACCESS_TOKEN")
 INSTAGRAM_BUSINESS_ACCOUNT_ID = (os.getenv("INSTAGRAM_BUSINESS_ACCOUNT_ID") or "").strip()
 INSTAGRAM_APP_ID = (os.getenv("INSTAGRAM_APP_ID") or "").strip()
 
+# ── 公開來源與 Instagram 公開 hashtag 搜尋（server-only）────────────
+INSTAGRAM_GRAPH_API_VERSION = (os.getenv("INSTAGRAM_GRAPH_API_VERSION") or "v21.0").strip()
+INSTAGRAM_PUBLIC_SEARCH_ENABLED = _bool("INSTAGRAM_PUBLIC_SEARCH_ENABLED", False)
+INSTAGRAM_API_TIMEOUT_SECONDS = max(3.0, float(os.getenv("INSTAGRAM_API_TIMEOUT_SECONDS") or 15))
+PUBLIC_SOURCE_TIMEOUT_SECONDS = max(3.0, float(os.getenv("PUBLIC_SOURCE_TIMEOUT_SECONDS") or 12))
+PUBLIC_SOURCE_MAX_BYTES = max(100_000, min(5_000_000, int(os.getenv("PUBLIC_SOURCE_MAX_BYTES") or 2_000_000)))
+PUBLIC_SOURCE_MAX_TEXT_CHARS = max(1_000, min(50_000, int(os.getenv("PUBLIC_SOURCE_MAX_TEXT_CHARS") or 12_000)))
+PUBLIC_SOURCE_MAX_SOURCES = max(1, min(8, int(os.getenv("PUBLIC_SOURCE_MAX_SOURCES") or 4)))
+
 # 對外發佈總開關。預設關閉：不設定就永遠是草稿模式，
 # 任何人（含管理者）都拿不到 can_approve / can_spend 權限。
 EXTERNAL_PUBLISH_ENABLED = _bool("EXTERNAL_PUBLISH_ENABLED", False)
