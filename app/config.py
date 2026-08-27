@@ -125,6 +125,11 @@ NVIDIA_OUTPUT_COST_PER_MILLION = float(
 FAL_KEY = (os.getenv("FAL_KEY") or "").strip()
 FAL_VISION_MODEL = (os.getenv("FAL_VISION_MODEL") or "google/gemini-2.5-flash").strip()
 FAL_IMAGE_MODEL = (os.getenv("FAL_IMAGE_MODEL") or "fal-ai/flux/schnell").strip()
+# Optional multimodal providers.  Empty means the adapter reports a partial
+# understanding instead of silently treating a poster frame as a full video
+# timeline or inventing an audio transcript.
+FAL_VIDEO_ENDPOINT = (os.getenv("FAL_VIDEO_ENDPOINT") or "").strip()
+AUDIO_TRANSCRIPTION_ENDPOINT = (os.getenv("AUDIO_TRANSCRIPTION_ENDPOINT") or "").strip()
 
 # 給介面下拉選單用：目前供應商已知支援 function calling 的模型。
 # 可用 LLM_KNOWN_MODELS（逗號分隔）覆寫。
@@ -276,6 +281,12 @@ HOST = (os.getenv("HOST") or "127.0.0.1").strip()
 PORT = int(os.getenv("PORT") or 8848)
 TOOL_TIMEOUT_SECONDS = float(os.getenv("TOOL_TIMEOUT_SECONDS") or 120)
 TOOL_MAX_ATTEMPTS = max(1, int(os.getenv("TOOL_MAX_ATTEMPTS") or 2))
+
+# duigao server-to-server integration.  This is an HMAC secret shared only by
+# the Supabase Edge Function and this service; it is never returned to clients.
+DUIGAO_CONTEXT_SHARED_SECRET = (os.getenv("DUIGAO_CONTEXT_SHARED_SECRET") or "").strip()
+DUIGAO_CONTEXT_MAX_SKEW_SECONDS = max(30, int(os.getenv("DUIGAO_CONTEXT_MAX_SKEW_SECONDS") or 300))
+DUIGAO_ANALYSIS_PROVIDER_EXTERNAL = _bool("DUIGAO_ANALYSIS_PROVIDER_EXTERNAL", True)
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 (ROOT / "data").mkdir(parents=True, exist_ok=True)
