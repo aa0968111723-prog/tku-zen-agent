@@ -26,7 +26,7 @@ HTML = (STATIC / "index.html").read_text(encoding="utf-8")
 CSS = (STATIC / "style.css").read_text(encoding="utf-8")
 JS = (STATIC / "app.js").read_text(encoding="utf-8")
 
-WIDTHS = [320, 360, 390, 430]
+WIDTHS = [320, 360, 390, 412, 430]
 
 
 # ── 靜態契約 ─────────────────────────────────────────────────
@@ -108,15 +108,33 @@ def test_decorative_svgs_are_hidden_from_screen_readers():
 # ── 實跑層 ───────────────────────────────────────────────────
 
 def _playwright_available() -> bool:
+    """套件存在不夠——必須真的能啟動 Chromium。
+
+    此環境若是 Termux/Android，Playwright 會丟 Unsupported platform: android，
+    不可把未執行的瀏覽器測試算 PASS。
+    """
     if not shutil.which("node"):
         return False
+    probe = (
+        "const path=require('path');const {createRequire}=require('module');"
+        "let chromium;"
+        "try{({chromium}=require('playwright'));}catch(e){"
+        "try{const root=require('child_process').execSync('npm root -g').toString().trim();"
+        "({chromium}=createRequire(path.join(root,'/'))('playwright'));}catch(err){process.exit(2);}}"
+        "chromium.launch().then(b=>b.close()).then(()=>process.exit(0)).catch(()=>process.exit(3));"
+    )
     try:
-        root = subprocess.run(
-            ["npm", "root", "-g"], capture_output=True, text=True, timeout=30, check=False
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
+        result = subprocess.run(
+            ["node", "-e", probe],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
         return False
-    return (Path(root) / "playwright").is_dir() or (ROOT / "node_modules" / "playwright").is_dir()
+    return result.returncode == 0
 
 
 def _free_port() -> int:
@@ -127,7 +145,7 @@ def _free_port() -> int:
 
 @pytest.mark.skipif(
     not _playwright_available(),
-    reason="BLOCKED_BY_EXTERNAL_DEPENDENCY: Chromium/playwright is not installed in this environment",
+    reason="BLOCKED_BY_EXTERNAL_DEPENDENCY: Chromium/playwright cannot launch in this environment",
 )
 def test_mobile_viewports_end_to_end(tmp_path):
     """在 320/360/390/430 實際跑一次，任何一項失敗都算失敗。"""

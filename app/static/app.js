@@ -63,6 +63,12 @@ const TOOL_LABELS = {
   search_social_references: "搜尋外校公開參考",
   compare_social_strategies: "比較外校社群策略",
   analyze_social_positioning: "分析社群定位",
+  list_tku_public_sources: "列出淡江公開來源",
+  search_tku_public_info: "搜尋淡江公開資訊",
+  fetch_tku_public_source: "讀取淡江官方來源",
+  search_instagram_public_hashtag: "搜尋 Instagram 公開標籤",
+  search_instagram_public_account: "讀取 Instagram 公開帳號",
+  search_perplexity_web: "搜尋最新公開網路資訊",
   create_social_post: "建立貼文草稿",
   create_social_carousel: "建立輪播草稿",
   create_social_story: "建立限動草稿",
@@ -85,6 +91,12 @@ const TOOL_PHASES = {
   search_social_references: ["research", "查詢公開參考資料"],
   compare_social_strategies: ["research", "整理公開參考資料"],
   analyze_social_positioning: ["research", "分析公開參考資料"],
+  list_tku_public_sources: ["research", "查詢公開參考資料"],
+  search_tku_public_info: ["research", "查詢公開參考資料"],
+  fetch_tku_public_source: ["research", "查詢公開參考資料"],
+  search_instagram_public_hashtag: ["research", "查詢公開參考資料"],
+  search_instagram_public_account: ["research", "查詢公開參考資料"],
+  search_perplexity_web: ["research", "查詢公開參考資料"],
   create_document: ["draft", "產生文件初稿"],
   create_slides: ["draft", "產生簡報初稿"],
   create_spreadsheet: ["draft", "產生表格初稿"],
@@ -148,19 +160,52 @@ function setOrb(status, label) {
   if (!orb) return;
   const names = {
     idle: "等待中",
+    queued: "排隊中",
     thinking: "正在思考",
+    searching: "正在搜尋",
+    running: "正在執行任務",
     asking: "需要你確認",
     complete: "任務完成",
     error: "需要處理",
   };
   const text = label || names[status] || names.idle;
-  orb.className = "ai-orb is-" + (status || "idle");
-  orb.setAttribute("aria-label", "禪光 AI：" + text);
-  $("ai-orb-label").textContent = text;
+  const cls = status || "idle";
+  orb.className = "ai-orb is-" + cls;
+  orb.setAttribute("aria-label", "禪光 AI：" + text + "，開啟任務摘要");
+  const labelNode = $("ai-orb-label");
+  if (labelNode) labelNode.textContent = text;
+  const statusNode = $("work-status");
+  if (statusNode) statusNode.textContent = text;
+  setTaskRail(cls, text);
   if (state.orbTimer) clearTimeout(state.orbTimer);
   if (status === "complete") {
     state.orbTimer = setTimeout(() => setOrb("idle"), 1600);
   }
+}
+
+function setTaskRail(status, text) {
+  const rail = $("task-rail");
+  if (!rail) return;
+  const map = {
+    queued: "queued",
+    thinking: "running",
+    searching: "running",
+    running: "running",
+    complete: "succeeded",
+    error: "failed",
+    asking: "running",
+  };
+  const kind = map[status];
+  if (!kind || status === "idle") {
+    rail.hidden = true;
+    rail.className = "task-rail";
+    return;
+  }
+  rail.hidden = false;
+  rail.className = "task-rail is-" + kind;
+  const label = $("task-rail-label");
+  if (label) label.textContent = text || "";
+  rail.setAttribute("aria-label", "任務進度：" + (text || kind));
 }
 
 function humanLabel(value, fallback = "處理任務") {
@@ -187,8 +232,112 @@ function applyViewport() {
   const vv = window.visualViewport;
   const h = vv ? Math.round(vv.height) : window.innerHeight;
   const top = vv ? Math.round(vv.offsetTop) : 0;
+  const kb = Math.max(0, Math.round(window.innerHeight - (top + h)));
   document.documentElement.style.setProperty("--app-height", h + "px");
   document.documentElement.style.setProperty("--app-top", top + "px");
+  document.documentElement.style.setProperty("--kb-inset", kb + "px");
+  const active = document.activeElement;
+  if (active && (active.id === "input" || (active.closest && active.closest(".composer")))) {
+    const composer = $("composer");
+    if (composer) {
+      const box = composer.getBoundingClientRect();
+      if (box.bottom > h - 2) composer.scrollIntoView({ block: "end", inline: "nearest" });
+    }
+  }
+}
+
+const MODE_PATHS = { ask: "/", generate: "/generate", template: "/templates", plan: "/prompt-library" };
+const MODE_FROM_PATH = { "/generate": "generate", "/templates": "template", "/prompt-library": "plan" };
+
+function currentPath() {
+  return (location.pathname.replace(/\/$/, "") || "/");
+}
+
+function readModeFromLocation() {
+  const q = new URLSearchParams(location.search).get("mode");
+  if (q && MODE_HINTS[q]) return q;
+  return MODE_FROM_PATH[currentPath()] || "ask";
+}
+
+function syncModeUrl(mode) {
+  const url = new URL(location.href);
+  url.searchParams.set("mode", mode);
+  const expectedPath = MODE_PATHS[mode] || "/";
+  const path = currentPath();
+  if (MODE_FROM_PATH[path] && MODE_FROM_PATH[path] !== mode) {
+    url.pathname = expectedPath === "/" ? "/" : expectedPath;
+  }
+  if (url.href !== location.href) history.replaceState(history.state, "", url);
+}
+
+function setMode(mode, opts = {}) {
+  const next = MODE_HINTS[mode] ? mode : "ask";
+  state.mode = next;
+  const tabs = document.querySelectorAll('[role="tab"][data-mode], .mode-chip[data-mode]');
+  tabs.forEach((chip) => {
+    const active = chip.dataset.mode === next;
+    chip.classList.toggle("is-active", active);
+    chip.setAttribute("aria-selected", String(active));
+    chip.setAttribute("tabindex", active ? "0" : "-1");
+    if (chip.hasAttribute("aria-pressed")) chip.setAttribute("aria-pressed", String(active));
+  });
+  const panel = $("panel-mode");
+  const tab = document.getElementById("tab-" + next);
+  if (panel && tab) panel.setAttribute("aria-labelledby", tab.id);
+  if ($("mode-hint")) $("mode-hint").textContent = MODE_HINTS[next] || MODE_HINTS.ask;
+  if (!opts.skipUrl) syncModeUrl(next);
+  if (!opts.silent && $("input") && !$("composer").hidden) $("input").focus();
+}
+
+function onModeTabKey(e) {
+  const tabs = [...document.querySelectorAll('.mode-tabs [role="tab"]')];
+  if (!tabs.length) return;
+  const i = tabs.indexOf(document.activeElement);
+  if (i < 0) return;
+  let next = -1;
+  if (e.key === "ArrowRight" || e.key === "ArrowDown") next = (i + 1) % tabs.length;
+  else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = (i - 1 + tabs.length) % tabs.length;
+  else if (e.key === "Home") next = 0;
+  else if (e.key === "End") next = tabs.length - 1;
+  if (next < 0) return;
+  e.preventDefault();
+  tabs[next].focus();
+  setMode(tabs[next].dataset.mode);
+}
+
+let lastFocus = null;
+function rememberFocus() {
+  lastFocus = document.activeElement;
+}
+
+function restoreFocus(fallback) {
+  const target = lastFocus && document.contains(lastFocus) ? lastFocus : fallback;
+  if (target && typeof target.focus === "function") target.focus();
+}
+
+function pushSheetState(name) {
+  try { history.pushState({ zenSheet: name }, ""); } catch { /* ignore */ }
+}
+
+function closeVisibleSheets(fromPop) {
+  const order = [
+    ["composer-plus-sheet", closeComposerPlus],
+    ["more-actions-sheet", closeMoreActions],
+    ["app-menu-sheet", closeAppMenu],
+    ["preflight-sheet", closePreflight],
+    ["task-summary-sheet", closeTaskSummary],
+    ["term-modal", closeTerm],
+    ["session-sheet", closeSessionSheet],
+    ["settings", closeSettings],
+  ];
+  for (const [id, fn] of order) {
+    const node = $(id);
+    if (node && !node.hidden) {
+      fn(true);
+      return true;
+    }
+  }
+  return false;
 }
 
 function missingStatus(resp) {
@@ -946,6 +1095,8 @@ function addUser(text) {
 function classifyError(text, code) {
   const raw = String(code || "") + " " + String(text || "");
   if (/401|403|權限|授權/.test(raw)) return ["權限不足", "請確認授權狀態後再試。", "permission"];
+  if (/402|429|額度|quota|rate limit|用量已滿/i.test(raw)) return ["額度不足", "目前額度已用完，請稍後再試或改用較短的需求。", "quota"];
+  if (/provider|供應商|模型無法|ECONNREFUSED|503/i.test(raw)) return ["AI 服務暫時無法使用", "供應來源沒有回應。請稍後重試。", "provider"];
   if (/vision|visual|圖片理解|視覺服務/i.test(raw)) return ["AI 視覺服務暫時無法使用", "可改用文字描述圖片內容，或稍後重試。", "visual"];
   if (/缺少|待填|必填/.test(raw)) return ["缺少資料", "補上關鍵資料，或先改成草稿。", "missing"];
   if (/研究|來源|搜尋/.test(raw)) return ["外部研究失敗", "可以重試，或改用已知資料完成草稿。", "research"];
@@ -973,8 +1124,8 @@ function addError(turn, text, retryFn, code) {
     retryStep.addEventListener("click", () => controlTask("retry", turn));
     actions.appendChild(retryStep);
   }
-  if (["missing", "busy", "research", "visual"].includes(kind)) {
-    const simple = el("button", "ghost", kind === "missing" ? "返回補資料" : kind === "visual" ? "改用文字描述" : "改用簡單模式");
+  if (["missing", "busy", "research", "visual", "quota", "provider", "permission"].includes(kind)) {
+    const simple = el("button", "ghost", kind === "missing" ? "返回補資料" : kind === "visual" ? "改用文字描述" : kind === "permission" ? "返回工作台" : kind === "quota" ? "縮短需求再試" : "改用簡單模式");
     simple.type = "button";
     simple.addEventListener("click", () => {
       if (kind === "visual") {
@@ -1104,7 +1255,7 @@ async function refreshProject() {
 }
 
 async function controlTask(action, turn) {
-  const label = { pause: "任務已暫停", retry: "正在準備重試失敗步驟", cancel: "已停止生成" }[action];
+  const label = { pause: "任務已暫停", retry: "正在準備重試失敗步驟", cancel: "已停止生成", resume: "正在繼續任務" }[action];
   if (action === "cancel") {
     // 先請伺服器停止（釋放 session 執行鎖與模型呼叫），再中斷本地連線
     requestStreamCancel();
@@ -1134,6 +1285,10 @@ async function controlTask(action, turn) {
     } else if (action === "retry") {
       setFlowStep(turn, "draft", "running", "準備重試失敗步驟", "只會重做尚未完成的部分。");
       runTask("接續剛才，只重試失敗步驟。");
+    } else if (action === "resume") {
+      setFlowStep(turn, "draft", "running", "繼續任務", "從暫停處接續。");
+      setOrb("running", "正在繼續任務");
+      runTask("接續剛才。");
     } else {
       setFlowStep(turn, "verify", "failed", "已停止生成", "已保留完成的內容與產出。");
       getTimeline(turn).querySelector(".timeline-title").textContent = "任務已停止";
@@ -1141,7 +1296,7 @@ async function controlTask(action, turn) {
     }
     announce(label);
   } catch (err) {
-    addError(turn, "目前無法" + (action === "pause" ? "暫停" : action === "retry" ? "重試" : "停止") + "任務，請稍後再試。", null, "network");
+    addError(turn, "目前無法" + (action === "pause" ? "暫停" : action === "retry" ? "重試" : action === "resume" ? "繼續" : "停止") + "任務，請稍後再試。", null, "network");
   }
 }
 
@@ -1162,8 +1317,11 @@ function updateTaskDock(summary) {
 }
 
 function openTaskSummary() {
+  rememberFocus();
   const body = $("task-summary-body");
   body.replaceChildren();
+  const actions = $("task-summary-actions");
+  if (actions) actions.replaceChildren();
   const summary = state.taskSummary;
   if (state.preflight) body.appendChild(renderMiniSummary(state.preflight, true));
   // 任務摘要卡要能看到可信度（規格十二）：本輪的研究狀態一併呈現
@@ -1173,24 +1331,60 @@ function openTaskSummary() {
       "研究狀態：" + lastResearchStatus.label
     ));
   }
-  if (!summary && !state.preflight) body.appendChild(el("p", "empty", "任務摘要還在建立中。"));
+  if (!summary && !state.preflight && !state.busy) {
+    const empty = el("div", "empty-state");
+    empty.appendChild(el("strong", null, "目前沒有進行中的任務"));
+    empty.appendChild(document.createTextNode("在下方輸入需求，或用快速操作開始。"));
+    body.appendChild(empty);
+  }
+  if (state.busy && !summary) body.appendChild(el("p", "empty", "任務正在執行，進度會同步更新。"));
   if (summary) {
     body.appendChild(el("p", "modal-lede", "這是可理解的任務狀態，不包含 AI 的內部推理。"));
     const list = el("ol", "task-summary-list");
     (summary.steps || []).forEach((step) => {
-      const status = { completed: "已完成", running: "執行中", failed: "需處理", pending: "等待中" }[step.status] || "等待中";
+      const status = { completed: "已完成", running: "執行中", failed: "需處理", pending: "等待中", queued: "排隊中" }[step.status] || "等待中";
       list.appendChild(el("li", null, step.description + "（" + status + "）" + (step.note ? "：" + step.note : "")));
     });
     body.appendChild(list);
     if (summary.next_action) body.appendChild(el("p", "muted", "建議下一步：" + summary.next_action));
   }
+  if (actions) {
+    const turn = state.activeTurn || $("chat").lastElementChild;
+    const wf = summary && summary.workflow_status;
+    if (state.busy || wf === "in_progress") {
+      const stop = el("button", "ghost", "停止");
+      stop.type = "button";
+      stop.addEventListener("click", () => { closeTaskSummary(); controlTask("cancel", turn); });
+      actions.appendChild(stop);
+    }
+    if (wf === "failed" || wf === "blocked") {
+      const retry = el("button", "primary", "重試");
+      retry.type = "button";
+      retry.addEventListener("click", () => { closeTaskSummary(); controlTask("retry", turn); });
+      actions.appendChild(retry);
+    }
+    if (wf === "paused" || wf === "cancelled") {
+      const cont = el("button", "primary", "繼續");
+      cont.type = "button";
+      cont.addEventListener("click", () => { closeTaskSummary(); controlTask("resume", turn); });
+      actions.appendChild(cont);
+    }
+  }
   $("task-summary-sheet").hidden = false;
+  if (!(history.state && history.state.zenSheet === "task-summary")) pushSheetState("task-summary");
   trapFocus($("task-summary-sheet").querySelector(".modal-card"), closeTaskSummary);
 }
 
-function closeTaskSummary() {
+function closeTaskSummary(fromPop) {
+  const sheet = $("task-summary-sheet");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "task-summary") {
+    history.back();
+    return;
+  }
   releaseTrap();
-  $("task-summary-sheet").hidden = true;
+  sheet.hidden = true;
+  restoreFocus($("ai-orb"));
 }
 
 function pushToolKey(turn, name, explicit) {
@@ -1651,17 +1845,25 @@ function renderPreflight() {
 function openPreflight(text) {
   const clean = (text || $("input").value).trim();
   if (!clean || state.busy) return;
+  rememberFocus();
   state.preflight = buildPreflight(clean);
   $("preflight-sheet").hidden = false;
   renderPreflight();
+  if (!(history.state && history.state.zenSheet === "preflight")) pushSheetState("preflight");
   trapFocus($("preflight-sheet").querySelector(".modal-card"), closePreflight);
 }
 
-function closePreflight() {
+function closePreflight(fromPop) {
+  const sheet = $("preflight-sheet");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "preflight") {
+    history.back();
+    return;
+  }
   releaseTrap();
-  $("preflight-sheet").hidden = true;
+  sheet.hidden = true;
   setOrb("idle");
-  $("input").focus();
+  restoreFocus($("input"));
 }
 
 function preflightPrompt(draft) {
@@ -1810,6 +2012,7 @@ async function runTask(text, attachments = [], draft = null, displayText = "") {
   $("input").value = "";
   $("input").style.height = "auto";
   announce("處理中");
+  setOrb("queued", "排隊中");
 
   const turn = newTurn(text);
   state.activeTurn = turn;
@@ -1855,8 +2058,14 @@ async function runTask(text, attachments = [], draft = null, displayText = "") {
     }
     if (resp.status === 429) {
       const detail = await readDetail(resp);
-      addError(turn, detail || "嘗試次數過多，請稍後再試", retry);
+      addError(turn, detail || "嘗試次數過多，請稍後再試", retry, "quota");
       announce(detail || "請稍後再試");
+      return;
+    }
+    if (resp.status === 402) {
+      const detail = await readDetail(resp);
+      addError(turn, detail || "額度不足，請稍後再試", retry, "quota");
+      announce("額度不足");
       return;
     }
     if (resp.status >= 500) {
@@ -1979,6 +2188,7 @@ function handleEvent(turn, ev, retry) {
 
     case "retrieval_started":
       setFlowStep(turn, "research", "running", "查詢社團資料", "正在整理與任務相關的資料。");
+      setOrb("searching");
       break;
 
     case "retrieval_result":
@@ -2001,6 +2211,7 @@ function handleEvent(turn, ev, retry) {
     case "tool_started": {
       const phase = TOOL_PHASES[ev.name] || ["draft", "產生初稿"];
       setFlowStep(turn, phase[0], "running", phase[1], "正在處理這個步驟。");
+      setOrb(phase[0] === "research" ? "searching" : "running");
       break;
     }
 
@@ -2035,6 +2246,7 @@ function handleEvent(turn, ev, retry) {
       progressLine(turn, "clarify", "?", "需要確認研究對象");
       finishStep(turn, "clarify", false);
       renderClarification(turn, ev);
+      setOrb("asking", "需要你確認");
       announce("需要確認研究對象");
       break;
 
@@ -2071,11 +2283,13 @@ function handleEvent(turn, ev, retry) {
     case "task_paused":
       progressLine(turn, "workflow-status", "Ⅱ", "任務已暫停", "可按繼續，或說「接續剛才」");
       finishStep(turn, "workflow-status", true);
+      setOrb("idle", "任務已暫停");
       break;
 
     case "task_resumed":
       progressLine(turn, "workflow-status", "▶", "任務已恢復", ev.summary && ev.summary.next_action ? ev.summary.next_action : "");
       finishStep(turn, "workflow-status", true);
+      setOrb("running", "正在繼續任務");
       break;
 
     case "task_retry_ready":
@@ -2336,15 +2550,24 @@ async function loadHomeLists() {
 }
 
 function openSessionSheet() {
+  rememberFocus();
   const sheet = $("session-sheet");
   sheet.hidden = false;
+  if (!(history.state && history.state.zenSheet === "session")) pushSheetState("session");
   trapFocus(sheet.querySelector(".modal-card"), closeSessionSheet);
   loadSessionSheet();
 }
 
-function closeSessionSheet() {
+function closeSessionSheet(fromPop) {
+  const sheet = $("session-sheet");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "session") {
+    history.back();
+    return;
+  }
   releaseTrap();
-  $("session-sheet").hidden = true;
+  sheet.hidden = true;
+  restoreFocus($("more-actions-btn") || $("input"));
 }
 
 async function loadSessionSheet() {
@@ -2406,22 +2629,35 @@ function researchPrompt(school, need) {
   ].join("\n");
 }
 
+function applyQuickAction(action) {
+  if (action === "continue") {
+    openSessionSheet();
+    return;
+  }
+  if (action === "progress") {
+    openTaskSummary();
+    return;
+  }
+  const quickPrompts = {
+    ig: "幫我做一份網宣草稿，時間與地點未確認請標示待填。",
+    research: "幫我研究其他學校的公開社群做法，整理可供淡江參考的方向。",
+    ...PROMPTS,
+  };
+  if (!quickPrompts[action]) return;
+  $("input").value = quickPrompts[action];
+  $("input").focus();
+  $("input").dispatchEvent(new Event("input"));
+}
+
 $("quick-actions").addEventListener("click", (e) => {
+  const more = e.target.closest("#more-actions-btn, button[data-more]");
+  if (more) {
+    openMoreActions();
+    return;
+  }
   const btn = e.target.closest("button[data-action]");
   if (!btn) return;
-  const action = btn.dataset.action;
-  if (action === "continue") openSessionSheet();
-  else {
-    const quickPrompts = {
-      ig: "幫我做一份網宣草稿，時間與地點未確認請標示待填。",
-      research: "幫我研究其他學校的公開社群做法，整理可供淡江參考的方向。",
-      ...PROMPTS,
-    };
-    if (!quickPrompts[action]) return;
-    $("input").value = quickPrompts[action];
-    $("input").focus();
-    $("input").dispatchEvent(new Event("input"));
-  }
+  applyQuickAction(btn.dataset.action);
 });
 
 $("suggestions").addEventListener("click", (e) => {
@@ -2432,18 +2668,10 @@ $("suggestions").addEventListener("click", (e) => {
   $("input").focus();
 });
 
-document.querySelectorAll(".mode-chip").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    state.mode = btn.dataset.mode || "ask";
-    document.querySelectorAll(".mode-chip").forEach((chip) => {
-      const active = chip === btn;
-      chip.classList.toggle("is-active", active);
-      chip.setAttribute("aria-pressed", String(active));
-    });
-    $("mode-hint").textContent = MODE_HINTS[state.mode] || MODE_HINTS.ask;
-    $("input").focus();
-  });
+document.querySelectorAll(".mode-chip, .mode-tabs [role='tab']").forEach((btn) => {
+  btn.addEventListener("click", () => setMode(btn.dataset.mode || "ask"));
 });
+document.querySelector(".mode-tabs")?.addEventListener("keydown", onModeTabKey);
 
 document.querySelectorAll("[data-back]").forEach((btn) => {
   btn.addEventListener("click", () => showPanel(btn.dataset.back || "home"));
@@ -2529,21 +2757,112 @@ function releaseTrap() {
 /* ── 設定抽屜 ──────────────────────────────────────── */
 
 function openSettings() {
+  rememberFocus();
   $("settings").hidden = false;
   $("settings-backdrop").hidden = false;
+  if (!(history.state && history.state.zenSheet === "settings")) pushSheetState("settings");
   trapFocus($("settings"), closeSettings);
 }
 
-function closeSettings() {
+function closeSettings(fromPop) {
+  const sheet = $("settings");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "settings") {
+    history.back();
+    return;
+  }
   releaseTrap();
-  $("settings").hidden = true;
+  sheet.hidden = true;
   $("settings-backdrop").hidden = true;
-  $("settings-btn").focus();
+  restoreFocus($("more-menu-btn") || $("settings-btn"));
+}
+
+function openAppMenu() {
+  rememberFocus();
+  $("app-menu-sheet").hidden = false;
+  if (!(history.state && history.state.zenSheet === "app-menu")) pushSheetState("app-menu");
+  trapFocus($("app-menu-sheet").querySelector(".modal-card"), closeAppMenu);
+}
+
+function closeAppMenu(fromPop) {
+  const sheet = $("app-menu-sheet");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "app-menu") {
+    history.back();
+    return;
+  }
+  releaseTrap();
+  sheet.hidden = true;
+  restoreFocus($("more-menu-btn"));
+}
+
+function openMoreActions() {
+  rememberFocus();
+  $("more-actions-sheet").hidden = false;
+  if (!(history.state && history.state.zenSheet === "more-actions")) pushSheetState("more-actions");
+  trapFocus($("more-actions-sheet").querySelector(".modal-card"), closeMoreActions);
+}
+
+function closeMoreActions(fromPop) {
+  const sheet = $("more-actions-sheet");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "more-actions") {
+    history.back();
+    return;
+  }
+  releaseTrap();
+  sheet.hidden = true;
+  restoreFocus($("more-actions-btn") || $("input"));
+}
+
+function openComposerPlus() {
+  rememberFocus();
+  $("composer-plus-sheet").hidden = false;
+  if (!(history.state && history.state.zenSheet === "composer-plus")) pushSheetState("composer-plus");
+  trapFocus($("composer-plus-sheet").querySelector(".modal-card"), closeComposerPlus);
+}
+
+function closeComposerPlus(fromPop) {
+  const sheet = $("composer-plus-sheet");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "composer-plus") {
+    history.back();
+    return;
+  }
+  releaseTrap();
+  sheet.hidden = true;
+  restoreFocus($("composer-plus") || $("input"));
 }
 
 $("settings-btn").addEventListener("click", openSettings);
 $("settings-close").addEventListener("click", closeSettings);
 $("settings-backdrop").addEventListener("click", closeSettings);
+$("more-menu-btn")?.addEventListener("click", openAppMenu);
+$("app-menu-close")?.addEventListener("click", closeAppMenu);
+$("app-menu-sheet")?.addEventListener("click", (e) => { if (e.target.id === "app-menu-sheet") closeAppMenu(); });
+$("open-settings-from-menu")?.addEventListener("click", () => {
+  closeAppMenu(true);
+  try { history.replaceState({ zenSheet: "settings" }, ""); } catch { /* ignore */ }
+  openSettings();
+});
+$("more-actions-close")?.addEventListener("click", closeMoreActions);
+$("more-actions-sheet")?.addEventListener("click", (e) => { if (e.target.id === "more-actions-sheet") closeMoreActions(); });
+$("more-actions-list")?.addEventListener("click", (e) => {
+  const progress = e.target.closest("#more-progress-btn");
+  if (progress) {
+    closeMoreActions(true);
+    openTaskSummary();
+    return;
+  }
+  const btn = e.target.closest("button[data-action]");
+  if (!btn) return;
+  closeMoreActions(true);
+  applyQuickAction(btn.dataset.action);
+});
+$("composer-plus")?.addEventListener("click", openComposerPlus);
+$("composer-plus-close")?.addEventListener("click", closeComposerPlus);
+$("composer-plus-sheet")?.addEventListener("click", (e) => { if (e.target.id === "composer-plus-sheet") closeComposerPlus(); });
+$("ai-orb")?.addEventListener("click", openTaskSummary);
 
 $("logout-btn").addEventListener("click", async () => {
   const hint = $("logout-hint");
@@ -2660,6 +2979,7 @@ async function openTerm() {
     }
     $("term-status").textContent = data.updated_at ? "最後更新：" + data.updated_at : "尚未設定過";
     $("term-modal").hidden = false;
+    if (!(history.state && history.state.zenSheet === "term")) pushSheetState("term");
     trapFocus($("term-modal").querySelector(".modal-card"), closeTerm);
   } catch (err) {
     if (err.message !== "needs-auth") announce(BUSY_TEXT);
@@ -2668,9 +2988,16 @@ async function openTerm() {
   }
 }
 
-function closeTerm() {
+function closeTerm(fromPop) {
+  const sheet = $("term-modal");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "term") {
+    history.back();
+    return;
+  }
   releaseTrap();
-  $("term-modal").hidden = true;
+  sheet.hidden = true;
+  restoreFocus($("term-btn") || $("more-menu-btn"));
 }
 
 async function saveTerm() {
@@ -2782,6 +3109,7 @@ $("clear-input").addEventListener("click", () => {
   $("input").value = "";
   $("input").style.height = "auto";
   clearAttachments();
+  closeComposerPlus(true);
   $("input").focus();
   announce("已清除輸入內容");
 });
@@ -2789,6 +3117,7 @@ $("attachment").addEventListener("change", async () => {
   const file = $("attachment").files && $("attachment").files[0];
   $("attachment").value = "";
   if (!file) return;
+  closeComposerPlus(true);
   if (file.type.startsWith("image/")) {
     if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
       announce("請選擇 JPG、PNG 或 WebP 圖片。");
@@ -2825,7 +3154,7 @@ $("voice-input").addEventListener("click", () => {
   recognition.interimResults = true;
   recognition.continuous = false;
   let lastVoiceChunk = "";
-  $("voice-input").textContent = "停止";
+  $("voice-input").innerHTML = "停止<span class=\"muted\">點一下結束</span>";
   recognition.onresult = (event) => {
     const words = [...event.results].map((result) => result[0].transcript).join("").trim();
     // 語音結果附加在既有內容之後（中間補空格），不覆蓋手動輸入；
@@ -2841,7 +3170,7 @@ $("voice-input").addEventListener("click", () => {
     field.dispatchEvent(new Event("input"));
   };
   recognition.onerror = () => announce("語音輸入沒有完成，請改用文字補充。");
-  recognition.onend = () => { state.voice = null; $("voice-input").textContent = "語音"; $("input").focus(); };
+  recognition.onend = () => { state.voice = null; $("voice-input").innerHTML = "語音<span class=\"muted\">說完後會填入輸入框</span>"; $("input").focus(); };
   recognition.start();
   announce("正在聆聽，說完後會填入輸入框。");
 });
@@ -2853,7 +3182,7 @@ $("input").addEventListener("keydown", (e) => {
 });
 $("input").addEventListener("input", () => {
   $("input").style.height = "auto";
-  $("input").style.height = Math.min($("input").scrollHeight, 160) + "px";
+  $("input").style.height = Math.min(Math.max($("input").scrollHeight, 44), 120) + "px";
 });
 
 $("preflight-close").addEventListener("click", closePreflight);
@@ -2873,11 +3202,20 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   // 焦點陷阱堆疊會自行處理 Escape（只關最上層）——避免一次關掉多層
   if (trapStack.length) return;
-  if (!$("preflight-sheet").hidden) closePreflight();
+  if ($("composer-plus-sheet") && !$("composer-plus-sheet").hidden) closeComposerPlus();
+  else if ($("more-actions-sheet") && !$("more-actions-sheet").hidden) closeMoreActions();
+  else if ($("app-menu-sheet") && !$("app-menu-sheet").hidden) closeAppMenu();
+  else if (!$("preflight-sheet").hidden) closePreflight();
   else if (!$("task-summary-sheet").hidden) closeTaskSummary();
   else if (!$("term-modal").hidden) closeTerm();
   else if (!$("session-sheet").hidden) closeSessionSheet();
   else if (!$("settings").hidden) closeSettings();
+});
+
+window.addEventListener("popstate", () => {
+  if (closeVisibleSheets(true)) return;
+  const mode = readModeFromLocation();
+  if (mode !== state.mode) setMode(mode, { skipUrl: true, silent: true });
 });
 
 /* ── Instagram 狀態 / 啟動 ─────────────────────────── */
@@ -2959,7 +3297,10 @@ async function init() {
     state.health = h;
     fillModels(h);
     $("destination").value = h.destination || "local";
-    if (h.term && h.term.label) $("term-label").textContent = h.term.label;
+    if (h.term && h.term.label) {
+      $("term-label").textContent = h.term.label;
+      if ($("project-name")) $("project-name").textContent = h.term.label;
+    }
     const notices = [];
     if (h.term && h.term.configured === false) {
       notices.push("本學期資料還沒填。產出裡的時間地點可能會是「待填」，可到設定的管理入口補上。");
@@ -2968,6 +3309,7 @@ async function init() {
     await loadIgStatus();
     await loadHomeLists();
     if (state.isAdmin) setAdminTools(true, "已進入管理。");
+    setMode(readModeFromLocation(), { silent: true });
     showPanel("home");
     $("input").focus();
   } catch (err) {
@@ -2978,6 +3320,7 @@ async function init() {
 
 (async function boot() {
   applyViewport();
+  setMode(readModeFromLocation(), { silent: true });
   window.visualViewport?.addEventListener("resize", applyViewport);
   window.visualViewport?.addEventListener("scroll", applyViewport);
   window.addEventListener("resize", applyViewport);
