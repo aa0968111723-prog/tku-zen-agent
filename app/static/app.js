@@ -41,10 +41,43 @@ const FLOW_STEPS = [
   ["verify", "最後檢查", "檢查待填資訊與內容品質"],
 ];
 const TOOL_LABELS = {
-  create_social_post: "建立社群貼文",
-  create_social_carousel: "建立 IG 輪播",
-  create_social_story: "建立 IG 限時動態",
+  // 後端 app/tools/__init__.py LABELS 的完整對照（照抄同名中文；
+  // tests/test_phase5_frontend.py 會逐鍵比對）。
+  // 注意順序：humanLabel 會做子字串取代，長鍵名（update_activity_task）
+  // 必須排在其前綴（update_activity）之前，否則會被切壞。
+  search_knowledge: "搜尋社團知識庫",
+  search_previous_examples: "搜尋歷年範例",
+  search_visual_library: "搜尋視覺素材庫",
+  get_current_term: "查本學期資料",
+  create_spreadsheet: "建立試算表",
+  create_document: "建立文件",
+  create_slides: "建立簡報",
+  create_google_form: "建立 Google 表單",
+  add_activity_task: "新增活動待辦",
+  update_activity_task: "更新活動待辦",
+  update_activity: "更新活動資料",
+  create_activity: "建立活動資料",
+  get_activity_status: "檢查活動進度",
+  list_activities: "列出活動",
+  read_artifact: "讀取上一份產出",
+  search_social_references: "搜尋外校公開參考",
+  compare_social_strategies: "比較外校社群策略",
+  analyze_social_positioning: "分析社群定位",
+  list_tku_public_sources: "列出淡江公開來源",
+  search_tku_public_info: "搜尋淡江公開資訊",
+  fetch_tku_public_source: "讀取淡江官方來源",
+  search_instagram_public_hashtag: "搜尋 Instagram 公開標籤",
+  search_instagram_public_account: "讀取 Instagram 公開帳號",
+  search_perplexity_web: "搜尋最新公開網路資訊",
+  create_social_post: "建立貼文草稿",
+  create_social_carousel: "建立輪播草稿",
+  create_social_story: "建立限動草稿",
   create_reels_script: "建立 Reels 腳本",
+  create_social_content_calendar: "建立內容月曆",
+  create_social_ab_test: "建立 A/B 測試草稿",
+  create_social_image_prompt: "建立圖像提示詞",
+  create_social_video_prompt: "建立影片提示詞",
+  // 前端流程階段標籤（非後端工具）
   retrieval: "查找社團資料",
   verification: "檢查內容",
   repair: "自動修正",
@@ -53,10 +86,17 @@ const TOOL_LABELS = {
 const CARD_MARKS = { "ig-post": "IG", "ig-carousel": "輪", "ig-story": "限", "reels-script": "▶", "content-calendar": "曆", "ab-test": "AB", "image-prompt": "圖", "video-prompt": "影" };
 const TOOL_PHASES = {
   search_knowledge: ["research", "查詢社團資料"],
+  search_visual_library: ["research", "搜尋可用視覺素材"],
   get_current_term: ["facts", "確認必要資料"],
   search_social_references: ["research", "查詢公開參考資料"],
   compare_social_strategies: ["research", "整理公開參考資料"],
   analyze_social_positioning: ["research", "分析公開參考資料"],
+  list_tku_public_sources: ["research", "查詢公開參考資料"],
+  search_tku_public_info: ["research", "查詢公開參考資料"],
+  fetch_tku_public_source: ["research", "查詢公開參考資料"],
+  search_instagram_public_hashtag: ["research", "查詢公開參考資料"],
+  search_instagram_public_account: ["research", "查詢公開參考資料"],
+  search_perplexity_web: ["research", "查詢公開參考資料"],
   create_document: ["draft", "產生文件初稿"],
   create_slides: ["draft", "產生簡報初稿"],
   create_spreadsheet: ["draft", "產生表格初稿"],
@@ -76,6 +116,11 @@ const BUSY_TEXT = "系統忙碌中，請稍後再試";
 const URL_RE = /https?:\/\/[^\s<>"'）)]+/gi;
 const TECH_RE =
   /Exception|Traceback|TypeError|ValueError|HTTP\s*\d|Error:|NVIDIA|nvapi-|堆疊|\.py\b|連線中斷|伺服器錯誤|status\s*\d|api[_-]?key/i;
+
+// 「假研究卡」防線：只有本輪真的收過後端研究驗證事件（source_cards / research_status），
+// 訊息文字才允許拆成研究卡樣式；否則一律以一般訊息渲染。新任務開始時重置。
+let researchEventsSeen = false;
+let lastResearchStatus = null;
 
 const state = {
   sessionId: null,
@@ -115,19 +160,52 @@ function setOrb(status, label) {
   if (!orb) return;
   const names = {
     idle: "等待中",
+    queued: "排隊中",
     thinking: "正在思考",
+    searching: "正在搜尋",
+    running: "正在執行任務",
     asking: "需要你確認",
     complete: "任務完成",
     error: "需要處理",
   };
   const text = label || names[status] || names.idle;
-  orb.className = "ai-orb is-" + (status || "idle");
-  orb.setAttribute("aria-label", "禪光 AI：" + text);
-  $("ai-orb-label").textContent = text;
+  const cls = status || "idle";
+  orb.className = "ai-orb is-" + cls;
+  orb.setAttribute("aria-label", "禪光 AI：" + text + "，開啟任務摘要");
+  const labelNode = $("ai-orb-label");
+  if (labelNode) labelNode.textContent = text;
+  const statusNode = $("work-status");
+  if (statusNode) statusNode.textContent = text;
+  setTaskRail(cls, text);
   if (state.orbTimer) clearTimeout(state.orbTimer);
   if (status === "complete") {
     state.orbTimer = setTimeout(() => setOrb("idle"), 1600);
   }
+}
+
+function setTaskRail(status, text) {
+  const rail = $("task-rail");
+  if (!rail) return;
+  const map = {
+    queued: "queued",
+    thinking: "running",
+    searching: "running",
+    running: "running",
+    complete: "succeeded",
+    error: "failed",
+    asking: "running",
+  };
+  const kind = map[status];
+  if (!kind || status === "idle") {
+    rail.hidden = true;
+    rail.className = "task-rail";
+    return;
+  }
+  rail.hidden = false;
+  rail.className = "task-rail is-" + kind;
+  const label = $("task-rail-label");
+  if (label) label.textContent = text || "";
+  rail.setAttribute("aria-label", "任務進度：" + (text || kind));
 }
 
 function humanLabel(value, fallback = "處理任務") {
@@ -136,6 +214,9 @@ function humanLabel(value, fallback = "處理任務") {
   if (TOOL_LABELS[raw]) return TOOL_LABELS[raw];
   let text = raw;
   Object.entries(TOOL_LABELS).forEach(([internal, label]) => { text = text.replaceAll(internal, label); });
+  // 查不到中文對照時不得把底線轉空格直接顯示英文內部名——
+  // 沒有任何中文字就一律顯示通用中文（稽核：內部名外洩）。
+  if (!/[\u3400-\u9fff]/.test(text)) return "執行工具";
   return text.replace(/[_-]+/g, " ");
 }
 
@@ -151,8 +232,112 @@ function applyViewport() {
   const vv = window.visualViewport;
   const h = vv ? Math.round(vv.height) : window.innerHeight;
   const top = vv ? Math.round(vv.offsetTop) : 0;
+  const kb = Math.max(0, Math.round(window.innerHeight - (top + h)));
   document.documentElement.style.setProperty("--app-height", h + "px");
   document.documentElement.style.setProperty("--app-top", top + "px");
+  document.documentElement.style.setProperty("--kb-inset", kb + "px");
+  const active = document.activeElement;
+  if (active && (active.id === "input" || (active.closest && active.closest(".composer")))) {
+    const composer = $("composer");
+    if (composer) {
+      const box = composer.getBoundingClientRect();
+      if (box.bottom > h - 2) composer.scrollIntoView({ block: "end", inline: "nearest" });
+    }
+  }
+}
+
+const MODE_PATHS = { ask: "/", generate: "/generate", template: "/templates", plan: "/prompt-library" };
+const MODE_FROM_PATH = { "/generate": "generate", "/templates": "template", "/prompt-library": "plan" };
+
+function currentPath() {
+  return (location.pathname.replace(/\/$/, "") || "/");
+}
+
+function readModeFromLocation() {
+  const q = new URLSearchParams(location.search).get("mode");
+  if (q && MODE_HINTS[q]) return q;
+  return MODE_FROM_PATH[currentPath()] || "ask";
+}
+
+function syncModeUrl(mode) {
+  const url = new URL(location.href);
+  url.searchParams.set("mode", mode);
+  const expectedPath = MODE_PATHS[mode] || "/";
+  const path = currentPath();
+  if (MODE_FROM_PATH[path] && MODE_FROM_PATH[path] !== mode) {
+    url.pathname = expectedPath === "/" ? "/" : expectedPath;
+  }
+  if (url.href !== location.href) history.replaceState(history.state, "", url);
+}
+
+function setMode(mode, opts = {}) {
+  const next = MODE_HINTS[mode] ? mode : "ask";
+  state.mode = next;
+  const tabs = document.querySelectorAll('[role="tab"][data-mode], .mode-chip[data-mode]');
+  tabs.forEach((chip) => {
+    const active = chip.dataset.mode === next;
+    chip.classList.toggle("is-active", active);
+    chip.setAttribute("aria-selected", String(active));
+    chip.setAttribute("tabindex", active ? "0" : "-1");
+    if (chip.hasAttribute("aria-pressed")) chip.setAttribute("aria-pressed", String(active));
+  });
+  const panel = $("panel-mode");
+  const tab = document.getElementById("tab-" + next);
+  if (panel && tab) panel.setAttribute("aria-labelledby", tab.id);
+  if ($("mode-hint")) $("mode-hint").textContent = MODE_HINTS[next] || MODE_HINTS.ask;
+  if (!opts.skipUrl) syncModeUrl(next);
+  if (!opts.silent && $("input") && !$("composer").hidden) $("input").focus();
+}
+
+function onModeTabKey(e) {
+  const tabs = [...document.querySelectorAll('.mode-tabs [role="tab"]')];
+  if (!tabs.length) return;
+  const i = tabs.indexOf(document.activeElement);
+  if (i < 0) return;
+  let next = -1;
+  if (e.key === "ArrowRight" || e.key === "ArrowDown") next = (i + 1) % tabs.length;
+  else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = (i - 1 + tabs.length) % tabs.length;
+  else if (e.key === "Home") next = 0;
+  else if (e.key === "End") next = tabs.length - 1;
+  if (next < 0) return;
+  e.preventDefault();
+  tabs[next].focus();
+  setMode(tabs[next].dataset.mode);
+}
+
+let lastFocus = null;
+function rememberFocus() {
+  lastFocus = document.activeElement;
+}
+
+function restoreFocus(fallback) {
+  const target = lastFocus && document.contains(lastFocus) ? lastFocus : fallback;
+  if (target && typeof target.focus === "function") target.focus();
+}
+
+function pushSheetState(name) {
+  try { history.pushState({ zenSheet: name }, ""); } catch { /* ignore */ }
+}
+
+function closeVisibleSheets(fromPop) {
+  const order = [
+    ["composer-plus-sheet", closeComposerPlus],
+    ["more-actions-sheet", closeMoreActions],
+    ["app-menu-sheet", closeAppMenu],
+    ["preflight-sheet", closePreflight],
+    ["task-summary-sheet", closeTaskSummary],
+    ["term-modal", closeTerm],
+    ["session-sheet", closeSessionSheet],
+    ["settings", closeSettings],
+  ];
+  for (const [id, fn] of order) {
+    const node = $(id);
+    if (node && !node.hidden) {
+      fn(true);
+      return true;
+    }
+  }
+  return false;
 }
 
 function missingStatus(resp) {
@@ -259,7 +444,7 @@ async function generateVisual(raw, host, button) {
   button.textContent = "正在生成視覺稿…";
   const result = el("section", "visual-result");
   result.setAttribute("aria-live", "polite");
-  result.appendChild(el("p", "muted", "正在以 fal.ai 生成視覺草稿，完成後可直接下載。"));
+  result.appendChild(el("p", "muted", "正在以 AI 視覺稿服務生成視覺草稿，完成後可直接下載。"));
   host.appendChild(result);
   try {
     const resp = await api("/api/visual/generate", {
@@ -280,7 +465,7 @@ async function generateVisual(raw, host, button) {
     preview.alt = "由 AI 生成的社群視覺草稿";
     preview.loading = "lazy";
     result.appendChild(preview);
-    result.appendChild(el("p", "muted", "已由 fal.ai 生成；請檢查文字與資訊正確後再使用。"));
+    result.appendChild(el("p", "muted", "已由 AI 視覺稿服務生成；請檢查文字與資訊正確後再使用。"));
     const actions = el("div", "card-actions");
     const open = el("a", null, "開啟並下載");
     open.href = image.url;
@@ -380,8 +565,10 @@ function bindCardActions(card, turn, raw) {
 function splitCarousel(text) {
   const dashed = text.split(/\n-{3,}\n/);
   if (dashed.length > 1) return dashed.map((s) => s.trim()).filter(Boolean);
-  const numbered = text.split(/(?:^|\n)\s*\d+\s*[.\、\.\:：]\s+/).map((s) => s.trim()).filter(Boolean);
-  if (numbered.length > 1) return numbered;
+  // 只認明確的輪播分頁標記（「第 N 頁」「Page N」「【N】」或上面的分隔線）；
+  // 一般編號清單（1. 2. 3.）不是分頁依據，切了會把貼文炸成過多頁（稽核：切分過貪）。
+  const paged = text.split(/(?:^|\n)\s*(?:第\s*\d+\s*頁|Page\s*\d+|【\s*\d+\s*】)\s*[:：]?\s*/gi).map((s) => s.trim()).filter(Boolean);
+  if (paged.length > 1) return paged;
   const headed = text.split(/(?:^|\n)#{1,3}\s+/).map((s) => s.trim()).filter(Boolean);
   if (headed.length > 1) return headed;
   return [text.trim()].filter(Boolean);
@@ -535,6 +722,13 @@ function splitResearch(text) {
 
 function renderResearch(turn, parsed) {
   const wrap = el("div", "research-wrap");
+  if (lastResearchStatus && (lastResearchStatus.label || lastResearchStatus.status)) {
+    wrap.appendChild(el(
+      "div",
+      "research-chip " + (RESEARCH_CHIP[lastResearchStatus.status] || "st-stale"),
+      "研究狀態：" + (lastResearchStatus.label || lastResearchStatus.status)
+    ));
+  }
   wrap.appendChild(el("h3", null, "參考資料（可收合）"));
   parsed.sections.forEach((sec, i) => {
     const d = el("details", "research-card");
@@ -546,17 +740,17 @@ function renderResearch(turn, parsed) {
   return wrap;
 }
 
-function renderSourceCards(text) {
+function renderTextSourceLinks(text) {
+  // 只負責把訊息文字裡的網址變成可點的一般連結。
+  // 驗證狀態的樣式與說明文字只能由後端 source_cards 事件經 renderSourceCards 渲染，這裡一律不加。
   const urls = [...new Set((text.match(URL_RE) || []).map((url) => url.replace(/[）)。,，]+$/, "")))].slice(0, 8);
   if (!urls.length) return null;
   const list = el("section", "source-list");
-  list.appendChild(el("h3", null, "來源"));
   urls.forEach((url) => {
-    const link = el("a", "source-card", url);
+    const link = el("a", null, url);
     link.href = url;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
-    try { link.appendChild(el("span", null, "來源日期：頁面未提供｜可信度：公開來源，建議開啟確認")); } catch { /* URL 保持原樣 */ }
     list.appendChild(link);
   });
   return list;
@@ -628,7 +822,7 @@ function renderMessage(turn, text) {
       box.appendChild(pre);
       continue;
     }
-    const research = splitResearch(part.text);
+    const research = researchEventsSeen ? splitResearch(part.text) : null;
     if (research) {
       if (research.leftover) {
         const extra = el("div");
@@ -636,13 +830,220 @@ function renderMessage(turn, text) {
         box.appendChild(extra);
       }
       box.appendChild(renderResearch(turn, research));
-      const sources = renderSourceCards(part.text);
+      const sources = renderTextSourceLinks(part.text);
       if (sources) box.appendChild(sources);
     } else {
       renderPlain(box, part.text);
     }
   }
   turn.appendChild(box);
+  scrollChat();
+}
+
+/* ── 研究驗證卡片（反問／來源卡／污染警示） ─────────── */
+
+const SRC_STATUS = {
+  verified: { cls: "st-verified", label: "已驗證" },
+  partially_verified: { cls: "st-partial", label: "部分驗證" },
+  inferred: { cls: "st-inferred", label: "AI 推測" },
+  stale: { cls: "st-stale", label: "資料過期" },
+  conflicted: { cls: "st-conflict", label: "來源衝突" },
+  wrong_entity: { cls: "st-conflict", label: "研究對象錯誤" },
+  insufficient_evidence: { cls: "st-stale", label: "證據不足" },
+};
+
+const RESEARCH_CHIP = {
+  complete: "st-verified",
+  partially_verified: "st-partial",
+  unverified: "st-partial",
+  no_reliable_source: "st-stale",
+  needs_clarification: "st-inferred",
+  blocked: "st-conflict",
+  internal: "st-inferred",
+};
+
+function sendOption(text) {
+  if (!text) return;
+  if (text.endsWith("@") || text.endsWith("：") || text.endsWith(":")) {
+    // 需要使用者補資料（例如 IG 帳號）——放進輸入框讓他接著打
+    $("input").value = text;
+    $("input").focus();
+    $("input").dispatchEvent(new Event("input"));
+    return;
+  }
+  runTask(text);
+}
+
+function renderClarification(turn, ev) {
+  const card = el("article", "clarify-card");
+  card.appendChild(el("h3", null, ev.school ? "【你指的是哪個社團？】" : "【請確認研究對象】"));
+  card.appendChild(el("p", "clarify-q", ev.question || ""));
+
+  let topic = "";
+  const opts = el("div", "clarify-options");
+  (ev.options || []).forEach((o) => {
+    const b = el("button", null, o.label);
+    b.type = "button";
+    b.addEventListener("click", () => {
+      let text = o.send_text || o.label;
+      if (text.endsWith("@")) {
+        // 「帳號是：@」需要使用者補帳號——填進輸入框讓使用者完成，
+        // 不能直接送出殘句；已選的主題插在帳號句前面（稽核半成品 #36）。
+        if (topic) text = text.replace(/，?帳號是：@$/, "，想了解的主題是：" + topic + "，帳號是：@");
+        const box = $("input");
+        if (box) {
+          box.value = text;
+          box.focus();
+          announce("請補上帳號後送出");
+          return;
+        }
+      }
+      if (topic) text += "想了解的主題是：" + topic + "。";
+      sendOption(text);
+    });
+    opts.appendChild(b);
+  });
+
+  if (ev.topic_question && (ev.topic_options || []).length) {
+    card.appendChild(el("p", "clarify-q sub", "【" + ev.topic_question + "】（可先選，再點上面的對象）"));
+    const chips = el("div", "topic-chips");
+    (ev.topic_options || []).forEach((t) => {
+      const c = el("button", "chip", t);
+      c.type = "button";
+      c.addEventListener("click", () => {
+        topic = topic === t ? "" : t;
+        chips.querySelectorAll(".chip").forEach((n) => n.classList.toggle("on", n.textContent === topic));
+      });
+      chips.appendChild(c);
+    });
+    card.appendChild(chips);
+  }
+  card.appendChild(opts);
+  turn.appendChild(card);
+  scrollChat();
+}
+
+function renderSourceCards(turn, ev) {
+  const cards = ev.cards || [];
+  const old = turn.querySelector(".sources-wrap");
+  if (old) old.remove();
+  const wrap = el("details", "sources-wrap");
+  wrap.open = cards.length > 0;
+  wrap.appendChild(el("summary", "timeline-sum", cards.length ? "來源卡（" + cards.length + "）" : "來源卡（無可驗證來源）"));
+
+  const bar = el("div", "src-filter");
+  const filters = [
+    ["all", "全部"],
+    ["verified", "只看已驗證"],
+    ["inferred", "查看推測內容"],
+  ];
+  let active = "all";
+  const apply = () => {
+    wrap.querySelectorAll(".source-card").forEach((c) => {
+      const st = c.dataset.status || "";
+      c.hidden =
+        (active === "verified" && st !== "verified") ||
+        (active === "inferred" && st !== "inferred" && st !== "partially_verified");
+    });
+    bar.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.f === active));
+  };
+  filters.forEach(([f, label]) => {
+    const b = el("button", "chip", label);
+    b.type = "button";
+    b.dataset.f = f;
+    b.addEventListener("click", () => {
+      active = f;
+      apply();
+    });
+    bar.appendChild(b);
+  });
+  wrap.appendChild(bar);
+
+  if (!cards.length) {
+    wrap.appendChild(el("p", "empty", "這次研究沒有任何可驗證來源，因此不提供確定結論。"));
+  }
+
+  cards.forEach((c) => {
+    const st = SRC_STATUS[c.status] || SRC_STATUS.insufficient_evidence;
+    const card = el("article", "source-card");
+    card.dataset.status = c.status || "";
+    const head = el("div", "src-head");
+    head.appendChild(el("span", "src-badge " + st.cls, c.status_label || st.label));
+    const who = c.source_scope === "external"
+      ? (c.organization || c.school || "外校來源")
+      : "淡江內部" + (c.academic_term ? "（" + c.academic_term + "）" : "");
+    head.appendChild(el("b", null, who));
+    card.appendChild(head);
+    card.appendChild(el("div", "src-title", c.title || ""));
+    const bits = [];
+    if (c.school && c.source_scope === "external") bits.push("學校：" + c.school);
+    if (c.captured_at) bits.push("來源日期：" + c.captured_at);
+    else if (c.published_at) bits.push("來源日期：" + c.published_at);
+    if (c.source_scope === "internal" && !c.is_current) bits.push("歷史資料，非本學期事實");
+    if (bits.length) card.appendChild(el("div", "src-meta", bits.join("　·　")));
+    if (c.excerpt) {
+      const d = el("details", "src-excerpt");
+      d.appendChild(el("summary", null, "查看原文"));
+      d.appendChild(el("div", "body", c.excerpt));
+      card.appendChild(d);
+    }
+    const actions = el("div", "card-actions");
+    if (c.url) {
+      const a = el("a", null, "開啟來源");
+      a.href = c.url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      actions.appendChild(a);
+    }
+    const report = el("button", null, "回報來源不正確");
+    report.type = "button";
+    report.addEventListener("click", () =>
+      runTask("來源卡「" + (c.title || c.source_id) + "」的內容或歸屬有誤，請重新查證並更正。")
+    );
+    actions.appendChild(report);
+    if (c.source_scope === "external" && (c.school || c.organization)) {
+      const re = el("button", null, "重新查詢官方來源");
+      re.type = "button";
+      re.addEventListener("click", () =>
+        runTask("請只用官方公開來源，重新查詢" + (c.organization || c.school) + "的最新公開資料。")
+      );
+      actions.appendChild(re);
+    }
+    card.appendChild(actions);
+    wrap.appendChild(card);
+  });
+  turn.appendChild(wrap);
+  scrollChat();
+}
+
+function renderContamination(turn, ev) {
+  const card = el("article", "contamination");
+  card.appendChild(el("h3", null, "【疑似資料歸屬錯誤】"));
+  card.appendChild(el("p", null, ev.message || "目前內容可能混入淡江內部資料，不能視為外校公開資料。"));
+  (ev.items || []).slice(0, 4).forEach((i) => {
+    const msg = (i.message || "").replace(/[。．]\s*$/, "");
+    card.appendChild(el("div", "cont-item", msg + (i.sentence ? "——「" + i.sentence + "」" : "")));
+  });
+  const actions = el("div", "card-actions");
+  (ev.actions || []).forEach((a) => {
+    const b = el("button", null, a.label);
+    b.type = "button";
+    b.addEventListener("click", () => sendOption(a.send_text));
+    actions.appendChild(b);
+  });
+  card.appendChild(actions);
+  turn.appendChild(card);
+  scrollChat();
+}
+
+function renderResearchStatus(turn, ev) {
+  let chip = turn.querySelector(".research-chip");
+  if (!chip) {
+    chip = el("div", "research-chip");
+    turn.appendChild(chip);
+  }
+  chip.className = "research-chip " + (RESEARCH_CHIP[ev.status] || "st-stale");
+  chip.textContent = "研究狀態：" + (ev.label || ev.status || "");
   scrollChat();
 }
 
@@ -694,6 +1095,8 @@ function addUser(text) {
 function classifyError(text, code) {
   const raw = String(code || "") + " " + String(text || "");
   if (/401|403|權限|授權/.test(raw)) return ["權限不足", "請確認授權狀態後再試。", "permission"];
+  if (/402|429|額度|quota|rate limit|用量已滿/i.test(raw)) return ["額度不足", "目前額度已用完，請稍後再試或改用較短的需求。", "quota"];
+  if (/provider|供應商|模型無法|ECONNREFUSED|503/i.test(raw)) return ["AI 服務暫時無法使用", "供應來源沒有回應。請稍後重試。", "provider"];
   if (/vision|visual|圖片理解|視覺服務/i.test(raw)) return ["AI 視覺服務暫時無法使用", "可改用文字描述圖片內容，或稍後重試。", "visual"];
   if (/缺少|待填|必填/.test(raw)) return ["缺少資料", "補上關鍵資料，或先改成草稿。", "missing"];
   if (/研究|來源|搜尋/.test(raw)) return ["外部研究失敗", "可以重試，或改用已知資料完成草稿。", "research"];
@@ -721,8 +1124,8 @@ function addError(turn, text, retryFn, code) {
     retryStep.addEventListener("click", () => controlTask("retry", turn));
     actions.appendChild(retryStep);
   }
-  if (["missing", "busy", "research", "visual"].includes(kind)) {
-    const simple = el("button", "ghost", kind === "missing" ? "返回補資料" : kind === "visual" ? "改用文字描述" : "改用簡單模式");
+  if (["missing", "busy", "research", "visual", "quota", "provider", "permission"].includes(kind)) {
+    const simple = el("button", "ghost", kind === "missing" ? "返回補資料" : kind === "visual" ? "改用文字描述" : kind === "permission" ? "返回工作台" : kind === "quota" ? "縮短需求再試" : "改用簡單模式");
     simple.type = "button";
     simple.addEventListener("click", () => {
       if (kind === "visual") {
@@ -852,8 +1255,12 @@ async function refreshProject() {
 }
 
 async function controlTask(action, turn) {
-  const label = { pause: "任務已暫停", retry: "正在準備重試失敗步驟", cancel: "已停止生成" }[action];
-  if (action === "cancel" && state.abortController) state.abortController.abort();
+  const label = { pause: "任務已暫停", retry: "正在準備重試失敗步驟", cancel: "已停止生成", resume: "正在繼續任務" }[action];
+  if (action === "cancel") {
+    // 先請伺服器停止（釋放 session 執行鎖與模型呼叫），再中斷本地連線
+    requestStreamCancel();
+    if (state.abortController) state.abortController.abort();
+  }
   await refreshProject();
   if (!state.projectId) {
     if (action === "cancel") {
@@ -878,6 +1285,10 @@ async function controlTask(action, turn) {
     } else if (action === "retry") {
       setFlowStep(turn, "draft", "running", "準備重試失敗步驟", "只會重做尚未完成的部分。");
       runTask("接續剛才，只重試失敗步驟。");
+    } else if (action === "resume") {
+      setFlowStep(turn, "draft", "running", "繼續任務", "從暫停處接續。");
+      setOrb("running", "正在繼續任務");
+      runTask("接續剛才。");
     } else {
       setFlowStep(turn, "verify", "failed", "已停止生成", "已保留完成的內容與產出。");
       getTimeline(turn).querySelector(".timeline-title").textContent = "任務已停止";
@@ -885,7 +1296,7 @@ async function controlTask(action, turn) {
     }
     announce(label);
   } catch (err) {
-    addError(turn, "目前無法" + (action === "pause" ? "暫停" : action === "retry" ? "重試" : "停止") + "任務，請稍後再試。", null, "network");
+    addError(turn, "目前無法" + (action === "pause" ? "暫停" : action === "retry" ? "重試" : action === "resume" ? "繼續" : "停止") + "任務，請稍後再試。", null, "network");
   }
 }
 
@@ -894,35 +1305,86 @@ function updateTaskDock(summary) {
   if (!summary) return;
   const content = $("task-dock-content");
   content.replaceChildren();
-  content.appendChild(el("p", "muted", "狀態：" + ({ completed: "已完成", in_progress: "進行中", paused: "已暫停", failed: "需要處理", cancelled: "已停止" })[summary.workflow_status] || "處理中"));
+  // 括號要包住整個查表——「+ 先於 ||」會讓未知狀態顯示「狀態：undefined」（稽核不可靠 #43）
+  const dockStatus = ({ completed: "已完成", in_progress: "進行中", paused: "已暫停", blocked: "待處理", failed: "需要處理", cancelled: "已停止" })[summary.workflow_status] || "處理中";
+  content.appendChild(el("p", "muted", "狀態：" + dockStatus));
   if (summary.current_step) content.appendChild(el("p", null, "目前：" + summary.current_step));
   if (summary.next_action) content.appendChild(el("p", "muted", "下一步：" + summary.next_action));
   dock.hidden = false;
+  // 手機（<960px）沒有側欄——同步顯示右下角的任務浮動按鈕
+  const fab = $("task-fab");
+  if (fab) fab.hidden = false;
 }
 
 function openTaskSummary() {
+  rememberFocus();
   const body = $("task-summary-body");
   body.replaceChildren();
+  const actions = $("task-summary-actions");
+  if (actions) actions.replaceChildren();
   const summary = state.taskSummary;
   if (state.preflight) body.appendChild(renderMiniSummary(state.preflight, true));
-  if (!summary && !state.preflight) body.appendChild(el("p", "empty", "任務摘要還在建立中。"));
+  // 任務摘要卡要能看到可信度（規格十二）：本輪的研究狀態一併呈現
+  if (lastResearchStatus && lastResearchStatus.label) {
+    body.appendChild(el(
+      "p", "research-chip " + (RESEARCH_CHIP[lastResearchStatus.status] || "st-stale"),
+      "研究狀態：" + lastResearchStatus.label
+    ));
+  }
+  if (!summary && !state.preflight && !state.busy) {
+    const empty = el("div", "empty-state");
+    empty.appendChild(el("strong", null, "目前沒有進行中的任務"));
+    empty.appendChild(document.createTextNode("在下方輸入需求，或用快速操作開始。"));
+    body.appendChild(empty);
+  }
+  if (state.busy && !summary) body.appendChild(el("p", "empty", "任務正在執行，進度會同步更新。"));
   if (summary) {
     body.appendChild(el("p", "modal-lede", "這是可理解的任務狀態，不包含 AI 的內部推理。"));
     const list = el("ol", "task-summary-list");
     (summary.steps || []).forEach((step) => {
-      const status = { completed: "已完成", running: "執行中", failed: "需處理", pending: "等待中" }[step.status] || "等待中";
+      const status = { completed: "已完成", running: "執行中", failed: "需處理", pending: "等待中", queued: "排隊中" }[step.status] || "等待中";
       list.appendChild(el("li", null, step.description + "（" + status + "）" + (step.note ? "：" + step.note : "")));
     });
     body.appendChild(list);
     if (summary.next_action) body.appendChild(el("p", "muted", "建議下一步：" + summary.next_action));
   }
+  if (actions) {
+    const turn = state.activeTurn || $("chat").lastElementChild;
+    const wf = summary && summary.workflow_status;
+    if (state.busy || wf === "in_progress") {
+      const stop = el("button", "ghost", "停止");
+      stop.type = "button";
+      stop.addEventListener("click", () => { closeTaskSummary(); controlTask("cancel", turn); });
+      actions.appendChild(stop);
+    }
+    if (wf === "failed" || wf === "blocked") {
+      const retry = el("button", "primary", "重試");
+      retry.type = "button";
+      retry.addEventListener("click", () => { closeTaskSummary(); controlTask("retry", turn); });
+      actions.appendChild(retry);
+    }
+    if (wf === "paused" || wf === "cancelled") {
+      const cont = el("button", "primary", "繼續");
+      cont.type = "button";
+      cont.addEventListener("click", () => { closeTaskSummary(); controlTask("resume", turn); });
+      actions.appendChild(cont);
+    }
+  }
   $("task-summary-sheet").hidden = false;
+  if (!(history.state && history.state.zenSheet === "task-summary")) pushSheetState("task-summary");
   trapFocus($("task-summary-sheet").querySelector(".modal-card"), closeTaskSummary);
 }
 
-function closeTaskSummary() {
+function closeTaskSummary(fromPop) {
+  const sheet = $("task-summary-sheet");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "task-summary") {
+    history.back();
+    return;
+  }
   releaseTrap();
-  $("task-summary-sheet").hidden = true;
+  sheet.hidden = true;
+  restoreFocus($("ai-orb"));
 }
 
 function pushToolKey(turn, name, explicit) {
@@ -966,8 +1428,9 @@ function artifactTitle(filename) {
 function versionLabel(version) {
   const n = Number(version || 1);
   if (n <= 1) return "草稿版";
-  if (n === 2) return "修正版";
-  return "最終版";
+  // 不能把第 3 版以上一律叫「最終版」——version 是流水號，第 5 版出現時
+  // 前一個「最終版」就成了謊言（稽核不可靠 #50）。
+  return "第 " + n + " 版";
 }
 
 function openTextPreview(title, raw, href) {
@@ -1011,6 +1474,9 @@ function addArtifact(turn, art) {
   const raw = art.preview || turn._lastContent || "";
   const card = el("article", "artifact work-card result-card");
   card.dataset.kind = ["docx", "pptx", "xlsx", "pdf", "md"].includes(ext) ? "document" : "artifact";
+  // 續接工作階段的產出不帶 verified 欄位——狀態未知時不亮任何信任燈
+  const verifiedState = typeof art.verified === "boolean" ? (art.verified ? "ok" : "warn") : "";
+  if (verifiedState) card.dataset.verified = verifiedState;
   card.setAttribute("aria-label", "產出結果：" + artifactTitle(filename));
   const sum = el("header", "result-head");
   sum.appendChild(el("div", "icon", FILE_ICONS[ext] || "▪"));
@@ -1022,7 +1488,7 @@ function addArtifact(turn, art) {
 
   const body = el("div", "artifact-body");
   const facts = el("dl", "result-facts");
-  [["狀態", art.verified === false ? "！檢查有警告" : "✓ 已通過檢查"], ["版本", versionLabel(art.version)], ["格式", CARD_LANGS[art.format] || ({ md: "Markdown", docx: "企劃文件", pptx: "簡報", xlsx: "試算表", pdf: "PDF" })[ext] || ext.toUpperCase()]].forEach(([term, value]) => {
+  [["狀態", verifiedState === "warn" ? "！檢查有警告" : verifiedState === "ok" ? "✓ 已通過檢查" : "已建立（未重新檢查）"], ["版本", versionLabel(art.version)], ["格式", CARD_LANGS[art.format] || ({ md: "Markdown", docx: "企劃文件", pptx: "簡報", xlsx: "試算表", pdf: "PDF" })[ext] || ext.toUpperCase()]].forEach(([term, value]) => {
     facts.append(el("dt", null, term), el("dd", null, value));
   });
   body.appendChild(facts);
@@ -1277,7 +1743,6 @@ function renderQuestionControl(question) {
       const selected = question.type === "multi" ? Array.isArray(question.answer) && question.answer.includes(option) : question.answer === option;
       btn.setAttribute("role", question.type === "multi" ? "checkbox" : "radio");
       btn.setAttribute("aria-checked", String(selected));
-      btn.setAttribute("aria-pressed", String(selected));
       btn.addEventListener("click", () => {
         question.skipped = false;
         if (question.type === "multi") {
@@ -1289,6 +1754,16 @@ function renderQuestionControl(question) {
         renderPreflight();
       });
       opts.appendChild(btn);
+    });
+    // 方向鍵在選項間移動焦點（radio／checkbox 群組的鍵盤慣例）
+    opts.addEventListener("keydown", (e) => {
+      if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
+      const items = [...opts.querySelectorAll("button")];
+      const current = items.indexOf(document.activeElement);
+      if (current < 0) return;
+      e.preventDefault();
+      const delta = e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 1;
+      items[(current + delta + items.length) % items.length].focus();
     });
     wrap.appendChild(opts);
   } else {
@@ -1370,17 +1845,25 @@ function renderPreflight() {
 function openPreflight(text) {
   const clean = (text || $("input").value).trim();
   if (!clean || state.busy) return;
+  rememberFocus();
   state.preflight = buildPreflight(clean);
   $("preflight-sheet").hidden = false;
   renderPreflight();
+  if (!(history.state && history.state.zenSheet === "preflight")) pushSheetState("preflight");
   trapFocus($("preflight-sheet").querySelector(".modal-card"), closePreflight);
 }
 
-function closePreflight() {
+function closePreflight(fromPop) {
+  const sheet = $("preflight-sheet");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "preflight") {
+    history.back();
+    return;
+  }
   releaseTrap();
-  $("preflight-sheet").hidden = true;
+  sheet.hidden = true;
   setOrb("idle");
-  $("input").focus();
+  restoreFocus($("input"));
 }
 
 function preflightPrompt(draft) {
@@ -1454,23 +1937,89 @@ async function ensureSession() {
   return state.sessionId;
 }
 
+function setBusyUI(busy) {
+  // 執行中把送出鈕換成永遠摸得到的「停止生成」——
+  // 不必展開工作進度也能停（進度卡裡的停止鈕仍在）。
+  $("send").hidden = busy;
+  $("send").disabled = busy;
+  // #stop 可能不存在（例如舊版頁面快取）——防 TypeError
+  const stopBtn = $("stop");
+  if (stopBtn) stopBtn.hidden = !busy;
+}
+
+// 串流閒置逾時：超過這段時間沒收到任何資料就視為連線逾時
+const STREAM_IDLE_TIMEOUT_MS = 120000;
+
+function resetStreamWatchdog() {
+  clearTimeout(state.streamWatchdog);
+  state.streamWatchdog = setTimeout(() => {
+    state.streamTimedOut = true;
+    if (state.abortController) state.abortController.abort();
+  }, STREAM_IDLE_TIMEOUT_MS);
+}
+
+function parseSSERecord(record) {
+  // 支援標準 SSE 格式：event: / data:（可多行）/ 註解行（:）
+  let eventName = "";
+  const dataLines = [];
+  for (const line of record.split(/\r?\n/)) {
+    if (!line || line.startsWith(":")) continue;
+    if (line.startsWith("event:")) {
+      eventName = line.slice(6).trim();
+      continue;
+    }
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).replace(/^\s/, ""));
+    }
+  }
+  if (!dataLines.length) return null;
+  try {
+    const ev = JSON.parse(dataLines.join("\n"));
+    if (eventName && ev && !ev.type) ev.type = eventName;
+    return ev;
+  } catch {
+    console.warn("串流資料無法解析為 JSON，已略過這一段。");
+    return null;
+  }
+}
+
+async function requestStreamCancel() {
+  // 通知伺服器停止生成並釋放這個 session 的執行鎖；
+  // 就算這個請求失敗，本地 abort 仍會中斷連線。
+  state.cancelRequested = true;
+  try {
+    if (state.sessionId) {
+      await fetch("/api/chat/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: state.sessionId }),
+      });
+    }
+  } catch {
+    /* 後端取消失敗時仍會在本地中斷連線 */
+  }
+}
+
 async function runTask(text, attachments = [], draft = null, displayText = "") {
   text = (text || $("input").value).trim();
   if (!text || state.busy) return;
 
   state.busy = true;
   state.lastPrompt = text;
-  $("send").disabled = true;
+  setBusyUI(true);
   showPanel("chat");
   addUser(displayText || (draft && draft.text) || text);
   $("input").value = "";
   $("input").style.height = "auto";
   announce("處理中");
+  setOrb("queued", "排隊中");
 
   const turn = newTurn(text);
   state.activeTurn = turn;
   state.taskSummary = null;
   state.projectId = null;
+  researchEventsSeen = false;
+  lastResearchStatus = null;
   renderUnderstandingCard(turn, draft);
   seedProgress(turn);
   const workName = draft ? (preflightSummaryRows(draft).find(([key]) => key === "輸出格式") || ["", taskKindName(draft.kind)])[1] : "任務";
@@ -1495,10 +2044,33 @@ async function runTask(text, attachments = [], draft = null, displayText = "") {
         attachments,
       }),
     });
+    if (resp.status === 403) {
+      const detail = await readDetail(resp);
+      addError(turn, detail || "沒有權限執行這個操作", retry, "permission");
+      announce("權限不足");
+      return;
+    }
+    if (resp.status === 409) {
+      const detail = await readDetail(resp);
+      addError(turn, detail || "這個工作階段已有正在執行的任務，請先停止或稍候", retry, "busy");
+      announce("任務執行中");
+      return;
+    }
     if (resp.status === 429) {
       const detail = await readDetail(resp);
-      addError(turn, detail || "嘗試次數過多，請稍後再試", retry);
+      addError(turn, detail || "嘗試次數過多，請稍後再試", retry, "quota");
       announce(detail || "請稍後再試");
+      return;
+    }
+    if (resp.status === 402) {
+      const detail = await readDetail(resp);
+      addError(turn, detail || "額度不足，請稍後再試", retry, "quota");
+      announce("額度不足");
+      return;
+    }
+    if (resp.status >= 500) {
+      addError(turn, "伺服器發生錯誤，請稍後再試", retry, "busy");
+      announce("伺服器錯誤");
       return;
     }
     if (!resp.ok || !resp.body) {
@@ -1510,41 +2082,62 @@ async function runTask(text, attachments = [], draft = null, displayText = "") {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let sawDone = false;
+    let sawCancelled = false;
+    const dispatch = (record) => {
+      const ev = parseSSERecord(record);
+      if (!ev) return;
+      if (ev.type === "done") sawDone = true;
+      if (ev.type === "cancelled") sawCancelled = true;
+      resetStreamWatchdog();
+      handleEvent(turn, ev, retry);
+    };
+    resetStreamWatchdog();
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      resetStreamWatchdog();
       buffer += decoder.decode(value, { stream: true });
       const parts = buffer.split("\n\n");
       buffer = parts.pop() || "";
       for (const part of parts) {
-        const line = part.trim();
-        if (!line.startsWith("data:")) continue;
-        let ev;
-        try {
-          ev = JSON.parse(line.slice(5).trim());
-        } catch {
-          continue;
-        }
-        handleEvent(turn, ev, retry);
+        if (part.trim()) dispatch(part);
       }
+    }
+    // 最後一段可能沒有以空行收尾 —— 收線前一定要 flush
+    buffer += decoder.decode();
+    if (buffer.trim()) dispatch(buffer);
+
+    if (!sawDone && !sawCancelled && !state.cancelRequested) {
+      addError(turn, "連線中斷，任務可能沒有完成。請重試一次。", retry, "network");
+      announce("連線中斷");
     }
   } catch (err) {
     if (err.name === "AbortError") {
-      announce("已停止等待回覆");
-      if (state.activeTurn) setFlowStep(turn, "verify", "failed", "已停止生成", "已保留完成的內容。");
-      setOrb("idle", "已停止");
+      if (state.streamTimedOut) {
+        addError(turn, "連線逾時，已停止等待。請確認網路後重試。", retry, "timeout");
+        announce("連線逾時");
+      } else {
+        announce("已停止等待回覆");
+        if (state.activeTurn) setFlowStep(turn, "verify", "failed", "已停止生成", "已保留完成的內容。");
+        setOrb("idle", "已停止");
+      }
       return;
     }
     if (err.message !== "needs-auth") {
-      addError(turn, BUSY_TEXT, retry, "busy");
-      announce(BUSY_TEXT);
+      addError(turn, "連線中斷，請檢查網路後重試。", retry, "network");
+      announce("連線中斷");
     }
   } finally {
+    clearTimeout(state.streamWatchdog);
+    state.streamWatchdog = null;
+    state.cancelRequested = false;
+    state.streamTimedOut = false;
     turn.querySelectorAll(".step.running").forEach((n) => n.classList.remove("running"));
     state.busy = false;
+    setBusyUI(false);
     state.abortController = null;
     state.activeTurn = null;
-    $("send").disabled = false;
     $("input").focus();
     loadHomeLists();
   }
@@ -1595,6 +2188,7 @@ function handleEvent(turn, ev, retry) {
 
     case "retrieval_started":
       setFlowStep(turn, "research", "running", "查詢社團資料", "正在整理與任務相關的資料。");
+      setOrb("searching");
       break;
 
     case "retrieval_result":
@@ -1617,6 +2211,7 @@ function handleEvent(turn, ev, retry) {
     case "tool_started": {
       const phase = TOOL_PHASES[ev.name] || ["draft", "產生初稿"];
       setFlowStep(turn, phase[0], "running", phase[1], "正在處理這個步驟。");
+      setOrb(phase[0] === "research" ? "searching" : "running");
       break;
     }
 
@@ -1647,24 +2242,54 @@ function handleEvent(turn, ev, retry) {
       if (ev.text) renderMessage(turn, ev.text);
       break;
 
-    case "task_completed":
+    case "clarification_needed":
+      progressLine(turn, "clarify", "?", "需要確認研究對象");
+      finishStep(turn, "clarify", false);
+      renderClarification(turn, ev);
+      setOrb("asking", "需要你確認");
+      announce("需要確認研究對象");
+      break;
+
+    case "task_completed": {
       state.taskSummary = ev.summary || state.taskSummary;
       updateTaskDock(state.taskSummary);
-      setFlowStep(turn, "verify", "complete", "最後檢查", "內容與待填欄位已完成檢查。");
-      getTimeline(turn).querySelector(".timeline-title").textContent = "產出完成";
+      const rsLabel = ev.research_status_label;
+      const rs = ev.research_status || "";
+      // 全綠成功只留給：審核放行（verdict === "allow"），且研究狀態為完成／內部資料（或本輪沒有研究）。
+      const okDone = ev.verdict === "allow" && (!rs || rs === "complete" || rs === "internal");
+      // 部分驗證／尚未驗證 → 黃色（沿用既有 is-asking 黃球與 st-partial 研究狀態章），不得亮全綠。
+      const partialDone = !okDone && (rs === "partially_verified" || rs === "unverified");
+      setFlowStep(
+        turn, "verify", okDone ? "complete" : "failed", "最後檢查",
+        okDone
+          ? (rsLabel ? "研究狀態：" + rsLabel : "內容與待填欄位已完成檢查。")
+          : partialDone
+            ? "研究狀態：" + (rsLabel || "部分完成") + "——部分內容尚未驗證，請自行確認來源。"
+            : rsLabel
+              ? "研究狀態：" + rsLabel + "——內容未通過驗證，請補充官方來源或改用內部資料。"
+              : "內容未完全通過檢查，請確認後再使用。"
+      );
+      const titleNode = getTimeline(turn).querySelector(".timeline-title");
+      if (titleNode) titleNode.textContent = rsLabel || (okDone ? "產出完成" : partialDone ? "部分完成" : "需要處理");
+      if (rs) renderResearchStatus(turn, { status: rs, label: rsLabel });
       renderCompletionActions(turn);
-      announce("完成");
-      setOrb("complete");
+      announce(rsLabel || (okDone ? "完成" : partialDone ? "部分完成" : "需要處理"));
+      if (okDone) setOrb("complete");
+      else if (partialDone) setOrb("asking", rsLabel || "部分完成");
+      else setOrb("error");
       break;
+    }
 
     case "task_paused":
       progressLine(turn, "workflow-status", "Ⅱ", "任務已暫停", "可按繼續，或說「接續剛才」");
       finishStep(turn, "workflow-status", true);
+      setOrb("idle", "任務已暫停");
       break;
 
     case "task_resumed":
       progressLine(turn, "workflow-status", "▶", "任務已恢復", ev.summary && ev.summary.next_action ? ev.summary.next_action : "");
       finishStep(turn, "workflow-status", true);
+      setOrb("running", "正在繼續任務");
       break;
 
     case "task_retry_ready":
@@ -1684,14 +2309,58 @@ function handleEvent(turn, ev, retry) {
       setOrb("error");
       break;
 
+    case "source_cards":
+      researchEventsSeen = true;
+      renderSourceCards(turn, ev);
+      break;
+
+    case "answer_review": {
+      const n = (ev.claims || []).length;
+      const ok = (ev.claims || []).filter((c) => c.status === "verified").length;
+      progressLine(
+        turn,
+        "review",
+        "✓",
+        "來源驗證：" + (n ? ok + "/" + n + " 項結論已驗證" : "無外校結論需驗證"),
+        (ev.notices || []).join("；")
+      );
+      finishStep(turn, "review", ev.verdict !== "block");
+      break;
+    }
+
+    case "contamination_warning":
+      progressLine(turn, "review", "✕", "資料歸屬錯誤，已暫停輸出");
+      finishStep(turn, "review", false);
+      renderContamination(turn, ev);
+      announce("資料歸屬錯誤");
+      break;
+
+    case "research_status":
+      researchEventsSeen = true;
+      lastResearchStatus = { status: ev.status || "", label: ev.label || "" };
+      renderResearchStatus(turn, ev);
+      break;
+
     case "done":
       turn.querySelectorAll(".step.running").forEach((n) => n.classList.remove("running"));
       announce("完成");
       break;
 
+    case "cancelled":
+      turn.querySelectorAll(".step.running").forEach((n) => n.classList.remove("running"));
+      setFlowStep(turn, "verify", "failed", "已停止生成", "已完成的內容會保留。");
+      setOrb("idle", "已停止");
+      announce("已停止生成");
+      break;
+
     case "error":
       addError(turn, friendlyError(ev.text), retry, ev.error_code);
       announce(friendlyError(ev.text));
+      break;
+
+    default:
+      // 未知事件不能弄壞整個任務：記中文警告後繼續
+      console.warn("收到未知的串流事件類型，已略過：", ev.type);
       break;
   }
 }
@@ -1718,21 +2387,124 @@ function fillList(node, items, emptyText, render) {
   items.forEach((item) => node.appendChild(render(item)));
 }
 
+function renderResumeExpired(message) {
+  showPanel("chat");
+  $("chat").replaceChildren();
+  const box = el("div", "error");
+  box.appendChild(el("strong", null, "工作階段已過期"));
+  box.appendChild(el("div", null, message || "這個工作階段已過期或不存在，請建立新任務。"));
+  const actions = el("div", "error-actions");
+  const btn = el("button", "ghost", "建立新任務");
+  btn.type = "button";
+  btn.addEventListener("click", newChat);
+  actions.appendChild(btn);
+  box.appendChild(actions);
+  $("chat").appendChild(box);
+}
+
+function renderResume(data) {
+  state.sessionId = data.session_id;
+  if (data.project_id) state.projectId = data.project_id;
+  showPanel("chat");
+  const chat = $("chat");
+  chat.replaceChildren();
+
+  // 任務脈絡標頭：標題 + 上次判斷的任務類型
+  const head = el("div", "resume-head");
+  head.appendChild(el("h2", null, "繼續「" + (data.title || "先前的任務") + "」"));
+  const bits = [];
+  if (data.task_label) bits.push("任務類型：" + data.task_label);
+  if (data.updated_at) bits.push("上次更新：" + (formatWhen(data.updated_at) || data.updated_at));
+  if (bits.length) head.appendChild(el("p", "resume-meta", bits.join("　·　")));
+  chat.appendChild(head);
+
+  // 對話太長：先給摘要與「查看完整紀錄」
+  if (data.truncated) {
+    const note = el("div", "resume-summary");
+    note.appendChild(el("b", null, "先前進度摘要"));
+    if (data.summary) {
+      const body = el("div", "body");
+      renderPlain(body, data.summary);
+      note.appendChild(body);
+    } else {
+      note.appendChild(el("p", null, "以下只顯示最近 " + data.messages.length + " 則對話（共 " + data.message_count + " 則）。"));
+    }
+    const more = el("button", "ghost", "查看完整紀錄");
+    more.type = "button";
+    more.addEventListener("click", async () => {
+      more.disabled = true;
+      try {
+        const resp = await api("/api/session/resume?full=1&session_id=" + encodeURIComponent(data.session_id));
+        if (resp.ok) renderResume(await resp.json());
+        else announce(BUSY_TEXT);
+      } catch (err) {
+        if (err.message !== "needs-auth") announce(BUSY_TEXT);
+      } finally {
+        more.disabled = false;
+      }
+    });
+    note.appendChild(more);
+    chat.appendChild(note);
+  }
+
+  // 還原最近幾輪對話（含網宣／研究卡片的渲染）
+  for (const m of data.messages || []) {
+    const t = newTurn();
+    if (m.role === "user") t.appendChild(el("div", "bubble-user", m.text));
+    else renderMessage(t, m.text);
+  }
+
+  // 還原目前產出
+  if ((data.artifacts || []).length) {
+    const t = newTurn();
+    t.appendChild(el("p", "resume-section", "這個任務目前的產出"));
+    for (const a of data.artifacts) addArtifact(t, a);
+  }
+
+  // 還原未完成步驟
+  if ((data.pending_steps || []).length) {
+    const t = newTurn();
+    const tl = getTimeline(t);
+    tl.open = true;
+    const titleNode = tl.querySelector(".timeline-title");
+    if (titleNode) titleNode.textContent = "尚未完成的步驟";
+    const liveNode = tl.querySelector(".timeline-live");
+    if (liveNode) liveNode.textContent = "待續接";
+    data.pending_steps.forEach((step, i) => {
+      pendingStep(t, "pending-" + i, step);
+    });
+  }
+
+  chat.appendChild(el("p", "empty", "直接輸入下一步即可接續這個任務。"));
+  $("input").focus();
+  scrollChat();
+}
+
 async function continueSession(sid, title) {
   closeSessionSheet();
   try {
-    const resp = await api("/api/session", { method: "POST", body: JSON.stringify({ session_id: sid }) });
+    const ensure = await api("/api/session", { method: "POST", body: JSON.stringify({ session_id: sid }) });
+    if (!ensure.ok) {
+      announce(BUSY_TEXT);
+      return;
+    }
+    const ensured = await ensure.json();
+    if (ensured.session_id !== sid) {
+      // 後端找不到原 session、開了新的 —— 原任務已過期
+      state.sessionId = ensured.session_id;
+      renderResumeExpired("「" + (title || "先前的任務") + "」已過期或紀錄已被清除，已為你建立新的工作階段。");
+      return;
+    }
+    const resp = await api("/api/session/resume?session_id=" + encodeURIComponent(sid));
+    if (resp.status === 404) {
+      renderResumeExpired();
+      return;
+    }
     if (!resp.ok) {
       announce(BUSY_TEXT);
       return;
     }
-    const data = await resp.json();
-    state.sessionId = data.session_id;
-    showPanel("chat");
-    $("chat").replaceChildren();
-    const note = el("p", "empty", "繼續「" + (title || "先前的任務") + "」。直接輸入下一步即可。");
-    $("chat").appendChild(note);
-    $("input").focus();
+    renderResume(await resp.json());
   } catch (err) {
     if (err.message !== "needs-auth") announce(BUSY_TEXT);
   }
@@ -1778,15 +2550,24 @@ async function loadHomeLists() {
 }
 
 function openSessionSheet() {
+  rememberFocus();
   const sheet = $("session-sheet");
   sheet.hidden = false;
+  if (!(history.state && history.state.zenSheet === "session")) pushSheetState("session");
   trapFocus(sheet.querySelector(".modal-card"), closeSessionSheet);
   loadSessionSheet();
 }
 
-function closeSessionSheet() {
+function closeSessionSheet(fromPop) {
+  const sheet = $("session-sheet");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "session") {
+    history.back();
+    return;
+  }
   releaseTrap();
-  $("session-sheet").hidden = true;
+  sheet.hidden = true;
+  restoreFocus($("more-actions-btn") || $("input"));
 }
 
 async function loadSessionSheet() {
@@ -1848,22 +2629,35 @@ function researchPrompt(school, need) {
   ].join("\n");
 }
 
+function applyQuickAction(action) {
+  if (action === "continue") {
+    openSessionSheet();
+    return;
+  }
+  if (action === "progress") {
+    openTaskSummary();
+    return;
+  }
+  const quickPrompts = {
+    ig: "幫我做一份網宣草稿，時間與地點未確認請標示待填。",
+    research: "幫我研究其他學校的公開社群做法，整理可供淡江參考的方向。",
+    ...PROMPTS,
+  };
+  if (!quickPrompts[action]) return;
+  $("input").value = quickPrompts[action];
+  $("input").focus();
+  $("input").dispatchEvent(new Event("input"));
+}
+
 $("quick-actions").addEventListener("click", (e) => {
+  const more = e.target.closest("#more-actions-btn, button[data-more]");
+  if (more) {
+    openMoreActions();
+    return;
+  }
   const btn = e.target.closest("button[data-action]");
   if (!btn) return;
-  const action = btn.dataset.action;
-  if (action === "continue") openSessionSheet();
-  else {
-    const quickPrompts = {
-      ig: "幫我做一份網宣草稿，時間與地點未確認請標示待填。",
-      research: "幫我研究其他學校的公開社群做法，整理可供淡江參考的方向。",
-      ...PROMPTS,
-    };
-    if (!quickPrompts[action]) return;
-    $("input").value = quickPrompts[action];
-    $("input").focus();
-    $("input").dispatchEvent(new Event("input"));
-  }
+  applyQuickAction(btn.dataset.action);
 });
 
 $("suggestions").addEventListener("click", (e) => {
@@ -1874,18 +2668,10 @@ $("suggestions").addEventListener("click", (e) => {
   $("input").focus();
 });
 
-document.querySelectorAll(".mode-chip").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    state.mode = btn.dataset.mode || "ask";
-    document.querySelectorAll(".mode-chip").forEach((chip) => {
-      const active = chip === btn;
-      chip.classList.toggle("is-active", active);
-      chip.setAttribute("aria-pressed", String(active));
-    });
-    $("mode-hint").textContent = MODE_HINTS[state.mode] || MODE_HINTS.ask;
-    $("input").focus();
-  });
+document.querySelectorAll(".mode-chip, .mode-tabs [role='tab']").forEach((btn) => {
+  btn.addEventListener("click", () => setMode(btn.dataset.mode || "ask"));
 });
+document.querySelector(".mode-tabs")?.addEventListener("keydown", onModeTabKey);
 
 document.querySelectorAll("[data-back]").forEach((btn) => {
   btn.addEventListener("click", () => showPanel(btn.dataset.back || "home"));
@@ -1909,7 +2695,9 @@ $("research-form").addEventListener("submit", (e) => {
 
 /* ── 焦點陷阱 ──────────────────────────────────────── */
 
-let trapCleanup = null;
+// 堆疊式焦點陷阱：支援巢狀 modal（例：設定抽屜上再開「本學期設定」）。
+// 開內層時暫停外層的鍵盤處理，關閉內層時恢復外層；Escape 只關最上層。
+const trapStack = [];
 
 function isVisible(n) {
   return !!(n.offsetWidth || n.offsetHeight || n.getClientRects().length);
@@ -1922,7 +2710,14 @@ function focusables(root) {
 }
 
 function trapFocus(root, onClose) {
-  releaseTrap();
+  const outer = trapStack[trapStack.length - 1];
+  if (outer) document.removeEventListener("keydown", outer.onKey);
+  // 同一層 modal 被連開兩次（例如非同步載入時連點兩下）要**取代**而不是再疊一層：
+  // 疊上去的那筆關閉後會留在堆疊裡，它的 focusables 是空陣列、Tab 不再攔截，
+  // 焦點就能跑出仍開著的外層抽屜（grok 審查發現 2）。
+  if (outer && outer.root === root) {
+    trapStack.pop();
+  }
   const nodes = focusables(root);
   (nodes[0] || root).focus();
   const onKey = (e) => {
@@ -1945,32 +2740,129 @@ function trapFocus(root, onClose) {
     }
   };
   document.addEventListener("keydown", onKey);
-  trapCleanup = () => document.removeEventListener("keydown", onKey);
+  trapStack.push({ root, onKey });
 }
 
 function releaseTrap() {
-  if (trapCleanup) trapCleanup();
-  trapCleanup = null;
+  const top = trapStack.pop();
+  if (top) document.removeEventListener("keydown", top.onKey);
+  const outer = trapStack[trapStack.length - 1];
+  if (outer) {
+    document.addEventListener("keydown", outer.onKey);
+    const nodes = focusables(outer.root);
+    (nodes[0] || outer.root).focus();
+  }
 }
 
 /* ── 設定抽屜 ──────────────────────────────────────── */
 
 function openSettings() {
+  rememberFocus();
   $("settings").hidden = false;
   $("settings-backdrop").hidden = false;
+  if (!(history.state && history.state.zenSheet === "settings")) pushSheetState("settings");
   trapFocus($("settings"), closeSettings);
 }
 
-function closeSettings() {
+function closeSettings(fromPop) {
+  const sheet = $("settings");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "settings") {
+    history.back();
+    return;
+  }
   releaseTrap();
-  $("settings").hidden = true;
+  sheet.hidden = true;
   $("settings-backdrop").hidden = true;
-  $("settings-btn").focus();
+  restoreFocus($("more-menu-btn") || $("settings-btn"));
+}
+
+function openAppMenu() {
+  rememberFocus();
+  $("app-menu-sheet").hidden = false;
+  if (!(history.state && history.state.zenSheet === "app-menu")) pushSheetState("app-menu");
+  trapFocus($("app-menu-sheet").querySelector(".modal-card"), closeAppMenu);
+}
+
+function closeAppMenu(fromPop) {
+  const sheet = $("app-menu-sheet");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "app-menu") {
+    history.back();
+    return;
+  }
+  releaseTrap();
+  sheet.hidden = true;
+  restoreFocus($("more-menu-btn"));
+}
+
+function openMoreActions() {
+  rememberFocus();
+  $("more-actions-sheet").hidden = false;
+  if (!(history.state && history.state.zenSheet === "more-actions")) pushSheetState("more-actions");
+  trapFocus($("more-actions-sheet").querySelector(".modal-card"), closeMoreActions);
+}
+
+function closeMoreActions(fromPop) {
+  const sheet = $("more-actions-sheet");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "more-actions") {
+    history.back();
+    return;
+  }
+  releaseTrap();
+  sheet.hidden = true;
+  restoreFocus($("more-actions-btn") || $("input"));
+}
+
+function openComposerPlus() {
+  rememberFocus();
+  $("composer-plus-sheet").hidden = false;
+  if (!(history.state && history.state.zenSheet === "composer-plus")) pushSheetState("composer-plus");
+  trapFocus($("composer-plus-sheet").querySelector(".modal-card"), closeComposerPlus);
+}
+
+function closeComposerPlus(fromPop) {
+  const sheet = $("composer-plus-sheet");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "composer-plus") {
+    history.back();
+    return;
+  }
+  releaseTrap();
+  sheet.hidden = true;
+  restoreFocus($("composer-plus") || $("input"));
 }
 
 $("settings-btn").addEventListener("click", openSettings);
 $("settings-close").addEventListener("click", closeSettings);
 $("settings-backdrop").addEventListener("click", closeSettings);
+$("more-menu-btn")?.addEventListener("click", openAppMenu);
+$("app-menu-close")?.addEventListener("click", closeAppMenu);
+$("app-menu-sheet")?.addEventListener("click", (e) => { if (e.target.id === "app-menu-sheet") closeAppMenu(); });
+$("open-settings-from-menu")?.addEventListener("click", () => {
+  closeAppMenu(true);
+  try { history.replaceState({ zenSheet: "settings" }, ""); } catch { /* ignore */ }
+  openSettings();
+});
+$("more-actions-close")?.addEventListener("click", closeMoreActions);
+$("more-actions-sheet")?.addEventListener("click", (e) => { if (e.target.id === "more-actions-sheet") closeMoreActions(); });
+$("more-actions-list")?.addEventListener("click", (e) => {
+  const progress = e.target.closest("#more-progress-btn");
+  if (progress) {
+    closeMoreActions(true);
+    openTaskSummary();
+    return;
+  }
+  const btn = e.target.closest("button[data-action]");
+  if (!btn) return;
+  closeMoreActions(true);
+  applyQuickAction(btn.dataset.action);
+});
+$("composer-plus")?.addEventListener("click", openComposerPlus);
+$("composer-plus-close")?.addEventListener("click", closeComposerPlus);
+$("composer-plus-sheet")?.addEventListener("click", (e) => { if (e.target.id === "composer-plus-sheet") closeComposerPlus(); });
+$("ai-orb")?.addEventListener("click", openTaskSummary);
 
 $("logout-btn").addEventListener("click", async () => {
   const hint = $("logout-hint");
@@ -2056,7 +2948,12 @@ $("admin-logout-btn").addEventListener("click", async () => {
 
 /* ── 本學期設定 ────────────────────────────────────── */
 
+let termLoading = false;
+
 async function openTerm() {
+  // 請求還在飛或視窗已開著就不重複開——重複呼叫會多疊一層焦點陷阱
+  if (termLoading || !$("term-modal").hidden) return;
+  termLoading = true;
   try {
     const resp = await api("/api/term");
     if (!resp.ok) {
@@ -2082,15 +2979,25 @@ async function openTerm() {
     }
     $("term-status").textContent = data.updated_at ? "最後更新：" + data.updated_at : "尚未設定過";
     $("term-modal").hidden = false;
+    if (!(history.state && history.state.zenSheet === "term")) pushSheetState("term");
     trapFocus($("term-modal").querySelector(".modal-card"), closeTerm);
   } catch (err) {
     if (err.message !== "needs-auth") announce(BUSY_TEXT);
+  } finally {
+    termLoading = false;
   }
 }
 
-function closeTerm() {
+function closeTerm(fromPop) {
+  const sheet = $("term-modal");
+  if (!sheet || sheet.hidden) return;
+  if (!fromPop && history.state && history.state.zenSheet === "term") {
+    history.back();
+    return;
+  }
   releaseTrap();
-  $("term-modal").hidden = true;
+  sheet.hidden = true;
+  restoreFocus($("term-btn") || $("more-menu-btn"));
 }
 
 async function saveTerm() {
@@ -2149,6 +3056,8 @@ async function newChat() {
     state.projectId = null;
     state.taskSummary = null;
     $("task-dock").hidden = true;
+    const fab = $("task-fab");
+    if (fab) fab.hidden = true;
     $("chat").replaceChildren();
     $("input").value = "";
     $("input").style.height = "auto";
@@ -2173,11 +3082,13 @@ async function newChat() {
 $("reset").addEventListener("click", newChat);
 
 $("send").addEventListener("click", () => send());
+const stopBtn = $("stop");
+if (stopBtn) stopBtn.addEventListener("click", () => controlTask("cancel", state.activeTurn || $("chat").lastElementChild));
 function renderAttachmentStatus() {
   const status = $("attachment-status");
   const names = state.attachments.map((item) => item.name);
   status.hidden = !names.length;
-  status.textContent = names.length ? "已加入圖片：" + names.join("、") + "（將交由 fal.ai 視覺服務僅供這次任務理解，不會保存）" : "";
+  status.textContent = names.length ? "已加入圖片：" + names.join("、") + "（將交由 AI 視覺服務僅供這次任務理解，不會保存）" : "";
 }
 
 function clearAttachments() {
@@ -2198,6 +3109,7 @@ $("clear-input").addEventListener("click", () => {
   $("input").value = "";
   $("input").style.height = "auto";
   clearAttachments();
+  closeComposerPlus(true);
   $("input").focus();
   announce("已清除輸入內容");
 });
@@ -2205,6 +3117,7 @@ $("attachment").addEventListener("change", async () => {
   const file = $("attachment").files && $("attachment").files[0];
   $("attachment").value = "";
   if (!file) return;
+  closeComposerPlus(true);
   if (file.type.startsWith("image/")) {
     if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
       announce("請選擇 JPG、PNG 或 WebP 圖片。");
@@ -2240,15 +3153,24 @@ $("voice-input").addEventListener("click", () => {
   recognition.lang = "zh-TW";
   recognition.interimResults = true;
   recognition.continuous = false;
-  const base = $("input").value;
-  $("voice-input").textContent = "停止";
+  let lastVoiceChunk = "";
+  $("voice-input").innerHTML = "停止<span class=\"muted\">點一下結束</span>";
   recognition.onresult = (event) => {
-    const words = [...event.results].map((result) => result[0].transcript).join("");
-    $("input").value = base + words;
-    $("input").dispatchEvent(new Event("input"));
+    const words = [...event.results].map((result) => result[0].transcript).join("").trim();
+    // 語音結果附加在既有內容之後（中間補空格），不覆蓋手動輸入；
+    // 辨識進行中只替換上一次語音附加的片段。
+    const field = $("input");
+    let current = field.value;
+    if (lastVoiceChunk && current.endsWith(lastVoiceChunk)) {
+      current = current.slice(0, current.length - lastVoiceChunk.length);
+    }
+    const glue = current && !/\s$/.test(current) ? " " : "";
+    lastVoiceChunk = words ? glue + words : "";
+    field.value = current + lastVoiceChunk;
+    field.dispatchEvent(new Event("input"));
   };
   recognition.onerror = () => announce("語音輸入沒有完成，請改用文字補充。");
-  recognition.onend = () => { state.voice = null; $("voice-input").textContent = "語音"; $("input").focus(); };
+  recognition.onend = () => { state.voice = null; $("voice-input").innerHTML = "語音<span class=\"muted\">說完後會填入輸入框</span>"; $("input").focus(); };
   recognition.start();
   announce("正在聆聽，說完後會填入輸入框。");
 });
@@ -2260,7 +3182,7 @@ $("input").addEventListener("keydown", (e) => {
 });
 $("input").addEventListener("input", () => {
   $("input").style.height = "auto";
-  $("input").style.height = Math.min($("input").scrollHeight, 160) + "px";
+  $("input").style.height = Math.min(Math.max($("input").scrollHeight, 44), 120) + "px";
 });
 
 $("preflight-close").addEventListener("click", closePreflight);
@@ -2273,14 +3195,27 @@ $("preflight-sheet").addEventListener("click", (e) => { if (e.target.id === "pre
 $("task-summary-close").addEventListener("click", closeTaskSummary);
 $("task-summary-sheet").addEventListener("click", (e) => { if (e.target.id === "task-summary-sheet") closeTaskSummary(); });
 $("task-dock-summary").addEventListener("click", openTaskSummary);
+const taskFab = $("task-fab");
+if (taskFab) taskFab.addEventListener("click", openTaskSummary);
 
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  if (!$("preflight-sheet").hidden) closePreflight();
+  // 焦點陷阱堆疊會自行處理 Escape（只關最上層）——避免一次關掉多層
+  if (trapStack.length) return;
+  if ($("composer-plus-sheet") && !$("composer-plus-sheet").hidden) closeComposerPlus();
+  else if ($("more-actions-sheet") && !$("more-actions-sheet").hidden) closeMoreActions();
+  else if ($("app-menu-sheet") && !$("app-menu-sheet").hidden) closeAppMenu();
+  else if (!$("preflight-sheet").hidden) closePreflight();
   else if (!$("task-summary-sheet").hidden) closeTaskSummary();
   else if (!$("term-modal").hidden) closeTerm();
   else if (!$("session-sheet").hidden) closeSessionSheet();
   else if (!$("settings").hidden) closeSettings();
+});
+
+window.addEventListener("popstate", () => {
+  if (closeVisibleSheets(true)) return;
+  const mode = readModeFromLocation();
+  if (mode !== state.mode) setMode(mode, { skipUrl: true, silent: true });
 });
 
 /* ── Instagram 狀態 / 啟動 ─────────────────────────── */
@@ -2298,19 +3233,53 @@ async function loadIgStatus() {
   }
 }
 
+// 模型下拉不顯示原始供應商 ID——顯示中文描述＋簡短名。
+// 送到後端的 option value 維持原始 ID 不變；原名放在 title 供進階使用者查看。
+const MODEL_DISPLAY = [
+  // Zeabur AI Hub（GPT／Claude／Gemini／Grok）
+  [/gpt-4o[-_.]?mini/i, "輕快（GPT-4o mini）"],
+  [/gpt-4o/i, "標準（GPT-4o）"],
+  [/^o1|[-_.]o1$/i, "推理強化（o1）"],
+  [/o3[-_.]?mini/i, "推理輕快（o3-mini）"],
+  [/claude.*opus/i, "長文精修（Claude Opus）"],
+  [/claude.*sonnet/i, "標準（Claude Sonnet）"],
+  [/claude.*haiku/i, "輕快（Claude Haiku）"],
+  [/gemini.*flash/i, "輕快（Gemini Flash）"],
+  [/gemini/i, "標準（Gemini）"],
+  [/grok/i, "通用（Grok）"],
+  // NVIDIA Build（開源模型）
+  // nemotron 要排在 llama 之前：其 ID 常內含 llama-3.3（如 llama-3.3-nemotron-super-49b）
+  [/nemotron/i, "推理強化（Nemotron 49B）"],
+  [/kimi/i, "長文（Kimi K2）"],
+  [/qwen/i, "通用（Qwen 2.5 72B）"],
+  [/mixtral/i, "多語（Mixtral 8x22B）"],
+  [/llama[-_.]?3\.1/i, "標準（Llama 3.1 70B）"],
+  [/llama[-_.]?3\.3/i, "標準（Llama 3.3 70B）"],
+];
+
+function modelDisplayName(id) {
+  const raw = String(id || "");
+  for (const [pattern, label] of MODEL_DISPLAY) {
+    if (pattern.test(raw)) return label;
+  }
+  return "自訂模型";
+}
+
 function fillModels(h) {
   const sel = $("model");
   sel.replaceChildren();
   const models = h.models || [];
   for (const m of models) {
-    const o = el("option", null, String(m).split("/").pop());
+    const o = el("option", null, modelDisplayName(m));
     o.value = m;
+    o.title = String(m);
     if (m === h.model) o.selected = true;
     sel.appendChild(o);
   }
   if (h.model && !models.includes(h.model)) {
-    const o = el("option", null, String(h.model).split("/").pop());
+    const o = el("option", null, modelDisplayName(h.model));
     o.value = h.model;
+    o.title = String(h.model);
     o.selected = true;
     sel.insertBefore(o, sel.firstChild);
   }
@@ -2328,7 +3297,10 @@ async function init() {
     state.health = h;
     fillModels(h);
     $("destination").value = h.destination || "local";
-    if (h.term && h.term.label) $("term-label").textContent = h.term.label;
+    if (h.term && h.term.label) {
+      $("term-label").textContent = h.term.label;
+      if ($("project-name")) $("project-name").textContent = h.term.label;
+    }
     const notices = [];
     if (h.term && h.term.configured === false) {
       notices.push("本學期資料還沒填。產出裡的時間地點可能會是「待填」，可到設定的管理入口補上。");
@@ -2337,6 +3309,7 @@ async function init() {
     await loadIgStatus();
     await loadHomeLists();
     if (state.isAdmin) setAdminTools(true, "已進入管理。");
+    setMode(readModeFromLocation(), { silent: true });
     showPanel("home");
     $("input").focus();
   } catch (err) {
@@ -2347,6 +3320,7 @@ async function init() {
 
 (async function boot() {
   applyViewport();
+  setMode(readModeFromLocation(), { silent: true });
   window.visualViewport?.addEventListener("resize", applyViewport);
   window.visualViewport?.addEventListener("scroll", applyViewport);
   window.addEventListener("resize", applyViewport);

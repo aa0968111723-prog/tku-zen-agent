@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -37,7 +38,7 @@ def _headers() -> dict[str, str]:
 async def _post_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     """呼叫 fal REST API；不將 request payload（可能含圖片）寫入日誌。"""
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0), follow_redirects=False) as client:
             response = await client.post(path, headers=_headers(), json=payload)
     except httpx.TimeoutException as exc:
         raise FalError("視覺服務回應逾時，請稍後重試或改以文字描述。", code="vision_timeout") from exc
@@ -110,6 +111,76 @@ async def analyze_images(attachments: list[dict[str, str]], *, prompt: str) -> s
     if not isinstance(output, str) or not output.strip():
         raise FalError("視覺服務回傳空內容，請稍後重試。", code="vision_empty")
     return output.strip()[:12000]
+def _structured_output(raw: str) -> dict[str, Any]:
+    """接受模型偶爾包上的 markdown fence，但拒絕非物件結果。"""
+    text = raw.strip()
+    match = re.search(r"\{.*\}", text, re.S)
+    if not match:
+        raise FalError("圖片分析回傳格式異常，請稍後重試。", code="vision_invalid_response")
+    try:
+        value = json.loads(match.group(0))
+    except ValueError as exc:
+        raise FalError("圖片分析回傳格式異常，請稍後重試。", code="vision_invalid_response") from exc
+    if not isinstance(value, dict):
+        raise FalError("圖片分析回傳格式異常，請稍後重試。", code="vision_invalid_response")
+    return value
+
+
+async def analyze_visual_asset(data_url: str) -> dict[str, Any]:
+    """視覺資料庫用的結構化 OCR／場景分析。
+
+    提示詞明確禁止依臉推定真實姓名；人物身分只能走另外的已確認參考圖比對，
+    並且比對結果也只能是 possible，仍需人工確認。
+    """
+    payload = {
+        "image_urls": [data_url],
+        "model": config.FAL_VISION_MODEL,
+        "prompt": (
+            "你正在替繁體中文校園社團建立可稽核的視覺資料。只回傳 JSON 物件，不要 markdown。"
+            "不得根據臉孔猜測或宣稱任何人的姓名、學校、社團或身分。看不到或不確定就留空，"
+            "每項辨識都要給 0 到 1 confidence 與 evidence（圖片中可指認的依據）。JSON schema："
+            '{"summary":"","ocr_text":"","dates":[{"value":"YYYY-MM-DD或原文","confidence":0,"evidence":""}],'
+            '"scenes":[{"label":"校園/教室/禪堂/舞台/報到區/戶外/茶會/講座/社課/聚餐/活動現場/海報/文件或其他","confidence":0,"evidence":""}],'
+            '"event":{"name":"","type":"","location":"","start_time":"HH:MM或空字串","end_time":"HH:MM或空字串","confidence":0,"evidence":""},'
+            '"clubs":[{"name":"","school":"","confidence":0,"evidence":"文字或Logo"}],'
+            '"people":{"count":0,"descriptions":[{"label":"人物1","confidence":0,"evidence":"可見特徵，不含姓名"}]},'
+            '"objects":[""],"logos":[{"text":"","confidence":0,"evidence":""}],'
+            '"quality_notes":[""],"is_poster":false}。OCR 要保留原本繁體中文與換行。'
+        ),
+    }
+    data = await _post_json("https://fal.run/openrouter/router/vision", payload)
+    output = data.get("output")
+    if not isinstance(output, str) or not output.strip():
+        raise FalError("圖片理解沒有取得可用結果，請稍後重試。", code="vision_empty")
+    result = _structured_output(output)
+    result["ocr_text"] = str(result.get("ocr_text") or "")[:20000]
+    result["summary"] = str(result.get("summary") or "")[:4000]
+    return result
+
+
+async def compare_confirmed_people(target_url: str, references: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """只在已有人工確認參考圖時提出「可能是」候選，永不直接確認。"""
+    usable = [r for r in references if r.get("data_url") and r.get("person_id")][:8]
+    if not usable:
+        return []
+    mapping = ", ".join(f"參考圖{i + 1}={r['person_id']}" for i, r in enumerate(usable))
+    payload = {
+        "image_urls": [target_url, *[r["data_url"] for r in usable]],
+        "model": config.FAL_VISION_MODEL,
+        "prompt": (
+            "第1張是待分析照片，其餘是已由使用者確認身分的參考照片。"
+            f"參考對照：{mapping}。只回傳 JSON："
+            '{"matches":[{"person_id":"只能填上述ID","confidence":0,"evidence":"可見相似處"}]}。'
+            "只有臉部清楚且確實相似才列出；不得填姓名、不得加入清單外人物、不得回傳 confirmed。"
+        ),
+    }
+    data = await _post_json("https://fal.run/openrouter/router/vision", payload)
+    output = data.get("output")
+    if not isinstance(output, str):
+        return []
+    matches = _structured_output(output).get("matches")
+    allowed = {r["person_id"] for r in usable}
+    return [m for m in (matches if isinstance(matches, list) else []) if isinstance(m, dict) and m.get("person_id") in allowed]
 
 
 async def generate_image(prompt: str) -> list[dict[str, Any]]:

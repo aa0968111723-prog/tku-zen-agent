@@ -6,7 +6,7 @@ import inspect
 import logging
 from typing import Any, Callable
 
-from . import activity, artifact, document, examples, gform, knowledge, slides, social, spreadsheet, term
+from . import activity, artifact, document, examples, gform, knowledge, perplexity, public_sources, slides, social, spreadsheet, term, visual_library
 
 logger = logging.getLogger(__name__)
 Permission = str  # general | admin_confirm
@@ -27,6 +27,12 @@ _REGISTRY: dict[str, tuple[Callable[..., dict], dict, Permission]] = {
     "create_social_story": (social.create_social_story, social.STORY_SCHEMA, "general"),
     "create_reels_script": (social.create_reels_script, social.REELS_SCHEMA, "general"),
     "create_social_content_calendar": (social.create_social_content_calendar, social.CALENDAR_SCHEMA, "general"),
+    "list_tku_public_sources": (public_sources.list_tku_public_sources, public_sources.LIST_SCHEMA, "general"),
+    "search_tku_public_info": (public_sources.search_tku_public_info, public_sources.SEARCH_SCHEMA, "general"),
+    "fetch_tku_public_source": (public_sources.fetch_tku_public_source, public_sources.FETCH_SCHEMA, "general"),
+    "search_instagram_public_hashtag": (public_sources.search_instagram_public_hashtag, public_sources.HASHTAG_SCHEMA, "general"),
+    "search_instagram_public_account": (public_sources.search_instagram_public_account, public_sources.ACCOUNT_SCHEMA, "general"),
+    "search_perplexity_web": (perplexity.search_perplexity_web, perplexity.SCHEMA, "general"),
     "create_social_ab_test": (social.create_social_ab_test, social.AB_TEST_SCHEMA, "general"),
     "create_social_image_prompt": (social.create_social_image_prompt, social.IMAGE_SCHEMA, "general"),
     "create_social_video_prompt": (social.create_social_video_prompt, social.VIDEO_SCHEMA, "general"),
@@ -37,28 +43,50 @@ _REGISTRY: dict[str, tuple[Callable[..., dict], dict, Permission]] = {
     "get_activity_status": (activity.get_activity_status, activity.STATUS_SCHEMA, "general"),
     "list_activities": (activity.list_activities, activity.LIST_SCHEMA, "general"),
     "read_artifact": (artifact.read_artifact, artifact.SCHEMA, "general"),
+    "search_visual_library": (visual_library.search_visual_library, visual_library.SCHEMA, "general"),
 }
 
 SCHEMAS: list[dict] = [schema for _, schema, _ in _REGISTRY.values()]
-LABELS = {name: name for name in _REGISTRY}
-LABELS.update(
-    {
-        "search_knowledge": "搜尋社團知識庫",
-        "search_previous_examples": "搜尋歷年範例",
-        "get_current_term": "查本學期資料",
-        "create_spreadsheet": "建立試算表",
-        "create_document": "建立文件",
-        "create_slides": "建立簡報",
-        "create_google_form": "建立 Google 表單",
-        "create_activity": "建立活動資料",
-        "update_activity": "更新活動資料",
-        "add_activity_task": "新增活動待辦",
-        "update_activity_task": "更新活動待辦",
-        "get_activity_status": "檢查活動進度",
-        "list_activities": "列出活動",
-        "read_artifact": "讀取上一份產出",
-    }
-)
+
+# 使用者看得到的工具名稱一律繁體中文 —— 內部英文工具名（create_social_carousel
+# 之類）絕不能直接呈現在介面上。tests/test_ui_language.py 會掃這份表。
+LABELS = {
+    "search_knowledge": "搜尋社團知識庫",
+    "search_previous_examples": "搜尋歷年範例",
+    "get_current_term": "查本學期資料",
+    "create_spreadsheet": "建立試算表",
+    "create_document": "建立文件",
+    "create_slides": "建立簡報",
+    "create_google_form": "建立 Google 表單",
+    "create_activity": "建立活動資料",
+    "update_activity": "更新活動資料",
+    "add_activity_task": "新增活動待辦",
+    "update_activity_task": "更新活動待辦",
+    "get_activity_status": "檢查活動進度",
+    "list_activities": "列出活動",
+    "read_artifact": "讀取上一份產出",
+    "search_visual_library": "搜尋視覺素材庫",
+    "search_social_references": "搜尋外校公開參考",
+    "compare_social_strategies": "比較外校社群策略",
+    "analyze_social_positioning": "分析社群定位",
+    "create_social_post": "建立貼文草稿",
+    "create_social_carousel": "建立輪播草稿",
+    "create_social_story": "建立限動草稿",
+    "create_reels_script": "建立 Reels 腳本",
+    "create_social_content_calendar": "建立內容月曆",
+    "list_tku_public_sources": "列出淡江公開來源",
+    "search_tku_public_info": "搜尋淡江公開資訊",
+    "fetch_tku_public_source": "讀取淡江官方來源",
+    "search_instagram_public_hashtag": "搜尋 Instagram 公開標籤",
+    "search_instagram_public_account": "讀取 Instagram 公開帳號",
+    "search_perplexity_web": "搜尋最新公開網路資訊",
+    "create_social_ab_test": "建立 A/B 測試草稿",
+    "create_social_image_prompt": "建立圖像提示詞",
+    "create_social_video_prompt": "建立影片提示詞",
+}
+# 保險：漏掛中文名的工具顯示通用中文字樣，不顯示英文內部名
+for _name in _REGISTRY:
+    LABELS.setdefault(_name, "執行工具")
 
 
 def register(
@@ -71,7 +99,8 @@ def register(
     if permission not in {"general", "admin_confirm"}:
         raise ValueError("permission must be general or admin_confirm")
     _REGISTRY[name] = (fn, schema, permission)
-    LABELS[name] = label or name
+    # fallback 不用英文內部名——那會原封不動出現在前端進度列（稽核不可靠 #42）
+    LABELS[name] = label or "執行工具"
     SCHEMAS.clear()
     SCHEMAS.extend(s for _, s, _ in _REGISTRY.values())
 

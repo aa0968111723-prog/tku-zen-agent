@@ -17,7 +17,11 @@ ALLOWED_EVENTS = {
     "task_understood", "plan_created", "retrieval_started", "retrieval_result",
     "tool_started", "tool_completed", "verification_started", "verification_result",
     "repair_started", "artifact_ready", "task_completed",
+    "task_failed",
     "message", "error", "done", "session", "status",
+    # 研究驗證引擎的結構化事件（進度與依據，不是推理過程）
+    "clarification_needed", "source_cards", "answer_review",
+    "contamination_warning", "research_status",
     "visual_analysis_started", "visual_analysis_completed",
 }
 

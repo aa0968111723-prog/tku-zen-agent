@@ -7,6 +7,8 @@ openpyxl>=3.1
 python-docx>=1.1
 python-pptx>=1.0
 pypdf>=5.0
+python-multipart>=0.0.12
+Pillow>=10.4
 
 # 本機語意檢索（LSA）。沒裝也能跑，檢索會自動降級成純 BM25。
 numpy>=1.26

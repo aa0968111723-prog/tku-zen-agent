@@ -5,31 +5,172 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
+import contextvars
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import config, orchestrator, retrieval
+from .services import audit as audit_service
 from .services import auth, context as ctx_mod
 from .services import activities as activity_service
 from .services import current_term as term_service
 from .services import fal as fal_service
 from .services import duigao_integration
 from .services import memory as memory_service
+from .services import permissions, ratelimit
+from .services import public_sources as public_sources_service
+from .services import perplexity as perplexity_service
 from .services.session_store import get_store
 from .orchestrator.state import Stage, WorkflowStatus
+from .visual_api import router as visual_router
 
 logger = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
 
-app = FastAPI(title="淡江大學領袖禪學社 AI 工作台", docs_url=None, redoc_url=None)
+app = FastAPI(
+    title="淡江大學領袖禪學社 AI 工作台",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,  # 預設路由關閉；下方以權限控管的自訂路由取代
+)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+
+# ── 安全標頭與 CSRF Origin 檢查 ────────────────────────────────
+
+_CSP = (
+    "default-src 'self'; "
+    "img-src 'self' data: blob: https:; "  # fal 圖、雲端縮圖與上傳前本機預覽
+    "style-src 'self'; "
+    "script-src 'self'; "
+    "connect-src 'self'; "
+    "font-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
+_STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+# 真實客戶端 IP：與登入鎖定共用同一套判定（services/clientip.py），
+# 取 XFF 最右非私有跳——最左值可由客戶端偽造輪換繞過節流（grok 審查發現 3）。
+from .services.clientip import client_ip  # noqa: E402
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    # 視覺 API 在 multipart 解析前先用 Content-Length 擋掉明顯超量請求；
+    # 端點內仍會逐檔再次檢查，因為 chunked request 可能沒有這個標頭。
+    visual_api = request.url.path.startswith(("/api/visual-assets", "/api/visual-collections", "/api/entities", "/api/learning"))
+    if visual_api and request.method in _STATE_CHANGING:
+        try:
+            content_length = int(request.headers.get("content-length") or 0)
+        except ValueError:
+            content_length = 0
+        if request.url.path in {"/api/visual-assets/upload", "/api/visual-assets/import"}:
+            body_limit = config.VISUAL_MAX_FILE_BYTES * config.VISUAL_MAX_BATCH + 2_000_000
+        elif request.url.path == "/api/visual-assets/search-by-image":
+            body_limit = config.VISUAL_MAX_FILE_BYTES + 1_000_000
+        else:
+            body_limit = 512_000
+        if content_length > body_limit:
+            return JSONResponse({"detail": "請求內容超過大小限制"}, status_code=413)
+
+    # CSRF 縱深防禦：瀏覽器跨站請求一定帶 Origin，比對不上就擋。
+    # 沒有 Origin 的請求（curl、同站舊瀏覽器 GET）不在此攔——
+    # cookie 的 SameSite 已經擋掉跨站自動帶 cookie 的情況。
+    if request.method in _STATE_CHANGING:
+        origin = request.headers.get("origin")
+        if origin:
+            if origin.lower() == "null":
+                return JSONResponse(
+                    {"detail": "來源網域不符，請從工作台頁面操作"}, status_code=403
+                )
+            origin_host = urlsplit(origin).netloc
+            if origin_host and origin_host != request.headers.get("host", ""):
+                return JSONResponse(
+                    {"detail": "來源網域不符，請從工作台頁面操作"}, status_code=403
+                )
+
+    # 一般 API 限流（每 IP）。/api/chat 另有更嚴的每人限流。
+    if request.url.path.startswith("/api/"):
+        ip = client_ip(request)
+        ok, retry_after = ratelimit.allow(
+            f"api:{ip}", config.API_RATE_LIMIT, config.API_RATE_WINDOW
+        )
+        if not ok:
+            return JSONResponse(
+                {"detail": "請求太頻繁，請稍後再試"},
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+
+    response = await call_next(request)
+
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault(
+        "Permissions-Policy", "camera=(self), microphone=(), geolocation=(), payment=()"
+    )
+    response.headers.setdefault("Content-Security-Policy", _CSP)
+    if config.auth_mode() == "token":
+        # 部署模式一定走 https（cookie 也標 Secure），可以放心開 HSTS
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
+    return response
+
+
+# ── OpenAPI（部署模式僅限管理者）──────────────────────────────
+
+def _build_openapi() -> dict[str, Any]:
+    schema = get_openapi(title=app.title, version="3.0.0", routes=app.routes)
+    components = schema.setdefault("components", {})
+    components["securitySchemes"] = {
+        "sessionCookie": {
+            "type": "apiKey",
+            "in": "cookie",
+            "name": config.ACCESS_CODE_COOKIE_NAME,
+            "description": "透過 POST /api/auth 以授權碼登入後核發的身分 cookie。",
+        },
+        "adminCookie": {
+            "type": "apiKey",
+            "in": "cookie",
+            "name": config.ADMIN_COOKIE_NAME,
+            "description": "透過 POST /api/admin/auth 以管理碼登入後核發的管理 cookie。",
+        },
+    }
+    schema["security"] = [{"sessionCookie": []}]
+    admin_prefixes = ("/api/admin", "/api/reindex", "/api/instagram/publish",
+                      "/api/instagram/comments", "/api/instagram/messages",
+                      "/api/learning/approve")
+    for path, ops in schema.get("paths", {}).items():
+        if path.startswith(admin_prefixes) or path == "/api/term":
+            for op in ops.values():
+                if isinstance(op, dict):
+                    op["security"] = [{"sessionCookie": [], "adminCookie": []}]
+    return schema
+
+
+@app.get("/openapi.json", include_in_schema=False)
+async def openapi_json(request: Request) -> JSONResponse:
+    if config.auth_mode() == "token":
+        permissions.require_manage(request)  # 部署模式：管理者才能看 API 規格
+    return JSONResponse(_build_openapi())
 
 
 class ImageAttachment(BaseModel):
@@ -44,6 +185,11 @@ class ChatRequest(BaseModel):
     destination: str = config.DEFAULT_DESTINATION
     model: str | None = None
     attachments: list[ImageAttachment] = Field(default_factory=list, max_length=2)
+    # 結構化研究欄位（政大事故後新增）：前端表單明確指定研究模式與對象時，
+    # 不再只靠一句 prose 讓後端猜。全部可選，舊前端不帶也完全相容。
+    research_mode: str | None = Field(default=None, pattern=r"^(internal|external|comparative)$")
+    research_school: str | None = Field(default=None, max_length=40)
+    research_entity_id: str | None = Field(default=None, max_length=80)
 
 
 class VisualGenerateRequest(BaseModel):
@@ -132,22 +278,67 @@ def current_user(request: Request, response: Response) -> str:
 
 @app.post("/api/auth")
 async def login(req: LoginRequest, request: Request, response: Response) -> dict[str, bool]:
-    auth.login(request, response, req.token)
+    # 授權碼嘗試有專屬節流：全站共用 240/60s 等於允許每分鐘 240 次
+    # 暴力猜測（稽核不可靠 #6）。這裡限到每 IP 10 次/分鐘。
+    ok, retry_after = ratelimit.allow(f"auth:{client_ip(request)}", 10, 60.0)
+    if not ok:
+        raise HTTPException(
+            status_code=429, detail="嘗試次數過多，請稍後再試",
+            headers={"Retry-After": str(retry_after)},
+        )
+    try:
+        auth.login(request, response, req.token)
+    except HTTPException as exc:
+        audit_service.write_audit(
+            action="auth.login",
+            detail={"status": exc.status_code},
+            request=request,
+            ok=False,
+        )
+        raise
+    audit_service.write_audit(
+        action="auth.login",
+        actor_user_id=auth.optional_identity(request),
+        detail={"status": 200},
+        request=request,
+    )
     return {"ok": True}
 
 
 @app.get("/api/auth")
 async def auth_status(request: Request) -> dict[str, Any]:
+    perms = permissions.resolve(request)
     return {
         "mode": config.auth_mode(),
-        "authenticated": auth.optional_identity(request) is not None,
-        "is_admin": auth.admin_identity(request),
+        "authenticated": perms.user_id is not None,
+        "is_admin": perms.can_manage,
+        "permissions": {
+            "can_view": perms.can_view,
+            "can_manage": perms.can_manage,
+            "can_approve": perms.can_approve,
+            "can_spend": perms.can_spend,
+        },
     }
 
 
 @app.post("/api/admin/auth")
 async def admin_login(req: LoginRequest, request: Request, response: Response) -> dict[str, bool]:
-    auth.admin_login(request, response, req.token)
+    try:
+        auth.admin_login(request, response, req.token)
+    except HTTPException as exc:
+        audit_service.write_audit(
+            action="auth.admin_login",
+            detail={"status": exc.status_code},
+            request=request,
+            ok=False,
+        )
+        raise
+    audit_service.write_audit(
+        action="auth.admin_login",
+        actor_user_id=auth.optional_identity(request),
+        detail={"status": 200},
+        request=request,
+    )
     return {"ok": True}
 
 
@@ -163,9 +354,33 @@ async def admin_logout(request: Request, response: Response) -> dict[str, bool]:
     return {"ok": True}
 
 
+def _workspace_html() -> HTMLResponse:
+    return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
-    return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
+    return _workspace_html()
+
+
+@app.get("/generate", response_class=HTMLResponse)
+async def generate_workspace() -> HTMLResponse:
+    return _workspace_html()
+
+
+@app.get("/templates", response_class=HTMLResponse)
+async def templates_workspace() -> HTMLResponse:
+    return _workspace_html()
+
+
+@app.get("/prompt-library", response_class=HTMLResponse)
+async def prompt_library_workspace() -> HTMLResponse:
+    return _workspace_html()
+
+
+@app.get("/visual-assets", response_class=HTMLResponse)
+async def visual_assets_workspace() -> HTMLResponse:
+    return HTMLResponse((STATIC / "visual-assets.html").read_text(encoding="utf-8"))
 
 
 @general_router.get("/health")
@@ -191,6 +406,85 @@ async def ensure_session(req: SessionRequest, user_id: str = Depends(current_use
     store = get_store()
     sess = store.get_session(sid, user_id) or {}
     return {"session_id": sid, "project_id": sess.get("project_id"), "message_count": store.message_count(sid)}
+
+
+# 續接時預設還原的訊息數（約 3–5 輪對話）
+RESUME_RECENT_MESSAGES = 10
+RESUME_FULL_MESSAGES = 100
+
+
+def _visible_messages(raw: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """只留使用者看得懂的對話（user / 有內容的 assistant），不含工具往返。"""
+    out: list[dict[str, str]] = []
+    for m in raw:
+        role = m.get("role")
+        text = (m.get("content") or "").strip()
+        if role == "user" and text:
+            out.append({"role": "user", "text": text})
+        elif role == "assistant" and text and not m.get("tool_calls"):
+            out.append({"role": "assistant", "text": text})
+    return out
+
+
+@general_router.get("/session/resume")
+async def resume_session(
+    session_id: str, full: bool = False, user_id: str = Depends(current_user)
+) -> dict[str, Any]:
+    """回傳續接一個工作階段所需的完整脈絡。
+
+    找不到（過期、被刪、不是自己的）一律 404，前端顯示明確訊息。
+    """
+    store = get_store()
+    sess = store.get_session(session_id, user_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="這個工作階段已過期或不存在，請建立新任務")
+
+    raw = store.load_messages(session_id)
+    visible = _visible_messages(raw)
+    limit = RESUME_FULL_MESSAGES if full else RESUME_RECENT_MESSAGES
+    recent = visible[-limit:]
+
+    project_id = sess.get("project_id")
+    task_type = ""
+    task_label = ""
+    pending_steps: list[str] = []
+    completion_status = ""
+    summary = ""
+    artifacts: list[dict[str, Any]] = []
+    if project_id:
+        project = store.get_project(project_id, user_id) or {}
+        task_type = project.get("task_type") or ""
+        state = memory_service.load_state(store, project_id)
+        if state is not None:
+            task_type = state.task_type.value or task_type
+            pending_steps = [s.description for s in state.plan_steps if not s.done]
+            completion_status = state.completion_status
+        raw_summary = store.recall(project_id).get(memory_service.SUMMARY_KEY)
+        summary = raw_summary["value"] if raw_summary else ""
+        artifacts = [a.public() for a in store.list_artifacts(user_id, project_id=project_id, limit=10)]
+
+    from .skills import SKILL_BY_NAME
+
+    for s in SKILL_BY_NAME.values():
+        if s.task_type == task_type:
+            task_label = s.label
+            break
+
+    return {
+        "session_id": session_id,
+        "title": sess.get("title") or "",
+        "updated_at": sess.get("updated_at"),
+        "task_type": task_type,
+        "task_label": task_label,
+        "messages": recent,
+        "message_count": len(visible),
+        "truncated": len(visible) > len(recent),
+        "pending_steps": pending_steps,
+        "completion_status": completion_status,
+        "summary": summary,
+        "artifacts": artifacts,
+        "project_id": project_id,
+    }
 
 
 @general_router.get("/sessions")
@@ -221,9 +515,26 @@ async def reset(req: SessionRequest, user_id: str = Depends(current_user)) -> di
 
 
 @admin_router.post("/reindex")
-async def reindex() -> dict[str, Any]:
-    index = await asyncio.to_thread(retrieval.get_index, rebuild=True)
-    return index.stats()
+async def reindex(request: Request) -> dict[str, Any]:
+    try:
+        index = await asyncio.to_thread(retrieval.get_index, rebuild=True)
+        stats = index.stats()
+    except Exception as exc:  # noqa: BLE001
+        audit_service.write_audit(
+            action="admin.reindex",
+            actor_user_id=auth.optional_identity(request),
+            detail={"error": str(exc)},
+            request=request,
+            ok=False,
+        )
+        raise
+    audit_service.write_audit(
+        action="admin.reindex",
+        actor_user_id=auth.optional_identity(request),
+        detail=stats,
+        request=request,
+    )
+    return stats
 
 
 @general_router.get("/term")
@@ -407,7 +718,9 @@ async def task_status(project_id: str, user_id: str = Depends(current_user)) -> 
     return _task_payload(project_id, state)
 
 
-async def _control_task(project_id: str, action: str, user_id: str) -> dict[str, Any]:
+async def _control_task(
+    project_id: str, action: str, user_id: str, step_id: str | None = None,
+) -> dict[str, Any]:
     store, state = _task_state(user_id, project_id)
     if action == "pause":
         if state.workflow_status in {WorkflowStatus.COMPLETED, WorkflowStatus.CANCELLED}:
@@ -421,10 +734,16 @@ async def _control_task(project_id: str, action: str, user_id: str) -> dict[str,
         state.completion_status = "in_progress"
         state.next_action = state.next_step().description if state.next_step() else ""
     elif action == "retry":
-        count = state.reset_failed_steps()
-        if not count:
-            raise HTTPException(status_code=409, detail="目前沒有可重試的失敗步驟")
-        state.next_action = "只重試失敗步驟"
+        if step_id:
+            # 單步重試（規格九）：只恢復指定的失敗步驟
+            if not state.reset_step(step_id):
+                raise HTTPException(status_code=409, detail="這個步驟不是失敗狀態，無法單獨重試")
+            state.next_action = "只重試這個步驟"
+        else:
+            count = state.reset_failed_steps()
+            if not count:
+                raise HTTPException(status_code=409, detail="目前沒有可重試的失敗步驟")
+            state.next_action = "只重試失敗步驟"
     elif action == "cancel":
         if state.workflow_status == WorkflowStatus.COMPLETED:
             raise HTTPException(status_code=409, detail="已完成的任務不能取消")
@@ -448,9 +767,15 @@ async def resume_task(project_id: str, user_id: str = Depends(current_user)) -> 
     return await _control_task(project_id, "resume", user_id)
 
 
+class RetryTaskRequest(BaseModel):
+    step_id: str | None = None
+
+
 @general_router.post("/tasks/{project_id}/retry")
-async def retry_task(project_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
-    return await _control_task(project_id, "retry", user_id)
+async def retry_task(
+    project_id: str, req: RetryTaskRequest | None = None, user_id: str = Depends(current_user),
+) -> dict[str, Any]:
+    return await _control_task(project_id, "retry", user_id, step_id=(req.step_id if req else None))
 
 
 @general_router.post("/tasks/{project_id}/cancel")
@@ -481,8 +806,63 @@ async def generate_visual(req: VisualGenerateRequest, user_id: str = Depends(cur
     return {"images": images}
 
 
+# ── 執行中任務登記（取消 + 同 session 防併發）─────────────────
+
+class _TurnRegistry:
+    """每個 session 同時只允許一輪任務；取消時設旗標讓串流即時收尾。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._events: dict[str, asyncio.Event] = {}
+
+    def start(self, session_id: str) -> asyncio.Event | None:
+        with self._lock:
+            if session_id in self._events:
+                return None
+            ev = asyncio.Event()
+            self._events[session_id] = ev
+            return ev
+
+    def cancel(self, session_id: str) -> bool:
+        with self._lock:
+            ev = self._events.get(session_id)
+        if ev is None:
+            return False
+        ev.set()
+        return True
+
+    def finish(self, session_id: str) -> None:
+        with self._lock:
+            self._events.pop(session_id, None)
+
+
+TURNS = _TurnRegistry()
+
+
+# 等模型超過這個秒數就送一行 SSE 註解當心跳，避免中間代理判定閒置斷線
+SSE_HEARTBEAT_SECONDS = 15.0
+
+
+def _sse(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+class CancelRequest(BaseModel):
+    session_id: str
+
+
 @general_router.post("/chat")
 async def chat(req: ChatRequest, user_id: str = Depends(current_user)) -> StreamingResponse:
+    ok, retry_after = ratelimit.allow(
+        f"chat:{user_id}", config.CHAT_RATE_LIMIT, config.CHAT_RATE_WINDOW
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=429,
+            detail="訊息傳送太頻繁，請稍後再試",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     session_id = _resolve_session(user_id, req.session_id)
     attachments: list[dict[str, str]] = []
     for item in req.attachments:
@@ -497,21 +877,91 @@ async def chat(req: ChatRequest, user_id: str = Depends(current_user)) -> Stream
             raise HTTPException(status_code=422, detail="每張圖片需小於 2MB，請壓縮後再加入")
         attachments.append({"name": item.name, "media_type": item.media_type, "data_url": item.data_url})
 
+    cancel_event = TURNS.start(session_id)
+    if cancel_event is None:
+        raise HTTPException(status_code=409, detail="這個工作階段已有正在執行的任務，請先停止或稍候")
+
     async def stream():
-        yield f'data: {json.dumps({"type": "session", "session_id": session_id}, ensure_ascii=False)}\n\n'
+        yield _sse({"type": "session", "session_id": session_id})
+        requested = {
+            k: v
+            for k, v in {
+                "mode": req.research_mode,
+                "school": req.research_school,
+                "entity_id": req.research_entity_id,
+            }.items()
+            if v
+        }
+        agen = orchestrator.run_turn(
+            ctx_mod.RequestContext(user_id=user_id, session_id=session_id),
+            req.message,
+            destination=req.destination,
+            model=req.model,
+            attachments=attachments,
+            requested=requested or None,
+        )
+        cancel_wait = asyncio.create_task(cancel_event.wait())
+        # 整條串流的所有 __anext__ 都要跑在**同一個** Context：
+        # 每個事件各開新 task 會讓 contextvars（RequestContext、研究範圍）
+        # 只活在第一個 task 的複本裡——後續工具執行拿不到身分與 scope，
+        # 產生器收尾時 use() 的 token reset 還會因 context 不同拋 ValueError，
+        # 讓每一輪結尾都多出一個假的「系統忙碌中」錯誤事件。
+        # 同一時間只有一個 __anext__ 在跑，共用 Context 是安全的。
+        stream_ctx = contextvars.copy_context()
+        next_event: asyncio.Task | None = None
+
+        async def _teardown() -> None:
+            """把還在跑的 orchestrator 收乾淨，最後才釋放 session 鎖。
+
+            這個順序就是修復稽核不可靠 #1 的關鍵：鎖必須等舊輪真的停了
+            才能釋放，否則舊輪會在背景繼續呼叫模型並與新輪交錯寫入。
+            aclose 也要在 stream_ctx 裡跑，收尾的 contextvar reset 才對得上。
+            """
+            if next_event is not None and not next_event.done():
+                next_event.cancel()
+                with contextlib.suppress(BaseException):
+                    await next_event
+            with contextlib.suppress(BaseException):
+                await asyncio.create_task(agen.aclose(), context=stream_ctx)
+            TURNS.finish(session_id)
+
         try:
-            async for event in orchestrator.run_turn(
-                ctx_mod.RequestContext(user_id=user_id, session_id=session_id),
-                req.message,
-                destination=req.destination,
-                model=req.model,
-                attachments=attachments,
-            ):
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-        except Exception:  # noqa: BLE001
+            while True:
+                next_event = asyncio.create_task(agen.__anext__(), context=stream_ctx)
+                while True:
+                    done, _pending = await asyncio.wait(
+                        {next_event, cancel_wait},
+                        return_when=asyncio.FIRST_COMPLETED,
+                        timeout=SSE_HEARTBEAT_SECONDS,
+                    )
+                    if done:
+                        break
+                    # 長時間等模型時送 SSE 註解行當心跳，避免中間代理斷線
+                    yield ": ping\n\n"
+                if cancel_wait in done and next_event not in done:
+                    # 使用者按了停止：中斷正在等的模型呼叫、關閉產生器
+                    yield _sse({"type": "cancelled", "text": "已停止生成"})
+                    break
+                try:
+                    event = next_event.result()
+                except StopAsyncIteration:
+                    next_event = None
+                    break
+                next_event = None
+                yield _sse(event)
+                if cancel_event.is_set():
+                    yield _sse({"type": "cancelled", "text": "已停止生成"})
+                    break
+        except Exception:
             logger.exception("chat stream failed")
-            payload = {"type": "error", "text": "系統忙碌中，請稍後再試"}
-            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            yield _sse({"type": "error", "text": "系統忙碌中，請稍後再試"})
+        finally:
+            cancel_wait.cancel()
+            # 客戶端斷線時本 task 已被取消：用 shield 讓收尾在背景完成，
+            # orchestrator 一定會被關閉、鎖一定會被釋放（且不會提前釋放）。
+            cleanup = asyncio.ensure_future(_teardown())
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(cleanup)
         yield 'data: {"type": "done"}\n\n'
 
     return StreamingResponse(
@@ -534,35 +984,156 @@ async def answer_duigao_room_context(req: duigao_integration.DuigaoContextReques
 async def analyze_duigao_asset(req: duigao_integration.DuigaoAssetAnalysisRequest) -> duigao_integration.DuigaoAssetAnalysisResponse:
     """Analyze an approved image/keyframe request without persisting the URL."""
     return await duigao_integration.analyze_asset(req)
+@general_router.post("/chat/cancel")
+async def chat_cancel(req: CancelRequest, request: Request, user_id: str = Depends(current_user)) -> dict[str, Any]:
+    """停止這個 session 正在執行的生成，並釋放 session 執行鎖。
+
+    任務層級的暫停／取消（會改 workflow 狀態）走 /api/tasks/{project_id}/*；
+    這裡只負責把「正在跑的這一輪」停下來。
+    """
+    store = get_store()
+    if not store.get_session(req.session_id, user_id):
+        raise HTTPException(status_code=404, detail="找不到這個工作階段")
+    cancelled = TURNS.cancel(req.session_id)
+    audit_service.write_audit(
+        action="chat.cancel",
+        actor_user_id=user_id,
+        detail={"note": "已送出停止訊號" if cancelled else "目前沒有執行中的任務"},
+        request=request,
+    )
+    return {"ok": True, "cancelled": cancelled}
+
+
+class PublicSourceSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=200)
+    source_ids: list[str] = Field(default_factory=list, max_length=8)
+    limit: int = Field(default=4, ge=1, le=8)
+
+
+class InstagramPublicAccountRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=30)
+    limit: int = Field(default=10, ge=1, le=25)
+
+
+class InstagramHashtagSearchRequest(BaseModel):
+    hashtag: str = Field(min_length=1, max_length=100)
+    limit: int = Field(default=10, ge=1, le=25)
+
+
+@general_router.get("/public-sources")
+async def list_public_sources(query: str = "") -> dict[str, Any]:
+    return {"ok": True, "sources": public_sources_service.list_public_sources(query)}
+
+
+@general_router.post("/public-sources/search")
+async def search_public_sources(req: PublicSourceSearchRequest) -> dict[str, Any]:
+    return public_sources_service.search_public_info(req.query, req.source_ids, req.limit)
+
+
+@general_router.get("/public-sources/{source_id}")
+async def fetch_public_source(source_id: str, query: str = "") -> dict[str, Any]:
+    result = public_sources_service.fetch_public_source(source_id, query)
+    if not result.get("ok") and result.get("code") == "NOT_FOUND":
+        raise HTTPException(status_code=404, detail=result["message"])
+    return result
+
+
+@general_router.post("/instagram/public/account-search")
+async def search_instagram_public_account(req: InstagramPublicAccountRequest) -> dict[str, Any]:
+    return public_sources_service.search_instagram_public_account(req.username, req.limit)
+
+
+@general_router.post("/instagram/public/hashtag-search")
+async def search_instagram_public_hashtag(req: InstagramHashtagSearchRequest) -> dict[str, Any]:
+    return public_sources_service.search_instagram_public_hashtag(req.hashtag, req.limit)
+
+
+class PerplexitySearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    domains: list[str] = Field(default_factory=list, max_length=20)
+    recency: str | None = Field(default=None, pattern=r"^(hour|day|week|month|year)$")
+    max_results: int = Field(default=10, ge=1, le=20)
+
+
+@general_router.post("/public-web-search")
+async def search_public_web(req: PerplexitySearchRequest) -> dict[str, Any]:
+    return perplexity_service.search_web(
+        req.query,
+        domains=req.domains,
+        recency=req.recency,
+        max_results=req.max_results,
+    )
 
 
 @general_router.get("/instagram/status")
 async def instagram_status() -> dict[str, Any]:
     connected = bool(config.INSTAGRAM_ACCESS_TOKEN and config.INSTAGRAM_BUSINESS_ACCOUNT_ID)
-    return {"connected": connected, "mode": "connected" if connected else "draft"}
+    publish_allowed = connected and config.EXTERNAL_PUBLISH_ENABLED
+    return {
+        "connected": connected,
+        "mode": "connected" if publish_allowed else "draft",
+        "publish_enabled": publish_allowed,
+    }
 
 
-async def _instagram_write() -> None:
+@admin_router.get("/admin/audit")
+async def admin_audit(limit: int = 50) -> dict[str, Any]:
+    return {"events": get_store().list_audit(min(max(limit, 1), 200))}
+
+
+class InstagramActionRequest(BaseModel):
+    """對外發佈類操作的共同請求格式。confirm 沒有明確為 true 一律拒絕。"""
+
+    confirm: bool = False
+
+
+def _instagram_write_gate(request: Request, req: InstagramActionRequest, action: str) -> None:
+    """對外發佈的統一守門：登入 → 管理 → 核准權 → 花費權 → 明確確認 → 能力檢查。
+
+    每一步都 fail closed；全部通過後才會碰到「功能尚未啟用」。
+    所有嘗試（不論成敗）都寫入稽核。這些動作同時列在
+    roles.FORBIDDEN_AUTONOMOUS_ACTIONS —— 代理永遠不能自主執行。
+    """
+    actor = auth.optional_identity(request)
+    try:
+        permissions.require_publish(request)
+        permissions.require_confirmation(req.confirm)
+    except HTTPException as exc:
+        audit_service.write_audit(
+            action=f"instagram.{action}",
+            actor_user_id=actor,
+            detail={"note": str(exc.detail)},
+            request=request,
+            ok=False,
+        )
+        raise
+    audit_service.write_audit(
+        action=f"instagram.{action}",
+        actor_user_id=actor,
+        detail={"note": "權限檢查通過，功能尚未啟用"},
+        request=request,
+    )
     if not (config.INSTAGRAM_ACCESS_TOKEN and config.INSTAGRAM_BUSINESS_ACCOUNT_ID):
         raise HTTPException(status_code=501, detail="尚未連接 Instagram 官方 API，目前為草稿模式")
     raise HTTPException(status_code=501, detail="Instagram 發布功能尚未啟用")
 
 
-@admin_router.post("/instagram/publish")
-async def instagram_publish() -> None:
-    await _instagram_write()
+@app.post("/api/instagram/publish")
+async def instagram_publish(req: InstagramActionRequest, request: Request) -> None:
+    _instagram_write_gate(request, req, "publish")
 
 
-@admin_router.post("/instagram/comments/reply")
-async def instagram_reply() -> None:
-    await _instagram_write()
+@app.post("/api/instagram/comments/reply")
+async def instagram_reply(req: InstagramActionRequest, request: Request) -> None:
+    _instagram_write_gate(request, req, "reply")
 
 
-@admin_router.post("/instagram/messages/send")
-async def instagram_send() -> None:
-    await _instagram_write()
+@app.post("/api/instagram/messages/send")
+async def instagram_send(req: InstagramActionRequest, request: Request) -> None:
+    _instagram_write_gate(request, req, "send")
 
 
 app.include_router(general_router)
 app.include_router(admin_router)
 app.include_router(duigao_router)
+app.include_router(visual_router)

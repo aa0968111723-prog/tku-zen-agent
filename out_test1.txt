@@ -1,0 +1,7 @@
+turn1 mode: external entities: ['tmu-zen'] schools: ['臺北醫學大學'] pending: False completion: in_progress
+'我們的期初茶會要準備什麼呢' -> mode: external schools: ['臺北醫學大學'] skill: social_research inherited: True pending: False
+'今年社費多少呢' -> mode: external schools: ['臺北醫學大學'] skill: social_research inherited: True pending: False
+'幫我列出幹部他們的分工' -> mode: external schools: ['臺北醫學大學'] skill: social_research inherited: True pending: False
+'接下來我該做什麼呢？' -> mode: external schools: ['臺北醫學大學'] skill: social_research inherited: True pending: False
+turn1b mode: external schools: ['國立政治大學'] pending: True
+awaiting + internal q: external ['國立政治大學'] pending: True skill: social_research

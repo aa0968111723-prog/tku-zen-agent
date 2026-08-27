@@ -163,7 +163,10 @@ def create_document(
 
     details: list[str] = []
     if also_markdown:
-        md_path = path.with_suffix(".md")
+        # 孿生 .md 不能直接 with_suffix 覆寫：跨工具同 stem（報名表.gs 與
+        # 報名表.docx）會互相蓋掉彼此的 .md（稽核不可靠 #36）。
+        # 走 unique_path 且帶上專屬字尾。
+        md_path = unique_path(path.parent, f"{path.stem}-文字版.md")
         md_path.write_text(markdown, encoding="utf-8")
         details.append(f"　· 同時存了純文字版：{md_path.name}")
 

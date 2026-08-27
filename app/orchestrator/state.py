@@ -105,6 +105,16 @@ class OrchestrationState:
     next_action: str = ""
     metrics: dict[str, Any] = field(default_factory=dict)
 
+    # ── 研究驗證（政大事故後新增）────────────────────────
+    research_mode: str = "internal"          # internal | external | comparative
+    research_scope: dict[str, Any] = field(default_factory=dict)   # ResearchScope.to_dict()
+    research_status: str = "internal"        # research.verifier 的完成狀態
+    target_entities: list[str] = field(default_factory=list)
+    target_schools: list[str] = field(default_factory=list)
+    clarification_pending: bool = False
+    source_cards: list[dict[str, Any]] = field(default_factory=list)
+    claim_records: list[dict[str, Any]] = field(default_factory=list)
+
     # ── 進度 ─────────────────────────────────────────────
 
     def mark_step(self, index: int, note: str = "") -> None:
@@ -147,6 +157,22 @@ class OrchestrationState:
             self.stage = Stage.EXECUTE
             self.last_error_code = ""
         return count
+
+    def reset_step(self, step_id: str) -> bool:
+        """單步重試：只把指定的失敗步驟恢復成待執行（規格九：重試單一步驟）。"""
+        for step in self.plan_steps:
+            if step.step_id == step_id:
+                if step.status != "failed":
+                    return False
+                step.status = "pending"
+                step.done = False
+                step.last_error = ""
+                self.workflow_status = WorkflowStatus.IN_PROGRESS
+                self.completion_status = "in_progress"
+                self.stage = Stage.EXECUTE
+                self.last_error_code = ""
+                return True
+        return False
 
     def next_step(self) -> PlanStep | None:
         return next((s for s in self.plan_steps if not s.done and s.status != "skipped"), None)

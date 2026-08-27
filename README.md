@@ -7,24 +7,57 @@
 507 份歷年檔案**（企劃書、活動細流、社評報告、社課簡報、IG 文案、財務表、
 挑戰營資料），所以做出來的東西跟社團一直以來的格式對得上。
 
-用 NVIDIA Build 的**免費模型**驅動，不用付月費。
+模型層可切換供應商（兩家都是 OpenAI 相容端點，只差設定）：
+
+- **Zeabur AI Hub**（建議）—— 一把金鑰通到 GPT／Claude／Gemini／Grok，預付點數計費，
+  工具呼叫穩定度明顯優於開源模型。
+- **NVIDIA Build** —— 免費額度、開源模型，不用付月費。
+
+圖片的**輸入（理解上傳的照片、海報）與輸出（生成視覺稿）**都走 **fal.ai**；
+沒設定 `FAL_KEY` 時圖片功能會誠實說明未啟用，純文字任務不受影響。
+
+現在另有正式的**人物／場景／日期／活動／社團視覺資料庫**：進入工作台後按
+「視覺資料庫」，即可批次上傳、查看品質與 OCR 證據、人工確認人物／活動、用
+自然語言或另一張圖片找照片，並匯出社群比例圖片或含 JSON／CSV 的素材包。
+設計與部署細節見 [視覺資料庫文件](docs/VISUAL_ASSET_DATABASE.md)。
+
+另提供可選的 **InsForge 遠端資料層**：本機 SQLite 仍是 source-of-truth，可將
+專案、Artifact、活動、研究來源、知識文件／chunks 與視覺素材同步至 PostgreSQL、
+pgvector 與 private Storage。聊天、工作記憶、快取、audit IP 與憑證預設永不同步；
+遠端不可用時本機功能照常運作。
 
 ---
 
 ## 三分鐘上手
 
-### 1. 拿一組免費的 NVIDIA 金鑰
+### 1. 拿一組模型金鑰（擇一）
 
-到 <https://build.nvidia.com/settings/api-keys> 註冊並產生金鑰。
+**Zeabur AI Hub**（建議）：Zeabur 後台 → AI Hub → API Keys。預付點數，
+一把金鑰即可用 GPT-4o／Claude／Gemini／Grok，換模型只要改 `LLM_MODEL`。
+
+**NVIDIA Build**（免費）：<https://build.nvidia.com/settings/api-keys> 註冊並產生金鑰。
 不用信用卡，註冊送 1,000 點推論額度（可申請加到 5,000），每分鐘 40 次請求。
+
+圖片功能另外需要 fal.ai 金鑰：<https://fal.ai/dashboard/keys>（選用）。
 
 ### 2. 雙擊 `啟動.bat`
 
 第一次會自動建立 Python 環境、安裝套件、開記事本讓你貼金鑰：
 
 ```
-NVIDIA_API_KEY=nvapi-你的金鑰
+# Zeabur AI Hub（建議）
+LLM_PROVIDER=zeabur
+ZEABUR_API_KEY=你的金鑰
+
+# 或 NVIDIA Build（免費）
+# NVIDIA_API_KEY=nvapi-你的金鑰
+
+# 圖片理解與視覺稿（選用）
+FAL_KEY=你的-fal-金鑰
 ```
+
+模型可用 `LLM_MODEL` 指定（留空用供應商預設）；端點用 `LLM_BASE_URL`
+（Zeabur 東京 `https://hnd1.aihub.zeabur.ai/v1`、美西 `https://sfo1.aihub.zeabur.ai/v1`）。
 
 ### 3. 瀏覽器打開 <http://127.0.0.1:8848>
 
@@ -139,11 +172,28 @@ Google 沒有可以直接呼叫的表單建立 API。代理改成產一支 Apps 
 1. 推到 GitHub（`.env`、`data/`、產出檔都在 `.gitignore` 裡）
 2. Zeabur → 新增服務 → 從 GitHub 部署
 3. 環境變數：
-   - `NVIDIA_API_KEY`
+   - `LLM_PROVIDER=zeabur` ＋ `ZEABUR_API_KEY`（或改用 `NVIDIA_API_KEY`）
+   - `FAL_KEY`（圖片理解與視覺稿；不設就停用圖片功能）
    - **`APP_ACCESS_TOKEN`** ← 一般授權碼，一定要設，見下
    - **`ADMIN_ACCESS_TOKEN`** ← 管理授權碼（重建索引、改本學期資料、Instagram 連接）
    - `DEFAULT_DESTINATION=drive`
    - `DRIVE_FOLDER_ID`
+   - `VISUAL_ASSET_DIR=/persistent/visual-assets`（必須使用持久化磁碟）
+   - `VISUAL_EXPORT_DIR=/persistent/visual-exports`
+   - 選用 InsForge：`INSFORGE_BASE_URL`、`INSFORGE_SERVICE_KEY`、`INSFORGE_OWNER_ID`
+   - 啟用前設 `INSFORGE_TRUSTED=true`；知識／private binary 仍各自需要明確 opt-in
+
+### Drive 上傳需要另外掛憑證
+
+光設 `DEFAULT_DESTINATION=drive` 還不夠：`.dockerignore` 刻意把
+`data/google_credentials.json` 與 token 檔排除在映像之外（金鑰不進映像），
+而 `GOOGLE_CREDENTIALS_FILE` **只接受檔案路徑**、不接受直接貼 JSON 內容。
+部署上要用 Drive，必須把服務帳號 JSON 放上平台的持久化磁碟（或在啟動流程
+自行把環境變數內容寫成檔案），再把 `GOOGLE_CREDENTIALS_FILE` 指到那個路徑，
+並把目標資料夾分享給服務帳號的信箱。
+
+沒掛憑證時 `destination=drive` 的上傳會失敗——檔案仍會產出，但只存在容器內
+的 `outputs/`（暫存空間，**容器重啟即消失**），請定期下載保存。
 
 ### 安全注意事項
 
@@ -156,16 +206,60 @@ Google 沒有可以直接呼叫的表單建立 API。代理改成產一支 Apps 
 - 猜別人的 session id 讀不到東西，別人的檔案也下載不到
 
 **部署環境（偵測到 PORT／ZEABUR／RAILWAY 或綁 0.0.0.0）沒設 `APP_ACCESS_TOKEN` 會直接拒絕啟動**，
-不再只是警告。另外：
+不再只是警告。平台上的症狀是容器一直重啟（Zeabur 記錄會看到
+`BackOff: Back-off restarting failed container`）；啟動記錄裡會印出完整的
+補救步驟，補上環境變數後重新部署即可。
+
+環境變數的值請只填授權碼本身，不要連前後引號一起貼——引號會被當成授權碼的一部分。
+（`APP_ACCESS_TOKEN`、`ADMIN_ACCESS_TOKEN`、`ZEABUR_API_KEY`、`NVIDIA_API_KEY`、`FAL_KEY`、`INSTAGRAM_ACCESS_TOKEN`
+已經會自動去掉貼錯的引號。）
+
+另外：
 
 - 授權碼連錯 5 次鎖 15 分鐘（IP＋cookie 雙維度），錯誤訊息統一為「授權碼不正確」
+- `POST /api/auth` 另有專屬節流：每 IP 每分鐘 10 次，超過回 429——全站 240 次/分的
+  通用限流擋不住暴力猜碼，所以這條路獨立收緊
+- 反向代理（Zeabur／nginx）後不拿代理位址當 key：只在直連端是可信代理（私有／loopback）
+  時才看 `X-Forwarded-For`，且取**最右邊的非私有跳**，客戶端自帶的偽造值一律忽略
+- 登入鎖定與限流共用同一套客戶端 IP 判定（`app/services/clientip.py`），
+  不會出現「鎖定與限流各認一個 IP」的縫隙
+- 空字串、只有空白、`null` 的授權碼都視同錯誤，一樣回 401 並計入失敗次數
 - 重新輸入授權碼會沿用同一個身分，歷史任務與產出不會消失
-- 管理功能（`/api/reindex`、修改本學期資料、`/api/admin/*`、`/api/instagram/*` 寫入）需要第二組 `ADMIN_ACCESS_TOKEN`
+- 管理功能（`/api/reindex`、修改本學期資料、`/api/admin/*`）需要第二組 `ADMIN_ACCESS_TOKEN`
 - Instagram 未連接官方 API 前一律「草稿模式」：只產草稿，不會、也不能自動發布
+
+#### 權限分成四種，不是只有「是不是管理者」
+
+| 權限 | 誰有 | 管到什麼 |
+|---|---|---|
+| `can_view` | 登入即有 | 讀知識庫、對話、自己的產出 |
+| `can_manage` | 管理者 | 改本學期資料、重建索引、看稽核紀錄與 API 規格 |
+| `can_approve` | 管理者 **且** `EXTERNAL_PUBLISH_ENABLED=1` | 核准對外發佈 |
+| `can_spend` | 管理者 **且** `EXTERNAL_PUBLISH_ENABLED=1` | 動用會花錢／消耗額度的外部 API |
+
+`can_approve` 與 `can_spend` 預設**沒有任何人擁有**。Instagram 的發佈、
+回覆留言、傳送訊息要同時通過「登入 → 管理 → 核准權 → 花費權 → 明確確認
+（`confirm: true`）→ 功能已啟用」六道關卡，缺任何一道都直接擋下。
+這是刻意的：預設永遠是草稿模式。
+
+#### 其他防護
+
+- **`/openapi.json` 在部署模式要管理者授權**才看得到；`/docs`、`/redoc` 一律關閉
+- 全站回應帶 `Content-Security-Policy`、`X-Content-Type-Options`、`Referrer-Policy`、
+  `X-Frame-Options`、`Permissions-Policy`；部署模式另加 `Strict-Transport-Security`
+- 改變狀態的請求會比對 `Origin`（CSRF 縱深防禦），cookie 全部 `HttpOnly`＋`SameSite`，
+  部署模式再加 `Secure`；管理 cookie 用 `SameSite=strict`
+- `/api/chat` 有獨立的每人限流（預設每分鐘 12 次），其餘 API 每 IP 每分鐘 240 次
+- 登入成敗、管理操作、發佈嘗試都寫進 `audit_logs`，但**絕不記錄授權碼本身**
+  （管理者可在 `/api/admin/audit` 查看）
+- 同一個工作階段同時只跑一輪任務，重複送出回 409；「停止生成」會呼叫
+  `/api/chat/cancel` 釋放執行鎖，避免額度被並行請求吃光
 
 **容器重啟後本機檔案與 SQLite 會消失。** 所以：
 - 產出落點設 `drive`
 - 如果平台有持久化磁碟，把 `DB_PATH` 指到掛載點，否則對話紀錄不會保留
+- 視覺資料庫要把 `VISUAL_ASSET_DIR` 與 `DB_PATH` 放在同一組持久化備份；
+  原圖不會自動刪除或覆寫，不能只備份資料庫而漏掉圖片目錄
 
 ---
 
@@ -181,6 +275,10 @@ knowledge/
 ```
 
 改完重啟，或呼叫 `POST /api/reindex`。
+
+> 這條流程只適用本機。部署版（Zeabur）的 `knowledge/` 是 **build 時燒進 Docker 映像**的：
+> 容器裡改檔案改不到，`/api/reindex` 也只能就映像內既有的內容重建索引。
+> 要更新部署版的知識庫，請把改好的檔案推上 GitHub 後**重新部署**。
 
 ### 匯入共用雲端的歷年檔案
 
@@ -216,14 +314,15 @@ python scripts/ingest_line.py --dry-run
 
 ```bash
 python scripts/selftest.py    # 快速檢查，30 秒
-python -m pytest              # 347 個測試（含活動／工作流／SSE／artifact／認證／權限／網宣）
-python -m evals               # 60 個真實社團情境
+python -m pytest              # 700+ 個測試（含認證／權限／SSE／視覺資料庫／跨校隔離／以圖搜圖／手機版）
+python -m evals               # 64 個真實社團情境
 ```
 
 **全部不需要 API 金鑰。** 需要模型回應的地方用可腳本化的假模型，
 所以 CI 與離線環境都跑得完。要量真實模型加 `python -m evals --live`。
 
-Evals 的九個維度與目前分數：
+Evals 共 64 個情境，含事件流斷言與學校歸屬幻覺偵測，單一案例失敗 CI 即紅。
+九個維度與目前分數：
 
 | 維度 | 分數 |
 |---|---|
@@ -243,31 +342,46 @@ Evals 的九個維度與目前分數：
 
 ```
 app/
-├── main.py               FastAPI 路由、認證、SSE
+├── main.py               FastAPI 路由、認證、任務控制、活動 API、SSE
+├── llm.py                模型用戶端（Zeabur AI Hub／NVIDIA Build 可切換、重試、telemetry）
 ├── orchestrator/         Understand→Plan→Retrieve→Execute→Verify→Repair→Deliver
-│   ├── planner.py        規則式意圖分類與計畫
+│   ├── planner.py        規則式意圖分類、複合任務依賴計畫
 │   ├── prompt.py         分層系統提示（事實優先順序）
-│   └── state.py          可序列化的任務狀態
+│   └── state.py          可序列化的任務狀態（步驟、metrics、工作流控制）
 ├── rag/                  Hybrid 檢索
-│   ├── metadata.py       從路徑推學年度/活動/文件類型/對內外
+│   ├── metadata.py       從路徑推學年度/活動/文件類型/對內外；外校 captured_at
 │   ├── query.py          Query rewrite
 │   ├── semantic.py       本機 LSA（scipy 稀疏 SVD）
 │   ├── hybrid.py         RRF 融合 + metadata 重排
-│   └── context.py        標註來源與年份的 context builder
+│   ├── conflicts.py      來源級衝突與過期資料偵測
+│   └── context.py        標註來源與年份的 context builder、外校資料硬過濾
+├── research/             實體辨識與驗證層（「政大呢」事故後新增）
+│   ├── entities.py       entity registry、學校別名詞界防護、反問判定
+│   ├── claims.py         來源證據模型（SourceRecord／ClaimRecord）
+│   └── verifier.py       回答品質閘門與資料污染偵測
 ├── retrieval.py          BM25（中文二元組、標題加權、文件層級加權）
 ├── services/
 │   ├── session_store.py  SQLite：user/session/project/message/artifact/memory
 │   ├── activities.py     活動缺口、逾期、分工與衍生產出摘要
-│   ├── auth.py           本機單人 / 部署存取碼
+│   ├── auth.py           本機單人 / 部署存取碼、登入鎖定
+│   ├── clientip.py       反向代理後的真實客戶端 IP 判定（XFF 最右非私有跳）
+│   ├── ratelimit.py      行程內滑動視窗限流
+│   ├── permissions.py    view/manage/approve/spend 四權限模型
+│   ├── audit.py          Append-only 稽核紀錄與敏感字串遮罩
+│   ├── security.py       密鑰遮罩與稽核輔助
+│   ├── roles.py          角色常數
 │   ├── current_term.py   本學期真實資料
 │   ├── memory.py         工作記憶、事實抽取、對話壓縮
+│   ├── fal.py            fal.ai 視覺服務（圖片理解與視覺稿）
+│   ├── data_organization.py 現有資料盤點、lineage、Entity Graph 與可續傳 mapping
+│   ├── library_context.py ACL-first Library→Project→Scene→Shot 素材解析
 │   └── context.py        請求身分（contextvars）
 ├── skills/               11 個 skill 與規則式路由
 ├── verification/         產出檢查與修正指示
-├── tools/                25 個工具
+├── tools/                26 個工具（含受 ACL 保護的素材庫搜尋）
 └── static/               聊天介面、本學期設定
-evals/                    60 個情境 + 九維評分
-tests/                    347 個測試
+evals/                    64 個情境 + 九維評分 + 事件流斷言
+tests/                    700+ 個測試
 ```
 
 ### 幾個刻意的取捨
@@ -308,7 +422,7 @@ scipy 沒裝或語料太小時自動降級成純 BM25。
 
 | 症狀 | 原因 |
 |---|---|
-| 黃色警告說沒有金鑰 | `.env` 的 `NVIDIA_API_KEY` 沒填或填錯 |
+| 黃色警告說沒有金鑰 | `.env` 的 `ZEABUR_API_KEY`／`NVIDIA_API_KEY` 沒填或填錯 |
 | 「金鑰被拒（401）」 | 金鑰失效，重新產一組 |
 | 「找不到模型（404）」 | 模型代號改了，到 build.nvidia.com/models 查 |
 | 「連續呼叫失敗」 | 免費額度用完、超過每分鐘 40 次、或網路問題 |
@@ -317,3 +431,4 @@ scipy 沒裝或語料太小時自動降級成純 BM25。
 | 一直說「還沒設定」 | 同上。它不會猜今年的資料 |
 | 產出內容有錯 | 先看是不是知識庫要更新，改 `knowledge/` 比改程式有效 |
 | 部署後大家共用同一份對話 | 沒設 `APP_ACCESS_TOKEN` |
+| 部署後容器一直重啟（BackOff） | 沒設 `APP_ACCESS_TOKEN`，看啟動記錄的指示補上環境變數 |

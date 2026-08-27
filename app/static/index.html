@@ -3,12 +3,20 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#1f5673">
+<meta name="theme-color" content="#050607">
 <title>淡江大學領袖禪學社 · 工作台</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧘</text></svg>">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+
+<div id="bg-fx" aria-hidden="true">
+  <span class="fx-halo fx-red"></span>
+  <span class="fx-halo fx-yellow"></span>
+  <span class="fx-halo fx-green"></span>
+  <span class="fx-orbit"></span>
+  <span class="fx-orbit fx-orbit-2"></span>
+</div>
 
 <div id="gate" class="gate" hidden>
   <form class="gate-card" id="gate-form">
@@ -23,66 +31,76 @@
 
 <div id="app" hidden>
 
-  <p id="draft-bar" class="draft-bar">目前為草稿模式——不會自動發布任何內容</p>
-
   <header class="topbar">
-    <div class="brand">
-      <span class="mark" aria-hidden="true"></span>
-      <div class="brand-text">
-        <strong>領袖禪學社</strong>
-        <span id="term-label">視覺化 AI 任務工作台</span>
-      </div>
-      <div id="ai-orb" class="ai-orb is-idle" role="status" aria-live="polite" aria-label="禪光 AI：等待中">
-        <span class="ai-orb-core" aria-hidden="true"></span>
-        <span id="ai-orb-label" class="ai-orb-label">等待中</span>
-      </div>
+    <button id="ai-orb" class="ai-orb is-idle" type="button" aria-live="polite" aria-label="禪光 AI：等待中，開啟任務摘要">
+      <span class="ai-orb-visual" aria-hidden="true">
+        <span class="orb-ring ring-red"></span>
+        <span class="orb-ring ring-yellow"></span>
+        <span class="orb-ring ring-green"></span>
+        <span class="orb-ring ring-cyan"></span>
+        <span class="ai-orb-core"></span>
+      </span>
+    </button>
+    <div class="brand-text">
+      <strong id="project-name">領袖禪學社</strong>
+      <span id="work-status">等待中</span>
+      <span id="term-label" class="sr-only">視覺化 AI 任務工作台</span>
     </div>
+    <p id="draft-bar" class="draft-chip">草稿<span class="sr-only">目前為草稿模式——不會自動發布任何內容</span></p>
     <div class="top-actions">
-      <button id="reset" class="ghost" type="button">新任務</button>
-      <button id="settings-btn" class="icon-btn" type="button" aria-label="開啟設定" aria-haspopup="dialog" aria-controls="settings">
-        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M5 12H3M21 12h-2M6.3 6.3l1.4 1.4M16.3 16.3l1.4 1.4M17.7 6.3l-1.4 1.4M7.7 16.3l-1.4 1.4"/></svg>
+      <button id="more-menu-btn" class="icon-btn" type="button" aria-label="開啟選單" aria-haspopup="dialog" aria-controls="app-menu-sheet">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="6" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="12" cy="18" r="1.4"/></svg>
       </button>
+      <button id="settings-btn" class="sr-only" type="button" aria-label="開啟設定" aria-haspopup="dialog" aria-controls="settings">設定</button>
     </div>
   </header>
+
+  <div id="task-rail" class="task-rail" hidden>
+    <div class="task-rail-track" aria-hidden="true"><span id="task-rail-bar"></span></div>
+    <p id="task-rail-label">排隊中</p>
+  </div>
 
   <div id="banner" class="banner" hidden></div>
   <p id="status-bar" class="status-bar" role="status" aria-live="polite" aria-atomic="true"></p>
 
   <div id="workspace">
     <section id="home" class="home">
-      <h1>今天要做什麼？</h1>
-      <p class="lede">用一句話開始；送出前會先幫你確認真正影響成果的資訊。</p>
-      <nav class="mode-switch" aria-label="選擇任務方式">
-        <button type="button" class="mode-chip is-active" data-mode="ask" aria-pressed="true">問 AI</button>
-        <button type="button" class="mode-chip" data-mode="generate" aria-pressed="false">直接生成</button>
-        <button type="button" class="mode-chip" data-mode="template" aria-pressed="false">製作範本</button>
-        <button type="button" class="mode-chip" data-mode="plan" aria-pressed="false">執行計畫</button>
-      </nav>
-      <section class="input-guide" aria-labelledby="input-guide-title">
-        <h2 id="input-guide-title">從這裡開始</h2>
-        <p id="mode-hint" class="muted">描述你想完成的事，AI 會先整理成可確認的任務摘要。</p>
-        <div class="suggestion-row" id="suggestions" aria-label="提示詞範例">
-          <button type="button" data-prompt="幫我規劃一場新生茶會，時間地點待填">規劃新生茶會</button>
-          <button type="button" data-prompt="幫我寫一則招生 IG 貼文，語氣自然親切">寫招生貼文</button>
-          <button type="button" data-prompt="查詢本學期社課時間與報名方式">查社團資料</button>
+      <div class="workbench" id="workbench">
+        <div class="workbench-head">
+          <p class="workbench-kicker">AI 創作工作台</p>
+          <h1 class="workbench-title">用一句話開始</h1>
         </div>
-      </section>
-      <div class="quick-grid" id="quick-actions">
-        <button type="button" data-action="ig">填入：做網宣</button>
-        <button type="button" data-action="event">填入：規劃活動</button>
-        <button type="button" data-action="lookup">填入：查社團資料</button>
-        <button type="button" data-action="research">填入：研究其他學校</button>
-        <button type="button" data-action="docs">填入：產生文件</button>
-        <button type="button" data-action="continue">繼續上一個任務</button>
+        <div class="mode-tabs" role="tablist" aria-label="工作模式">
+          <button type="button" class="mode-chip is-active" role="tab" id="tab-ask" data-mode="ask" aria-selected="true" aria-controls="panel-mode" tabindex="0">問 AI</button>
+          <button type="button" class="mode-chip" role="tab" id="tab-generate" data-mode="generate" aria-selected="false" aria-controls="panel-mode" tabindex="-1">直接生成</button>
+          <button type="button" class="mode-chip" role="tab" id="tab-template" data-mode="template" aria-selected="false" aria-controls="panel-mode" tabindex="-1">製作範本</button>
+          <button type="button" class="mode-chip" role="tab" id="tab-plan" data-mode="plan" aria-selected="false" aria-controls="panel-mode" tabindex="-1">執行計畫</button>
+        </div>
+        <div id="panel-mode" class="mode-panel" role="tabpanel" aria-labelledby="tab-ask">
+          <p id="mode-hint" class="mode-hint">描述你想完成的事，AI 會先整理成可確認的任務摘要。</p>
+          <div class="quick-row" id="quick-actions" aria-label="快速操作">
+            <button type="button" data-action="lookup">找資料</button>
+            <button type="button" data-action="ig">做網宣</button>
+            <button type="button" id="more-actions-btn" data-more="1">更多</button>
+          </div>
+        </div>
       </div>
 
-      <section class="home-block">
-        <h2>最近任務</h2>
-        <div id="recent-sessions" class="home-list"></div>
-      </section>
-      <section class="home-block">
-        <h2>最近產出</h2>
-        <div id="recent-artifacts" class="home-list"></div>
+      <div id="suggestions" class="sr-only" aria-hidden="true">
+        <button type="button" data-prompt="幫我規劃一場新生茶會，時間地點待填">規劃新生茶會</button>
+        <button type="button" data-prompt="幫我寫一則招生 IG 貼文，語氣自然親切">寫招生貼文</button>
+        <button type="button" data-prompt="查詢本學期社課時間與報名方式">查社團資料</button>
+      </div>
+
+      <section class="home-extras" aria-label="近期紀錄">
+        <section class="home-block">
+          <h2>最近任務</h2>
+          <div id="recent-sessions" class="home-list"></div>
+        </section>
+        <section class="home-block">
+          <h2>最近產出</h2>
+          <div id="recent-artifacts" class="home-list"></div>
+        </section>
       </section>
     </section>
 
@@ -147,22 +165,70 @@
   </div>
 
   <footer class="composer" id="composer">
+    <p id="attachment-status" class="attachment-status" aria-live="polite" hidden></p>
     <div class="composer-inner">
-      <div class="composer-tools" aria-label="加入內容工具">
-        <label class="composer-tool" for="attachment" title="加入文字文件或圖片">
-          <span>附件</span><span class="sr-only">加入附件或文件</span>
-        </label>
-        <input id="attachment" type="file" accept=".txt,.md,.csv,text/plain,text/markdown,text/csv,image/jpeg,image/png,image/webp" aria-label="加入文字文件或圖片">
-        <button id="voice-input" class="composer-tool" type="button" aria-label="使用語音輸入">語音</button>
-      </div>
-      <textarea id="input" rows="1" aria-label="任務需求" placeholder="例如：幫我寫三則招生貼文草稿…"></textarea>
-      <button id="clear-input" class="composer-tool" type="button" aria-label="清除輸入內容">清除</button>
+      <button id="composer-plus" class="composer-plus" type="button" aria-label="加入附件、語音或清除" aria-haspopup="dialog" aria-controls="composer-plus-sheet">＋</button>
+      <textarea id="input" rows="2" aria-label="任務需求" placeholder="例如：幫我寫三則招生貼文草稿…"></textarea>
       <button id="send" type="button" aria-label="整理任務並送出">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4Z"/></svg>
+      </button>
+      <button id="stop" type="button" aria-label="停止生成" hidden>
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" stroke="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
       </button>
     </div>
   </footer>
 
+  <button id="task-fab" class="task-fab" type="button" hidden aria-label="查看任務摘要">任務</button>
+
+</div>
+
+<div id="composer-plus-sheet" class="modal" hidden>
+  <section class="modal-card sheet" role="dialog" aria-modal="true" aria-labelledby="composer-plus-title">
+    <header class="modal-head">
+      <h2 id="composer-plus-title">加入內容</h2>
+      <button class="icon-btn" id="composer-plus-close" type="button" aria-label="關閉加入內容選單">×</button>
+    </header>
+    <div class="sheet-actions">
+      <label class="sheet-action" for="attachment">
+        <span>附件</span>
+        <span class="muted">加入文字文件或圖片</span>
+      </label>
+      <input id="attachment" type="file" accept=".txt,.md,.csv,text/plain,text/markdown,text/csv,image/jpeg,image/png,image/webp" aria-label="加入文字文件或圖片">
+      <button id="voice-input" class="sheet-action" type="button" aria-label="使用語音輸入">語音<span class="muted">說完後會填入輸入框</span></button>
+      <button id="clear-input" class="sheet-action" type="button" aria-label="清除輸入內容">清除<span class="muted">清空文字與已加入的圖片</span></button>
+    </div>
+  </section>
+</div>
+
+<div id="app-menu-sheet" class="modal" hidden>
+  <section class="modal-card sheet" role="dialog" aria-modal="true" aria-labelledby="app-menu-title">
+    <header class="modal-head">
+      <h2 id="app-menu-title">選單</h2>
+      <button class="icon-btn" id="app-menu-close" type="button" aria-label="關閉選單">×</button>
+    </header>
+    <div class="sheet-actions">
+      <button id="reset" class="sheet-action" type="button">新任務<span class="muted">清除目前對話並重新開始</span></button>
+      <a class="sheet-action visual-db-link" href="/visual-assets">視覺資料庫<span class="muted">查看已整理的圖片與素材</span></a>
+      <button id="open-settings-from-menu" class="sheet-action" type="button">設定<span class="muted">產出位置、模型與管理</span></button>
+    </div>
+  </section>
+</div>
+
+<div id="more-actions-sheet" class="modal" hidden>
+  <section class="modal-card sheet" role="dialog" aria-modal="true" aria-labelledby="more-actions-title">
+    <header class="modal-head">
+      <h2 id="more-actions-title">更多操作</h2>
+      <button class="icon-btn" id="more-actions-close" type="button" aria-label="關閉更多操作">×</button>
+    </header>
+    <div class="sheet-actions" id="more-actions-list">
+      <button type="button" data-action="event">規劃活動<span class="muted">填入：規劃活動</span></button>
+      <button type="button" data-action="research">研究其他學校<span class="muted">填入：研究其他學校</span></button>
+      <button type="button" data-action="docs">產生文件<span class="muted">填入：產生文件</span></button>
+      <button type="button" data-action="continue">繼續上一個任務</button>
+      <button type="button" id="more-progress-btn">查看進度</button>
+    </div>
+    <p class="sr-only">填入：做網宣</p>
+  </section>
 </div>
 
 <div id="preflight-sheet" class="modal" hidden>
@@ -192,6 +258,7 @@
       <button class="icon-btn" id="task-summary-close" type="button" aria-label="關閉任務摘要">×</button>
     </header>
     <div id="task-summary-body" class="task-summary-body"></div>
+    <footer class="modal-foot task-summary-foot" id="task-summary-actions"></footer>
   </section>
 </div>
 
@@ -243,9 +310,8 @@
       <button class="icon-btn" id="session-close" type="button" aria-label="關閉">×</button>
     </header>
     <div id="session-list" class="home-list pad"></div>
-      </div>
-      <p id="attachment-status" class="attachment-status" aria-live="polite" hidden></p>
-    </div>
+  </div>
+</div>
 
 <div id="term-modal" class="modal" hidden>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="term-title">

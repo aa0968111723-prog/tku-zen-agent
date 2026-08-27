@@ -1,0 +1,625 @@
+"""回答品質閘門（claim verification）與資料污染偵測。
+
+在 AI 回答送給使用者之前跑，規則式、確定性：
+
+  1. 找出回答中與研究對象有關的句子（claims）。
+  2. 每個 claim 對照該實體的來源摘錄，算支持度。
+  3. 淡江招牌活動出現在外校句子裡 → 資料歸屬錯誤，阻止輸出。
+  4. 研究對象沒有任何相符來源卻寫得斬釘截鐵 → 阻止輸出。
+  5. 推測沒放在【可能推測】區 → 降級為「部分內容尚未驗證」。
+
+最高原則：沒有證據，不要下結論。對象不明，不要猜。
+來源錯誤，不要完成。資料混淆，必須阻止輸出。
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+from .claims import (
+    STATUS_CONFLICTED,
+    STATUS_INFERRED,
+    STATUS_INSUFFICIENT,
+    STATUS_PARTIAL,
+    STATUS_STALE,
+    STATUS_VERIFIED,
+    STATUS_WRONG_ENTITY,
+    ClaimRecord,
+    SourceRecord,
+)
+from .entities import (
+    HOME_ENTITY_ID,
+    EntityResolution,
+    ResearchMode,
+    ResearchScope,
+    SCHOOL_ALIASES,
+    alias_mentioned as _alias_mentioned,
+    entity_by_id,
+)
+
+# 研究完成狀態（前端狀態晶片照這裡顯示）
+RESEARCH_COMPLETE = "complete"                  # 研究完成（全部條件成立）
+RESEARCH_PARTIAL = "partially_verified"         # 部分完成
+RESEARCH_UNVERIFIED = "unverified"              # 尚未完成驗證
+RESEARCH_NO_SOURCE = "no_reliable_source"       # 找不到可靠來源
+RESEARCH_NEEDS_USER = "needs_clarification"     # 需要使用者確認
+RESEARCH_BLOCKED = "blocked"                    # 已阻止輸出（對象錯誤／資料混淆）
+RESEARCH_INTERNAL = "internal"                  # 淡江內部資料模式
+
+RESEARCH_STATUS_LABELS = {
+    RESEARCH_COMPLETE: "研究完成",
+    RESEARCH_PARTIAL: "部分完成",
+    RESEARCH_UNVERIFIED: "尚未完成驗證",
+    RESEARCH_NO_SOURCE: "找不到可靠來源",
+    RESEARCH_NEEDS_USER: "需要使用者確認",
+    RESEARCH_BLOCKED: "已暫停產生結論",
+    RESEARCH_INTERNAL: "依淡江內部資料",
+}
+
+INTERNAL_ATTRIBUTION = "本回答依淡江內部資料整理。"
+PARTIAL_NOTICE = "部分內容尚未驗證。"
+BLOCK_NOTICE = "目前檢索結果與研究對象不一致，暫停產生結論。"
+NO_SOURCE_NOTICE = "目前沒有足夠公開來源確認此資訊，因此不提供確定結論。"
+
+# 每個大學社團都會講的通用詞——污染重疊度比對前要先剝掉，
+# 「北科每週舉辦社課」不是抄淡江（grok 審查的誤殺防護）。
+_GENERIC_CLUB_TERMS: tuple[str, ...] = (
+    "社課", "茶會", "新生", "社團", "社員", "社辦", "幹部", "活動", "舉辦", "參加",
+    "每週", "每周", "學期", "期初", "期中", "期末", "認識", "報名", "歡迎", "大學",
+    "同學", "招生", "貼文", "文宣", "經營", "分享",
+)
+
+# 淡江專屬的招牌活動與名稱。出現在「歸給外校」的句子裡就是資料污染。
+HOME_SIGNATURE_TERMS: tuple[str, ...] = (
+    "浮游花", "浮花禪光", "浮游禪光", "登峰傳心", "金剛勇士", "禪行破浪",
+    "孝子山", "皇帝殿", "攀越心峰", "生命靈數", "聽見彼此的心", "感恩星光夜",
+    "快樂禪", "紓壓禪", "與自己有約", "領袖禪訓營",
+)
+
+_HOME_WORDS = ("淡江", "淡大", "本社", "我們社")
+_SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?；;\n])")
+# 「沒有…資料」中間允許插入校名——「知識庫沒有政大的資料」是誠實拒答，
+# 不能因為插了「政大的」三個字就被當成事實主張攔下。
+# 但免責只免到**該子句**：「沒有政大的資料，不過政大茶會通常會…」
+# 後半句仍是事實主張，要照常驗證（grok 審查抓到的繞過路徑）。
+_DISCLAIMER = re.compile(
+    r"(沒有[^，。；;\n]{0,12}(來源|資料|證據)|查不到|找不到|尚待確認|待確認|未確認|"
+    r"無法確認|無法回答|不能回答|無法提供|不確定|尚未驗證|請提供|需要你提供|不提供確定結論)"
+)
+_CLAUSE_SPLIT = re.compile(r"[，,]")
+
+
+def _strip_disclaimer_clauses(sent: str) -> str:
+    """去掉免責子句，留下仍需驗證的主張部分。整句都是免責 → 回傳空字串。"""
+    if not _DISCLAIMER.search(sent):
+        return sent
+    kept = [c for c in _CLAUSE_SPLIT.split(sent) if c.strip() and not _DISCLAIMER.search(c)]
+    return "，".join(c.strip() for c in kept)
+_QUESTION = re.compile(r"[?？]\s*$")
+_SPECULATION_HEAD = re.compile(r"【(可能推測|推測|尚待確認)】")
+# 這些段落標籤行是版面結構，不是事實主張：【研究對象】點名對象、【來源整理】列來源
+_LABEL_LINE = re.compile(r"^【(研究對象|來源整理|尚待確認|已驗證資料|淡江內部資料|淡江可採用建議|兩者差異)】")
+
+
+@dataclass
+class Finding:
+    rule: str
+    severity: str          # error | warning
+    message: str
+    sentence: str = ""
+
+    def to_dict(self) -> dict:
+        return {"rule": self.rule, "severity": self.severity,
+                "message": self.message, "sentence": self.sentence[:120]}
+
+
+@dataclass
+class AnswerReview:
+    verdict: str = "allow"                 # allow | degrade | block
+    research_status: str = RESEARCH_INTERNAL
+    findings: list[Finding] = field(default_factory=list)
+    claims: list[ClaimRecord] = field(default_factory=list)
+    contamination: dict | None = None
+    notices: list[str] = field(default_factory=list)
+
+    @property
+    def errors(self) -> list[Finding]:
+        return [f for f in self.findings if f.severity == "error"]
+
+    def to_event(self) -> dict:
+        return {
+            "type": "answer_review",
+            "verdict": self.verdict,
+            "research_status": self.research_status,
+            "research_status_label": RESEARCH_STATUS_LABELS.get(self.research_status, self.research_status),
+            "findings": [f.to_dict() for f in self.findings],
+            "claims": [c.to_dict() for c in self.claims],
+            "notices": list(self.notices),
+        }
+
+
+def _sentences(text: str) -> list[str]:
+    return [s.strip() for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+
+
+def _tokenize(text: str):
+    from ..retrieval import tokenize   # 延遲載入，避免循環 import
+    return tokenize(text)
+
+
+def _entity_terms(entity_id: str) -> list[str]:
+    entity = entity_by_id(entity_id)
+    if entity is None:
+        return []
+    terms = [entity.name, *entity.aliases]
+    if entity.school:
+        terms.append(entity.school)
+        terms += [a for a, full in SCHOOL_ALIASES.items() if full == entity.school]
+    return sorted(set(terms), key=len, reverse=True)
+
+
+def _school_terms(school: str) -> list[str]:
+    terms = [school] + [a for a, full in SCHOOL_ALIASES.items() if full == school]
+    return sorted(set(t for t in terms if t), key=len, reverse=True)
+
+
+def _support(sentence: str, excerpts: list[str], strip_terms: list[str]) -> float:
+    """句子有多少內容能在來源摘錄裡找到。0–1。"""
+    cleaned = sentence
+    for t in strip_terms:
+        cleaned = cleaned.replace(t, " ")
+    tokens = set(_tokenize(cleaned))
+    if not tokens:
+        return 1.0
+    pool: set[str] = set()
+    for ex in excerpts:
+        pool.update(_tokenize(ex))
+    if not pool:
+        return 0.0
+    return len(tokens & pool) / len(tokens)
+
+
+def _speculation_spans(text: str) -> list[tuple[int, int]]:
+    """【可能推測】／【尚待確認】區塊的範圍。放在裡面的推測是合法標記。"""
+    spans: list[tuple[int, int]] = []
+    for m in _SPECULATION_HEAD.finditer(text):
+        start = m.end()
+        nxt = text.find("【", start)
+        spans.append((start, len(text) if nxt == -1 else nxt))
+    return spans
+
+
+_SOURCE_SECTION_HEAD = re.compile(r"【來源整理】")
+
+
+def _source_section_spans(text: str) -> list[tuple[int, int]]:
+    """【來源整理】區塊：列的是來源清單，不是要驗證的事實主張。"""
+    spans: list[tuple[int, int]] = []
+    for m in _SOURCE_SECTION_HEAD.finditer(text):
+        start = m.end()
+        nxt = text.find("【", start)
+        spans.append((start, len(text) if nxt == -1 else nxt))
+    return spans
+
+
+# 這些區段的內容講的是研究對象——句子省略了社團名也一樣是對外校的主張。
+_CLAIM_SECTION_HEAD = re.compile(r"【(已驗證資料|外校已驗證資料|兩者差異)】")
+
+
+def _claim_section_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for m in _CLAIM_SECTION_HEAD.finditer(text):
+        start = m.end()
+        nxt = text.find("【", start)
+        spans.append((start, len(text) if nxt == -1 else nxt))
+    return spans
+
+
+def _best_support(
+    sent: str, entity_sources: list[SourceRecord], terms: list[str],
+) -> tuple[SourceRecord | None, float]:
+    """逐一比對每個來源的支持度，回傳（最能支持這句話的來源, 分數）。
+
+    不能把所有摘錄混成一池再一律掛第一個來源——那會讓「其實是第二個來源
+    支持的」結論頂著第一個來源的標題與網址（Codex review 抓到的 bug）。
+    """
+    best: SourceRecord | None = None
+    best_score = 0.0
+    for src in entity_sources:
+        score = _support(sent, [src.excerpt], terms)
+        if score > best_score or best is None:
+            best, best_score = src, score
+    return best, best_score
+
+
+def _in_spans(pos: int, spans: list[tuple[int, int]]) -> bool:
+    return any(a <= pos < b for a, b in spans)
+
+
+def review_answer(
+    text: str,
+    *,
+    scope: ResearchScope,
+    resolution: EntityResolution,
+    sources: list[SourceRecord],
+    strict: bool = True,
+    conflicts: list[dict] | None = None,
+) -> AnswerReview:
+    """回答送出前的品質閘門。
+
+    ``conflicts``：檢索層偵測到的來源衝突（rag.conflicts）。
+    回答裡用到衝突欄位的值時，該 claim 標為 conflicted 並提醒使用者。
+    """
+    review = AnswerReview()
+    body = text or ""
+
+    external_sources = [s for s in sources if s.is_external]
+    internal_sources = [s for s in sources if not s.is_external]
+    spec_spans = _speculation_spans(body)
+
+    if scope.mode == ResearchMode.INTERNAL:
+        review.research_status = RESEARCH_INTERNAL
+        _check_internal_answer(body, review, sources)
+        # 來源衝突提示：內部回答用到「同年不同值」的欄位值也要警告
+        # （只看淡江自己的衝突——外校實體的衝突與內部回答無關）
+        for sent in _sentences(body):
+            if _QUESTION.search(sent) or _DISCLAIMER.search(sent):
+                continue
+            for conflict in conflicts or []:
+                if conflict.get("kind") != "same_year_conflict":
+                    continue
+                conflict_eid = str(conflict.get("entity_id") or "")
+                if conflict_eid and conflict_eid != HOME_ENTITY_ID:
+                    continue
+                values = [str(v.get("value", "")) for v in conflict.get("values", [])]
+                hit = [v for v in values if v and v in sent]
+                if hit and len(values) > 1:
+                    review.findings.append(Finding(
+                        rule="conflicted_sources",
+                        severity="warning",
+                        message=f"「{hit[0]}」這個值在不同來源間互相矛盾，請先確認再使用。",
+                        sentence=sent,
+                    ))
+                    break
+        # 只有使用者明確要求「只用淡江內部資料」時才強制附資料歸屬說明，
+        # 一般任務不加，避免每一句回覆都掛尾註。
+        if scope.internal_only_requested and INTERNAL_ATTRIBUTION not in body:
+            review.notices.append(INTERNAL_ATTRIBUTION)
+        if review.errors:
+            review.verdict = "block"
+            review.research_status = RESEARCH_BLOCKED
+        elif any(f.severity == "warning" for f in review.findings):
+            review.verdict = "degrade"
+            # 內部模式的 degrade（如來源衝突）要亮黃燈「部分完成」，
+            # 不能維持 internal 讓前端誤判成紅色驗證失敗（grok 審查發現 4）
+            review.research_status = RESEARCH_PARTIAL
+            review.notices.append("部分內容的來源互相矛盾或尚待確認，請人工確認後再使用。")
+        return review
+
+    # ── 外部研究／比較分析 ────────────────────────────────
+    targets: list[tuple[str, str, list[str]]] = []   # (entity_id, 顯示名, 比對詞)
+    for eid in scope.target_entities:
+        entity = entity_by_id(eid)
+        if entity is not None:
+            targets.append((eid, entity.name, _entity_terms(eid)))
+    covered = {s for _eid, _n, terms in targets for s in terms}
+    for school in scope.target_schools:
+        terms = _school_terms(school)
+        if not any(t in covered for t in terms):
+            targets.append(("", school, terms))
+    if scope.generic_external and not targets:
+        for s in external_sources:
+            if s.entity_id and all(eid != s.entity_id for eid, _n, _t in targets):
+                targets.append((s.entity_id, s.organization or s.school, _entity_terms(s.entity_id)))
+
+    sentences = _sentences(body)
+
+    # 1. 資料污染：淡江招牌內容被歸給外校
+    contaminated: list[Finding] = []
+    for sent in sentences:
+        if any(w in sent for w in _HOME_WORDS):
+            continue   # 有提到淡江的比較句不算歸屬錯誤
+        ext_hit = next(
+            (name for _eid, name, terms in targets if any(t in sent for t in terms)),
+            None,
+        )
+        if not ext_hit:
+            continue
+        term_hit = next((t for t in HOME_SIGNATURE_TERMS if t in sent), None)
+        if term_hit:
+            contaminated.append(Finding(
+                rule="data_contamination",
+                severity="error",
+                message=f"淡江內部內容「{term_hit}」被寫成{ext_hit}的做法。",
+                sentence=sent,
+            ))
+    review.findings.extend(contaminated)
+
+    # 2. 逐句 claim 驗證
+    unlabeled_inferred = 0
+    pos = 0
+    source_spans = _source_section_spans(body)
+    claim_spans = _claim_section_spans(body)
+    # 區段實體繼承：【已驗證資料】裡的句子常常省略社團名（「每週五舉辦手作課程。」），
+    # 沒有名字不代表不是對外校的主張——省略時繼承最近點名的研究對象；
+    # 只有一個對象時直接視為該對象（Codex review 抓到的繞過閘門漏洞）。
+    current_target: tuple[str, str, list[str]] | None = targets[0] if len(targets) == 1 else None
+
+    def _internal_contamination(sent: str, name: str, terms: list[str], ext_support: float) -> bool:
+        """污染兜底：外校句子的內容其實高度出自淡江內部來源摘錄。
+
+        17 個招牌詞（HOME_SIGNATURE_TERMS）只擋得住已知活動名；
+        詞庫外的淡江內容被寫成外校做法，靠「跟內部摘錄的重疊度」抓
+        （稽核漏洞 24：詞庫外只 degrade 不 block）。
+
+        誤殺防護（grok 審查抓到的反例）：
+        · 句子有提到淡江的（比較句）不算——那是合法的兩者對照。
+        · 通用社團詞（社課、茶會、新生…）先剝掉再比——「北科每週舉辦社課」
+          不是抄淡江，是每個社團都會講的話；剝完剩不到 4 個詞就沒有鑑別度，
+          不判污染。
+        · 外校來源對這句的支持度不低於內部重疊度時不判——證據面前讓路。
+        """
+        if not internal_sources or any(w in sent for w in _HOME_WORDS):
+            return False
+        strip = list(terms) + list(_GENERIC_CLUB_TERMS)
+        cleaned = sent
+        for t in strip:
+            cleaned = cleaned.replace(t, " ")
+        tokens = set(_tokenize(cleaned))
+        if len(tokens) < 4:
+            return False    # 剝掉通用詞後沒有鑑別度
+        pool: set[str] = set()
+        for s in internal_sources:
+            if s.excerpt:
+                pool.update(_tokenize(s.excerpt))
+        if not pool:
+            return False
+        overlap = len(tokens & pool) / len(tokens)
+        if overlap < 0.6 or ext_support >= overlap or ext_support >= 0.55:
+            return False
+        finding = Finding(
+            rule="data_contamination",
+            severity="error",
+            message=f"這句被寫成{name}的做法，但內容與淡江內部資料高度重合，疑似資料混淆。",
+            sentence=sent,
+        )
+        contaminated.append(finding)
+        review.findings.append(finding)
+        return True
+
+    def _mark_conflicted(sent: str, claim: ClaimRecord) -> None:
+        """回答用到檢索層判定「同年不同值」的欄位值 → 標 conflicted。
+
+        只套用**同一實體**的衝突：淡江社長的兩個候選名不能拿來把
+        北科的 claim 標成 conflicted（grok 審查抓到的跨實體誤標）。
+        """
+        for conflict in conflicts or []:
+            if conflict.get("kind") != "same_year_conflict":
+                continue
+            conflict_eid = str(conflict.get("entity_id") or "")
+            if conflict_eid and claim.entity_id and conflict_eid != claim.entity_id:
+                continue
+            values = [str(v.get("value", "")) for v in conflict.get("values", [])]
+            hit = [v for v in values if v and v in sent]
+            if hit and len(values) > 1:
+                claim.status = STATUS_CONFLICTED
+                claim.confidence = "low"
+                review.findings.append(Finding(
+                    rule="conflicted_sources",
+                    severity="warning",
+                    message=f"「{hit[0]}」這個值在不同來源間互相矛盾，請先確認再使用。",
+                    sentence=sent,
+                ))
+                return
+
+    def _verify_claim(sent: str, eid: str, name: str, terms: list[str], in_speculation: bool) -> None:
+        nonlocal unlabeled_inferred
+        entity_sources = [s for s in external_sources if eid and s.entity_id == eid]
+        best, support = _best_support(sent, entity_sources, terms) if entity_sources else (None, 0.0)
+
+        claim = ClaimRecord(claim=sent[:160], entity=name, entity_id=eid)
+        # 污染檢查**先跑**：外校支持度只有 0.3、內部重疊卻 0.6 的混合句
+        # 不能靠 partial 分支矇混過關（grok 審查抓到的短路）。
+        if _internal_contamination(sent, name, terms, support):
+            claim.evidence_level = "none"
+            claim.confidence = "low"
+            claim.status = STATUS_WRONG_ENTITY
+            _mark_conflicted(sent, claim)
+            review.claims.append(claim.finalize())
+            return
+        if best is not None and support >= 0.55:
+            claim.source_title = best.title
+            claim.source_url = best.url
+            claim.publisher = best.publisher
+            claim.published_at = best.published_at
+            claim.captured_at = best.captured_at
+            claim.excerpt = best.excerpt
+            claim.source_type = best.source_type
+            claim.evidence_level = "direct"
+            claim.confidence = "high"
+            claim.status = STATUS_STALE if best.status == STATUS_STALE else STATUS_VERIFIED
+            claim.source_ids = [best.source_id]
+        elif best is not None and support >= 0.25:
+            claim.source_title = best.title
+            claim.source_url = best.url
+            claim.publisher = best.publisher
+            claim.published_at = best.published_at
+            claim.captured_at = best.captured_at
+            claim.excerpt = best.excerpt
+            claim.source_type = best.source_type
+            claim.evidence_level = "partial"
+            claim.confidence = "medium"
+            claim.status = STATUS_PARTIAL
+            claim.source_ids = [best.source_id]
+        elif entity_sources:
+            claim.evidence_level = "none"
+            claim.status = STATUS_INFERRED
+            if not in_speculation:
+                unlabeled_inferred += 1
+                review.findings.append(Finding(
+                    rule="speculation_as_fact",
+                    severity="warning",
+                    message=f"這句對{name}的描述在來源摘錄裡找不到直接依據，應標示為推測。",
+                    sentence=sent,
+                ))
+        else:
+            claim.status = STATUS_WRONG_ENTITY if not eid else STATUS_INSUFFICIENT
+            review.findings.append(Finding(
+                rule="claim_without_source",
+                severity="error",
+                message=f"回答對{name}下了結論，但檢索結果裡沒有任何{name}的可驗證來源。",
+                sentence=sent,
+            ))
+        _mark_conflicted(sent, claim)
+        review.claims.append(claim.finalize())
+
+    for sent in sentences:
+        pos = body.find(sent, pos)
+        # 句子本身以【可能推測】開頭時，起點在標籤前，也算在推測區內
+        in_speculation = _in_spans(max(pos, 0), spec_spans) or bool(_SPECULATION_HEAD.match(sent))
+        label = _LABEL_LINE.match(sent)
+        if label and label.group(1) in {"研究對象", "來源整理", "尚待確認"}:
+            # 標籤行不是主張，但點名了對象的話要更新繼承目標
+            named_here = next(
+                (t for t in targets if any(term in sent for term in t[2])), None,
+            )
+            if named_here is not None:
+                current_target = named_here
+            continue
+        if _in_spans(max(pos, 0), source_spans):
+            continue   # 來源清單內容
+
+        # 「標籤＋內容同一行」（【已驗證資料】每週五…）：剝掉標籤，內容照樣驗證
+        in_claim_section = _in_spans(max(pos, 0), claim_spans)
+        sent_body = sent
+        if label and label.group(1) in {"已驗證資料", "外校已驗證資料", "兩者差異"}:
+            sent_body = sent[label.end():].strip()
+            in_claim_section = True
+            if not sent_body:
+                continue
+
+        named = next((t for t in targets if any(term in sent_body for term in t[2])), None)
+        if named is not None:
+            current_target = named
+            if _QUESTION.search(sent_body):
+                continue
+            # 免責只免到子句：「沒有北科的資料提到茶會，北科的茶會安排…」
+            # 後半句照常驗證，不能整句放行
+            claim_part = _strip_disclaimer_clauses(sent_body)
+            if len(claim_part) < 6:
+                continue
+            if not any(term in claim_part for term in named[2]):
+                # 剩下的主張部分沒再點名對象 → 仍屬同一句的對象主張
+                pass
+            _verify_claim(claim_part, named[0], named[1], named[2], in_speculation)
+            continue
+
+        # 沒點名：只有在「講研究對象的區段」裡、且不是淡江句／問句／免責句時，
+        # 才繼承目前的研究對象。
+        sent_body = _strip_disclaimer_clauses(sent_body)
+        if (
+            current_target is not None
+            and in_claim_section
+            and not in_speculation
+            and sent_body
+            and not any(w in sent_body for w in _HOME_WORDS)
+            and not _QUESTION.search(sent_body)
+            and not _LABEL_LINE.match(sent_body)
+            and len(sent_body) >= 8
+        ):
+            term_hit = next((t for t in HOME_SIGNATURE_TERMS if t in sent_body), None)
+            if term_hit:
+                finding = Finding(
+                    rule="data_contamination",
+                    severity="error",
+                    message=f"淡江內部內容「{term_hit}」被寫成{current_target[1]}的做法。",
+                    sentence=sent_body,
+                )
+                contaminated.append(finding)
+                review.findings.append(finding)
+                continue
+            _verify_claim(sent_body, current_target[0], current_target[1], current_target[2], in_speculation)
+
+    # 3. 外校研究但證據全是內部資料
+    if targets and not external_sources and review.claims:
+        internal_only = [s for s in sources if not s.is_external]
+        if internal_only:
+            review.findings.append(Finding(
+                rule="internal_sources_only",
+                severity="error",
+                message="研究對象是外校，但這次檢索到的全部是淡江內部資料，不能作為外校證據。",
+            ))
+
+    # 4. 過舊來源
+    stale = [s for s in external_sources if s.status == STATUS_STALE]
+    if stale and external_sources and len(stale) == len(external_sources):
+        review.findings.append(Finding(
+            rule="stale_sources",
+            severity="warning",
+            message="所有外校來源的檢索日期都已過舊，結論僅供參考，建議重新查官方帳號。",
+        ))
+
+    # ── 裁決 ─────────────────────────────────────────────
+    if contaminated:
+        review.contamination = {
+            "message": "目前內容可能混入淡江內部資料，不能視為外校公開資料。",
+            "items": [f.to_dict() for f in contaminated],
+        }
+    has_claim_error = any(f.severity == "error" for f in review.findings)
+    verified_claims = [c for c in review.claims if c.status == STATUS_VERIFIED]
+
+    if has_claim_error:
+        review.verdict = "block"
+        review.research_status = RESEARCH_BLOCKED
+        review.notices.append(BLOCK_NOTICE)
+    elif review.claims and not verified_claims and not any(
+        c.status in {STATUS_PARTIAL, STATUS_STALE} for c in review.claims
+    ):
+        # 全部只是推測
+        review.verdict = "degrade"
+        review.research_status = RESEARCH_UNVERIFIED
+        review.notices.append(PARTIAL_NOTICE)
+    elif unlabeled_inferred or any(
+        c.status in {STATUS_PARTIAL, STATUS_INFERRED, STATUS_STALE, STATUS_INSUFFICIENT}
+        for c in review.claims
+    ) or any(f.severity == "warning" for f in review.findings):
+        review.verdict = "degrade"
+        review.research_status = RESEARCH_PARTIAL
+        review.notices.append(PARTIAL_NOTICE)
+    elif not external_sources and targets:
+        review.verdict = "degrade"
+        review.research_status = RESEARCH_NO_SOURCE
+        review.notices.append(NO_SOURCE_NOTICE)
+    else:
+        review.verdict = "allow"
+        review.research_status = RESEARCH_COMPLETE if targets else RESEARCH_INTERNAL
+
+    if not strict and review.verdict == "block":
+        review.verdict = "degrade"
+    return review
+
+
+def _check_internal_answer(body: str, review: AnswerReview, sources: list[SourceRecord]) -> None:
+    """內部模式：不得對外校下事實結論。"""
+    sentences = _sentences(body)
+    for sent in sentences:
+        if _QUESTION.search(sent):
+            continue
+        # 免責只免到子句——「沒有政大的資料，不過政大茶會通常會…」後半照抓
+        sent = _strip_disclaimer_clauses(sent)
+        if not sent:
+            continue
+        for alias in sorted(SCHOOL_ALIASES, key=len, reverse=True):
+            school = SCHOOL_ALIASES[alias]
+            # alias_mentioned 帶詞界防護——「完成大合照」不能誤觸成大封鎖
+            if school == "淡江大學" or not _alias_mentioned(sent, alias):
+                continue
+            review.findings.append(Finding(
+                rule="external_claim_in_internal_mode",
+                severity="error",
+                message=f"目前是淡江內部資料模式，但回答對「{school}」下了結論。"
+                        "要研究外校請明確指定研究對象與官方來源。",
+                sentence=sent,
+            ))
+            break

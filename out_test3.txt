@@ -1,0 +1,8 @@
+{'社長': '王小明'}
+{}
+{'社長': '王小明'}
+{}
+社長是王小明
+True
+True
+clarified? True unresolved: [UnresolvedMention(mention='政大', school='國立政治大學', reason='no_registered_club')] needs: False

@@ -9,6 +9,8 @@
   task completion      該產的檔產出來了嗎
   artifact validity    產出通過驗證了嗎
   latency              一輪多久
+  event flow           SSE 事件流符合案例宣告的 expected/forbidden events 嗎
+                       （反問閘門退化警報，硬門檻）
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app import orchestrator
+from app.research import entities as research_entities
 from app.services import current_term as term_service
 from app.services.context import RequestContext
 from app.services.session_store import SessionStore
@@ -37,6 +40,72 @@ FABRICATION_MARKERS = {
 
 HONEST_MARKERS = ("還沒設定", "沒有設定", "不知道", "請提供", "待填", "請到", "補上")
 
+# ── 學校歸屬防護（對抗稽核 44/63）────────────────────────────
+# FABRICATION_MARKERS 只看「當期事實」欄位，對「把 A 校內容講成 B 校」全盲。
+# 這裡直接用 app.research.entities 的 registry 與 alias_mentioned 詞界防護
+# （「完成大合照」不會誤判成「成大」），不另抄學校清單：
+# 回答提到的外校若不是這個案例的預期研究對象，就是歸屬幻覺。
+
+
+def _external_school_mentions(text: str) -> dict[str, list[str]]:
+    """文字中真的以獨立稱呼出現的外校 → 命中的別名（含正式社團名）。"""
+    hits: dict[str, list[str]] = {}
+    if not text:
+        return hits
+    for alias, full in research_entities.SCHOOL_ALIASES.items():
+        if full == research_entities.HOME_SCHOOL:
+            continue
+        if research_entities.alias_mentioned(text, alias):
+            bucket = hits.setdefault(full, [])
+            if alias not in bucket:
+                bucket.append(alias)
+    for ent in research_entities.EXTERNAL_ENTITIES:
+        school = ent.school or ent.name
+        for alias in (ent.name, *ent.aliases):
+            if research_entities.alias_mentioned(text, alias):
+                bucket = hits.setdefault(school, [])
+                if alias not in bucket:
+                    bucket.append(alias)
+    return hits
+
+
+def _allowed_schools(case: Case) -> set[str] | None:
+    """這個案例的回答可以提到哪些外校；None 表示不設限。
+
+    · 泛稱外校研究（「其他學校」）沒點名對象，registry 內任何外校都合法。
+    · 其餘案例：message 點名的學校＋case.expected_schools 宣告的學校。
+    """
+    if research_entities.has_generic_external_hint(case.message):
+        return None
+    allowed = set(_external_school_mentions(case.message))
+    for name in case.expected_schools:
+        allowed.add(research_entities.SCHOOL_ALIASES.get(name, name))
+    return allowed
+
+
+# ── 事件流斷言 ───────────────────────────────────────────────
+# case.expected_events / forbidden_events 的元素形如：
+#   "clarification_needed"                    只比事件 type
+#   "research_status=no_reliable_source"      type＋識別欄位值
+# 「type=值」比對哪個欄位由 _EVENT_VALUE_FIELD 決定（預設 status）。
+_EVENT_VALUE_FIELD = {
+    "research_status": "status",
+    "task_completed": "verdict",
+    "answer_review": "verdict",
+    "tool_started": "name",
+    "tool_completed": "name",
+}
+
+
+def _event_matches(spec: str, event: dict[str, Any]) -> bool:
+    etype, _, value = spec.partition("=")
+    if event.get("type") != etype:
+        return False
+    if not value:
+        return True
+    field_name = _EVENT_VALUE_FIELD.get(etype, "status")
+    return str(event.get(field_name, "")) == value
+
 
 @dataclass
 class CaseResult:
@@ -49,8 +118,10 @@ class CaseResult:
 
     @property
     def passed(self) -> bool:
-        # 幻覺是硬門檻，其餘取平均
+        # 幻覺與事件流斷言是硬門檻，其餘取平均
         if self.scores.get("hallucination", 1.0) < 1.0:
+            return False
+        if self.scores.get("event_flow", 1.0) < 1.0:
             return False
         core = [v for k, v in self.scores.items() if k != "latency"]
         return bool(core) and sum(core) / len(core) >= 0.75
@@ -70,6 +141,10 @@ class Summary:
     def hallucinations(self) -> list[CaseResult]:
         return [r for r in self.results if r.scores.get("hallucination", 1.0) < 1.0]
 
+    def event_failures(self) -> list[CaseResult]:
+        """事件流斷言未過的案例（防護閘門退化警報，跟幻覺一樣是硬門檻）。"""
+        return [r for r in self.results if r.scores.get("event_flow", 1.0) < 1.0]
+
     def avg_latency_ms(self) -> float:
         vals = [r.latency_ms for r in self.results]
         return sum(vals) / len(vals) if vals else 0.0
@@ -88,6 +163,7 @@ class Summary:
         for dim in (
             "intent", "skill_routing", "tool_selection", "retrieval_relevance",
             "grounding", "hallucination", "task_completion", "artifact_validity",
+            "event_flow",
         ):
             score = self.dimension(dim)
             bar = "█" * int(score * 20) + "░" * (20 - int(score * 20))
@@ -99,6 +175,12 @@ class Summary:
         for r in bad:
             lines.append(f"    ✗ {r.case_id}：{r.message}")
             lines += [f"        {n}" for n in r.notes if "編造" in n]
+
+        gate = self.event_failures()
+        lines += ["", f"  ── 事件流斷言（防護閘門，必須全過）：{len(gate)} 件未過 ──"]
+        for r in gate:
+            lines.append(f"    ✗ {r.case_id}：{r.message}")
+            lines += [f"        {n}" for n in r.notes if "事件流" in n]
 
         failed = [r for r in self.results if not r.passed]
         if failed:
@@ -138,10 +220,16 @@ async def run_case(case: Case, store: SessionStore, *, live: bool = False) -> Ca
             f"產出意圖判斷錯誤：預期{'要' if want_artifact else '不'}產檔，實際 {state.artifacts_expected}"
         )
 
-    # 2. 檢索相關度
+    # 2. 檢索相關度（帶著和 orchestrator 相同的研究範圍）
     from app import retrieval
+    from app.research.entities import ResearchScope
 
-    bundle = retrieval.build_context(state.retrieval_queries)
+    eval_scope = ResearchScope.from_dict(state.research_scope) if state.research_scope else None
+    if eval_scope is not None and eval_scope.mode.value == "internal" and not eval_scope.internal_only_requested:
+        eval_scope = None
+    bundle = retrieval.build_context(
+        state.retrieval_queries, task_type=state.task_type.value, scope=eval_scope
+    )
     blob = " ".join(h.chunk.source + " " + h.chunk.text[:300] for h in bundle.hits)
     if case.expect_context:
         hit = sum(1 for kw in case.expect_context if kw in blob)
@@ -150,7 +238,12 @@ async def run_case(case: Case, store: SessionStore, *, live: bool = False) -> Ca
             missing = [kw for kw in case.expect_context if kw not in blob]
             result.notes.append(f"檢索沒帶到：{missing}")
     else:
-        result.scores["retrieval_relevance"] = 1.0 if bundle.hits else 0.0
+        # 查無來源案例（研究對象在 registry 標記為無已驗證來源）：
+        # scope 會擋掉所有資料，檢索空集合才是正確行為。
+        expects_no_source = any(
+            spec.startswith("research_status=no_reliable_source") for spec in case.expected_events
+        )
+        result.scores["retrieval_relevance"] = 1.0 if (bundle.hits or expects_no_source) else 0.0
 
     # 3. 跑完整輪
     model = ScriptedModel(case)
@@ -177,6 +270,26 @@ async def run_case(case: Case, store: SessionStore, *, live: bool = False) -> Ca
     result.latency_ms = (time.perf_counter() - started) * 1000
     result.scores["latency"] = 1.0 if result.latency_ms < 5000 else 0.5
     result.events = [e["type"] for e in events]
+
+    # 3b. 事件流斷言（硬門檻）：反問閘門、研究狀態這類防護一旦被移除，
+    #     事件流就會少掉（或多出）對應事件，這裡直接把案例判失敗——
+    #     防止「閘門被刪掉、其餘維度仍平均及格、CI 照樣綠」的退化盲區。
+    result.scores["event_flow"] = 1.0
+    if case.expected_events or case.forbidden_events:
+        missing = [
+            spec for spec in case.expected_events
+            if not any(_event_matches(spec, e) for e in events)
+        ]
+        illegal = [
+            spec for spec in case.forbidden_events
+            if any(_event_matches(spec, e) for e in events)
+        ]
+        if missing or illegal:
+            result.scores["event_flow"] = 0.0
+        if missing:
+            result.notes.append(f"事件流缺少期望事件：{missing}（實際：{result.events}）")
+        if illegal:
+            result.notes.append(f"事件流出現不允許的事件：{illegal}")
 
     # 4. 工具選擇
     used = [e["name"] for e in events if e["type"] == "tool_completed"]
@@ -234,6 +347,17 @@ async def run_case(case: Case, store: SessionStore, *, live: bool = False) -> Ca
             result.scores["hallucination"] = 0.0
             result.notes.append(f"編造了未設定的今年事實 {key}：{said}")
 
+    # 8b. 學校歸屬（對抗稽核 44/63）：回答提到的外校必須是這個案例的研究對象。
+    #     「政大事故」型錯誤（把淡江內容講成政大的、或答非所問扯到別校）在這裡抓。
+    allowed_schools = _allowed_schools(case)
+    if allowed_schools is not None:
+        for school, aliases in sorted(_external_school_mentions(final).items()):
+            if school not in allowed_schools:
+                result.scores["hallucination"] = 0.0
+                result.notes.append(
+                    f"編造了學校歸屬：回答提到非研究對象的外校「{school}」（命中：{aliases}）"
+                )
+
     # 產出檔案裡也不可以編
     for e in ready:
         if e.get("verified") is False:
@@ -280,4 +404,9 @@ async def run_all(cases: list[Case] | None = None, *, live: bool = False) -> Sum
 def main(live: bool = False) -> int:
     summary = asyncio.run(run_all(live=live))
     print(summary.report())
-    return 0 if not summary.hallucinations() and summary.pass_rate() >= 0.9 else 1
+    ok = (
+        not summary.hallucinations()
+        and not summary.event_failures()   # 防護閘門退化 → 即使通過率仍高也要紅
+        and summary.pass_rate() >= 0.9
+    )
+    return 0 if ok else 1

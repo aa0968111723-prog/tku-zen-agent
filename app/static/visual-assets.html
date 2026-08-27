@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#05070b">
+<title>視覺資料庫 · 領袖禪學社</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📷</text></svg>">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/visual-assets.css">
+</head>
+<body class="visual-body">
+<div id="bg-fx" aria-hidden="true">
+  <span class="fx-halo fx-red"></span><span class="fx-halo fx-yellow"></span>
+  <span class="fx-halo fx-green"></span><span class="fx-orbit"></span>
+</div>
+
+<div id="visual-gate" class="gate" hidden>
+  <form class="gate-card" id="visual-gate-form">
+    <span class="mark" aria-hidden="true"></span>
+    <h1>視覺資料庫</h1>
+    <label class="gate-label" for="visual-token">請輸入授權碼</label>
+    <input type="password" id="visual-token" autocomplete="off" required>
+    <button type="submit" class="primary">進入資料庫</button>
+    <p class="gate-error" id="visual-gate-error" role="alert" hidden></p>
+  </form>
+</div>
+
+<div id="visual-app" class="visual-app" hidden>
+  <header class="visual-topbar">
+    <a class="visual-brand" href="/"><span class="mark" aria-hidden="true"></span><span><strong>視覺資料庫</strong><small>可追溯的智慧找照片系統</small></span></a>
+    <a class="ghost" href="/">返回 AI 工作台</a>
+  </header>
+
+  <nav class="visual-tabs" aria-label="視覺資料庫功能">
+    <button type="button" class="is-active" data-panel="dashboard">資料庫</button>
+    <button type="button" data-panel="upload">上傳分析</button>
+    <button type="button" data-panel="search">智慧找照片</button>
+    <button type="button" data-panel="review">待確認</button>
+    <button type="button" data-panel="organize">資料整理中心</button>
+  </nav>
+
+  <main class="visual-main">
+    <p id="visual-status" class="visual-status" role="status" aria-live="polite"></p>
+
+    <section id="panel-dashboard" class="visual-panel">
+      <div class="panel-heading">
+        <div><p class="eyebrow">Visual memory</p><h1>視覺資料庫</h1><p>每個辨識結果都保留來源、信心與確認狀態。</p></div>
+        <button type="button" class="primary" data-open-panel="upload">上傳照片</button>
+      </div>
+      <div id="visual-stats" class="visual-stats" aria-label="資料庫統計"></div>
+      <section class="visual-section"><div class="section-title"><h2>最近上傳</h2><button type="button" class="ghost" data-open-panel="search">查看全部</button></div><div id="recent-assets" class="asset-grid"></div></section>
+      <section class="entity-shortcuts" aria-label="分類捷徑">
+        <button type="button" data-filter="person"><span>人物</span><strong id="count-people">0</strong></button>
+        <button type="button" data-filter="club"><span>社團</span><strong id="count-clubs">0</strong></button>
+        <button type="button" data-filter="event"><span>活動</span><strong id="count-events">0</strong></button>
+        <button type="button" data-filter="scene"><span>場景</span><strong id="count-scenes">0</strong></button>
+      </section>
+    </section>
+
+    <section id="panel-upload" class="visual-panel" hidden>
+      <div class="panel-heading"><div><p class="eyebrow">Ingest</p><h1>上傳並自動分析</h1><p>支援圖片、影片、文件、手機拍照與資料夾 manifest；中斷後可用同一批檔案續傳，原檔不會覆寫。</p></div></div>
+      <form id="upload-form" class="upload-layout">
+        <label id="drop-zone" class="drop-zone" for="visual-files" tabindex="0">
+          <span class="drop-icon" aria-hidden="true">＋</span><strong>拖曳素材到這裡</strong>
+          <span>圖片、影片、PDF、Word、PowerPoint 或文字文件</span><span class="muted">一次最多 30 個、每個 20MB</span>
+        </label>
+        <input id="visual-files" type="file" accept="image/*,video/*,audio/*,.cr2,.arw,.dng,.raw,.heic,.heif,.psd,.svg,.tif,.tiff,.bmp,.ico,.ppm,.pdf,.doc,.docx,.odt,.ods,.odp,.oxps,.xps,.rtf,.pptx,.xlsx,.gs,.txt,.md,.csv,.json,.jsonl,.yaml,.yml,.tsv,.html,.xml,.ini,.log,.ics,.srt,.lrc,.edl,.fcpxml,.sxml,.rels,.url,.zip,.7z,.wfp,.wfpbundle,.bdm,.cpi,.mpl,.aep,.prproj,.pds,.prfpset,.nbeffect,.cfpreset,.mogrt,.prm,.obj,.gltf,.glb,.blend,.fbx,.dae,.stl,.3ds,.ttf,.ttc,.otf,.woff,.woff2" multiple>
+        <input id="camera-files" type="file" accept="image/*" capture="environment">
+        <input id="folder-files" type="file" accept="image/*,video/*,audio/*,.cr2,.arw,.dng,.raw,.heic,.heif,.psd,.svg,.tif,.tiff,.bmp,.ico,.ppm,.pdf,.doc,.docx,.odt,.ods,.odp,.oxps,.xps,.rtf,.pptx,.xlsx,.gs,.txt,.md,.csv,.json,.jsonl,.yaml,.yml,.tsv,.html,.xml,.ini,.log,.ics,.srt,.lrc,.edl,.fcpxml,.sxml,.rels,.url,.zip,.7z,.wfp,.wfpbundle,.bdm,.cpi,.mpl,.aep,.prproj,.pds,.prfpset,.nbeffect,.cfpreset,.mogrt,.prm,.obj,.gltf,.glb,.blend,.fbx,.dae,.stl,.3ds,.ttf,.ttc,.otf,.woff,.woff2" webkitdirectory directory multiple>
+        <div class="upload-source-actions"><label class="ghost" for="camera-files">手機拍照上傳</label><label class="ghost" for="folder-files">匯入資料夾</label><span id="import-mode" class="muted">一般批次上傳</span></div>
+        <div id="upload-preview" class="upload-preview"></div>
+        <div class="metadata-grid">
+          <label><span>學校</span><input id="upload-school" value="淡江大學" maxlength="120"></label>
+          <label><span>社團</span><input id="upload-club" value="領袖禪學社" maxlength="160"></label>
+          <label><span>專案 ID（空白則待整理，不會猜測）</span><input id="upload-project-id" maxlength="160" placeholder="選填，必須是自己的 project"></label>
+          <label><span>原始來源</span><input id="upload-source" value="使用者上傳" maxlength="120"></label>
+          <label><span>隱私</span><select id="upload-privacy"><option value="private">私人</option><option value="shared">登入成員共用</option><option value="public">公開資產</option></select></label>
+          <label><span>商用權限</span><select id="upload-commercial"><option value="unknown">未知／待確認</option><option value="allowed">可商用</option><option value="not_allowed">不可商用</option></select></label>
+        </div>
+        <div class="upload-actions"><button type="submit" class="primary">開始上傳與分析</button><button type="button" id="clear-upload" class="ghost">清除</button></div>
+        <div id="upload-progress" class="upload-progress" hidden aria-label="分析進度"><span id="upload-progress-bar"></span><strong id="upload-progress-text">準備上傳</strong></div>
+      </form>
+      <div id="analysis-results" class="analysis-list"></div>
+    </section>
+
+    <section id="panel-search" class="visual-panel" hidden>
+      <div class="panel-heading"><div><p class="eyebrow">Semantic search</p><h1>智慧找照片</h1><p>自然語言、關鍵字、實體篩選與以圖搜圖會一起排序。</p></div></div>
+      <form id="search-form" class="search-box">
+        <div class="search-primary"><input id="search-query" placeholder="例如：淡江校園、多人、適合招生影片的照片" maxlength="1000"><button class="primary" type="submit">找照片</button></div>
+        <div class="search-filters">
+          <label>人物<input id="filter-person" maxlength="160"></label><label>場景<select id="filter-scene"><option value="">全部</option><option>校園</option><option>教室</option><option>禪堂</option><option>舞台</option><option>茶會</option><option>講座</option><option>社課</option><option>活動現場</option><option>海報</option></select></label>
+          <label>學校<input id="filter-school" maxlength="120"></label><label>社團<input id="filter-club" maxlength="160"></label>
+          <label>專案 ID<input id="filter-project" maxlength="160"></label>
+          <label>活動<input id="filter-event" maxlength="200"></label><label>比例<select id="filter-ratio"><option value="">全部</option><option>1:1</option><option>4:5</option><option>9:16</option><option>16:9</option><option value="landscape">橫式</option><option value="portrait">直式</option></select></label>
+          <label>最低畫質<input id="filter-quality" type="number" min="0" max="100" value="0"></label><label>商用<select id="filter-commercial"><option value="">全部</option><option value="allowed">可商用</option><option value="not_allowed">不可商用</option><option value="unknown">待確認</option></select></label>
+        </div>
+        <details><summary>日期與重複圖片</summary><div class="search-filters"><label>起始日期<input id="filter-date-from" type="date"></label><label>結束日期<input id="filter-date-to" type="date"></label><label>重複圖片<select id="filter-duplicate"><option value="">全部</option><option value="exclude">排除重複</option><option value="only">只看重複</option></select></label></div></details>
+        <div class="image-query"><label class="ghost" for="query-image">以圖搜圖</label><input id="query-image" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif,image/jfif"><span id="query-image-name" class="muted">未選擇查詢圖片</span></div>
+      </form>
+      <div id="question-card" class="question-card">
+        <h2>你要找哪一類照片？</h2><div class="choice-cards"><button data-search="活動現場">活動現場</button><button data-search="人物合照">人物合照</button><button data-search="校園場景">校園場景</button><button data-search="海報">海報</button><button data-search="適合招生影片">適合招生影片</button></div>
+        <h3>你希望照片用在哪裡？</h3><div class="choice-cards"><button data-search="適合 Instagram 第一張">Instagram</button><button data-search="清楚橫式 適合招生影片">招生影片</button><button data-search="適合社評 高畫質">社評</button><button data-search="適合海報">海報</button><button data-search="適合簡報 16:9">簡報</button></div>
+      </div>
+      <div class="search-summary"><div><h2 id="search-count">尚未搜尋</h2><p id="search-conditions" class="muted"></p></div><div class="pack-actions"><span id="selection-count">已選 0 張</span><select id="pack-rendition"><option value="original">原圖</option><option>1:1</option><option>4:5</option><option>9:16</option><option>16:9</option></select><button id="export-pack" type="button" class="primary" disabled>匯出素材包</button></div></div>
+      <div id="search-results" class="asset-grid"></div>
+    </section>
+
+    <section id="panel-review" class="visual-panel" hidden>
+      <div class="panel-heading"><div><p class="eyebrow">Human review</p><h1>待確認與衝突</h1><p>AI 建議不會自動變成事實；在這裡逐筆確認、修正或忽略。</p></div></div>
+      <div class="review-filters"><button class="is-active" data-review="pending_review">待確認</button><button data-review="verified">已確認</button><button data-review="failed">分析失敗</button><button data-review="duplicate">重複素材</button><button data-review="high-quality">高品質素材</button><button id="batch-confirm" class="primary" type="button" disabled>批次確認</button></div>
+      <div id="review-results" class="asset-grid"></div>
+    </section>
+
+    <section id="panel-organize" class="visual-panel" hidden>
+      <div class="panel-heading"><div><p class="eyebrow">Data organization</p><h1>資料整理中心</h1><p>盤點真實資料、建立 lineage 與關聯候選；不覆寫原始檔，也不自動合併人物或社團。</p></div><div class="organization-actions"><button id="refresh-inventory" type="button" class="ghost">重新盤點</button><button id="organize-existing" type="button" class="primary">整理現有資料</button></div></div>
+      <div id="inventory-stats" class="inventory-stats" aria-label="現有資料盤點"></div>
+      <section class="visual-section"><div class="section-title"><div><h2>整理狀態</h2><p id="organization-run-status" class="muted">尚未執行本次整理</p></div></div>
+        <div class="review-filters organization-filters">
+          <button class="is-active" data-organization="verified">已整理</button><button data-organization="pending_review">待確認</button><button data-organization="conflicted">有衝突</button><button data-organization="unclassified">未分類</button><button data-organization="duplicate">重複素材</button><button data-organization="missing_source">缺少來源</button><button data-organization="failed">分析失敗</button>
+        </div>
+        <p class="muted">「合併」只會建立待審核候選；沒有來源與人工確認時不會合併同名人物、社團或活動。</p>
+        <div id="organization-results" class="asset-grid"></div>
+      </section>
+    </section>
+  </main>
+</div>
+
+<div id="asset-modal" class="modal" hidden>
+  <section class="modal-card asset-detail-modal" role="dialog" aria-modal="true" aria-labelledby="asset-modal-title">
+    <header class="modal-head"><h2 id="asset-modal-title">圖片分析</h2><button id="asset-modal-close" class="icon-btn" type="button" aria-label="關閉">×</button></header>
+    <div id="asset-modal-body" class="asset-modal-body"></div>
+  </section>
+</div>
+
+<script src="/static/visual-assets.js"></script>
+</body>
+</html>

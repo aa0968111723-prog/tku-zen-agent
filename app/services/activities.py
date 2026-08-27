@@ -134,7 +134,18 @@ def resolve_activity(
         if partial:
             return partial[0]
         return None
-    return records[0] if records else None
+    if not records:
+        return None
+    # 無參數 fallback 不能默默拿上學期活動（稽核不可靠 #34）：
+    # 先挑本學期的活動；本學期沒有才退回最近更新的那筆。
+    from . import current_term as term_service
+
+    current_year = str(term_service.load().get("academic_year") or "")
+    if current_year:
+        current = [r for r in records if str(r.get("academic_year") or "") == current_year]
+        if current:
+            return current[0]
+    return records[0]
 
 
 def activate(store: SessionStore, project_id: str | None, activity_id: str) -> None:

@@ -7,13 +7,11 @@ the normal artifact directory and never publish to Instagram.
 from __future__ import annotations
 
 import re
-from datetime import date
 from pathlib import Path
 from typing import Any
 
 from .. import retrieval
-from ..rag import metadata as rag_metadata
-from ..services import current_term as term_service
+from ..research import entities as research_entities
 from .base import Artifact, dated_dir, deliver, safe_filename, unique_path
 
 EXTERNAL_WARNING = "【外校公開參考——僅供比較分析，禁止照抄，不是淡江資料】"
@@ -23,20 +21,6 @@ FOUR_HEADINGS = (
     "淡江可以怎麼改良",
     "哪些內容不能直接照抄",
 )
-
-
-def _school(path: str, text: str) -> str:
-    parent = Path(path).parent.name
-    if parent and parent not in {"社群", "knowledge"}:
-        return parent
-    match = re.search(r"(?:學校|學院)[:：]\s*([^\n，,。]+)", text)
-    if match:
-        return match.group(1).strip()
-    known = ("北科", "北藝", "台大", "政大", "清大", "交大", "禪心社", "領袖社", "禪學社")
-    for item in known:
-        if item in text:
-            return item
-    return "未確認學校"
 
 
 def _normalise_date(value: str) -> str:
@@ -60,7 +44,17 @@ def _references(
     query: str, top_k: int = 5, *, schools: str = "", platform: str = "",
     activity_type: str = "", date_range: str = "",
 ) -> list[dict[str, Any]]:
+    """查外校公開參考段落。
+
+    資料歸屬**只**來自建索引時的 entity metadata（registry 別名比對），
+    不做「內容像哪間學校」的嗅探——標題或內容相似不代表屬於那間學校。
+    查詢點名了特定學校時，只回傳該校（研究對象）的段落。
+    """
     query = (query or "外校禪學社社群文宣").strip()
+    resolution = research_entities.resolve(query)
+    target_ids = {e.entity_id for e in resolution.external_targets()}
+    unresolved_schools = {u.school for u in resolution.unresolved}
+
     index = retrieval.get_index()
     hits = index.search(
         query,
@@ -79,43 +73,55 @@ def _references(
         meta = getattr(chunk, "meta", None)
         if not meta or meta.source_type != "external_reference":
             continue
-        chunk_meta = meta
-        full_text = chunk.text
-        file_meta = meta
-        try:
-            full_text = Path(chunk.path).read_text(encoding="utf-8", errors="replace")
-            file_meta = rag_metadata.infer(Path(chunk.path), chunk.source, full_text, "external_reference")
-        except OSError:
-            pass
+        entity_id = getattr(meta, "entity_id", "")
+        if (target_ids or unresolved_schools) and entity_id not in target_ids:
+            continue   # 研究對象講明了，就不拿別校資料湊數
+        # 學校只認 metadata 歸屬（registry 別名），不做內容嗅探
+        school = getattr(meta, "school", "") or "未對應到已收錄的學校"
         blob = f"{chunk.source} {chunk.text}".lower()
-        # 用 chunk 內的標題判斷學校；整份檔案含多所學校時不能只看 full_text。
-        school = _school(chunk.path, chunk.text)
-        if wanted_schools and not any(w in f"{school} {blob}" for w in wanted_schools):
+        if wanted_schools and not any(w in f"{school.lower()} {blob}" for w in wanted_schools):
             continue
         if wanted_platform and wanted_platform not in blob:
             continue
         if wanted_activity and wanted_activity not in blob:
             continue
-        source_date = file_meta.source_date or chunk_meta.source_date or ""
+        source_date = getattr(meta, "source_date", "") or getattr(meta, "captured_at", "")
         if (range_start or range_end) and (not source_date or not (range_start <= source_date <= range_end)):
             continue
-        title = chunk_meta.source_title or Path(chunk.path).stem
-        url = chunk_meta.source_url
+        title = getattr(meta, "source_title", "") or Path(chunk.path).stem
+        url = getattr(meta, "source_url", "")
         out.append(
             {
                 "source_id": f"R{position}",
+                "entity_id": entity_id,
                 "school": school,
+                "organization": getattr(meta, "organization", ""),
                 "source_file": Path(chunk.path).name,
                 "title": title,
                 "source": chunk.source,
                 "url": url,
+                "source_url": url,
                 "date": source_date,
-                "summary": chunk_meta.summary or chunk.text[:320],
+                "captured_at": getattr(meta, "captured_at", ""),
+                "source_type": getattr(meta, "external_source_type", "") or "official_instagram",
+                "authority_level": getattr(meta, "authority_level", "official"),
+                "summary": getattr(meta, "summary", "") or chunk.text[:320],
                 "excerpt": chunk.text[:900],
                 "score": round(float(score), 4),
                 "credibility": round(0.8 if url and source_date else (0.55 if url else 0.3), 2),
                 "verification": "verified" if url and source_date else "needs_verification",
                 "verified": bool(url and source_date),
+                # 結構化來源的標準欄位名（研究輸出規格）：
+                # source_title / source_url / publisher / captured_at /
+                # source_type / supporting_excerpt / access_status
+                "source_title": title,
+                "publisher": getattr(meta, "organization", "") or school,
+                "supporting_excerpt": chunk.text[:600],
+                "access_status": (
+                    "內部參考庫節錄（整理自公開頁面），本次未即時重新驗證"
+                    if url and source_date
+                    else "內部參考庫節錄，來源資訊不完整，未通過驗證"
+                ),
             }
         )
     return out[: max(1, min(int(top_k or 5), 10))]
@@ -132,13 +138,56 @@ def _four_sections(query: str, refs: list[dict[str, Any]]) -> dict[str, str]:
     }
 
 
+def _no_reference_result(query: str) -> dict[str, Any]:
+    resolution = research_entities.resolve(query)
+    schools = "、".join(
+        sorted({u.school for u in resolution.unresolved}
+               | {e.school for e in resolution.no_source_entities if e.school})
+    )
+    subject = f"「{schools}」" if schools else f"「{query}」"
+    return {
+        "ok": True,
+        "query": query,
+        "references": [],
+        "source_filenames": [],
+        "schools": [],
+        "sections": {},
+        "no_verified_source": True,
+        "disclaimer": "本次無法驗證公開來源，以下僅為一般策略推測，不得視為該校現況。",
+        "message": (
+            "本次無法驗證公開來源，以下僅為一般策略推測，不得視為該校現況。\n\n"
+            f"外校公開資料庫裡**沒有**{subject}的已驗證來源。\n"
+            "不可以推測或用淡江資料頂替該校事實。回覆使用者時請直接說明：\n"
+            "「目前沒有足夠公開來源確認此資訊，因此不提供確定結論。」\n"
+            "並請使用者提供該校社團的官方 Instagram、Facebook 或網址。"
+        ),
+    }
+
+
 def _research_result(query: str, refs: list[dict[str, Any]]) -> dict[str, Any]:
-    sections = _four_sections(query, refs)
-    message = "\n\n".join(f"## {name}\n{value}" for name, value in sections.items())
-    unverified = [r["source_id"] for r in refs if not r.get("verified")]
     if not refs:
-        message = "目前沒有符合條件且可引用的外校來源；不要把未驗證內容寫成確定結論。\n\n" + message
-    elif unverified:
+        return _no_reference_result(query)
+    sections = _four_sections(query, refs)
+    blocks: list[str] = []
+    for r in refs:
+        head = f"【外校已驗證資料】〔來源 {r['source_id']}〕{r['organization'] or r['school']}（學校：{r['school']}"
+        if r.get("source_url"):
+            head += f"，來源：{r['source_url']}"
+        if r.get("captured_at"):
+            head += f"，檢索日期：{r['captured_at']}"
+        head += "）"
+        blocks.append(f"{head}\n{r['excerpt']}")
+    message = (
+        "\n\n".join(f"## {name}\n{value}" for name, value in sections.items())
+        + "\n\n───────────\n\n"
+        + "\n\n".join(blocks)
+        + "\n\n───────────\n描述外校做法時，只能引用上面摘錄的內容並標注學校名稱；"
+          "摘錄裡沒有的細節不可以自行補寫。"
+          "以上來源出自社團內部整理的公開帳號參考庫（非本次即時網路搜尋），"
+          "不可以寫成「剛搜尋到」或「即時現況」。"
+    )
+    unverified = [r["source_id"] for r in refs if not r.get("verified")]
+    if unverified:
         message = (
             "部分來源缺少可驗證網址或日期（" + "、".join(unverified) + "），以下只能作為待驗證參考。\n\n" + message
         )

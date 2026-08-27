@@ -1,0 +1,118 @@
+{
+  "project": "tku-zen-agent",
+  "branch": "feat/grok-full-repair",
+  "base_commit": "03e21a7",
+  "started_at": "2026-08-26T10:20:00Z",
+  "current_phase": "phase1_regression_and_organize_project_id",
+  "last_checkpoint": "2026-08-26T15:10:00Z",
+  "completed_steps": [
+    "clone_repo",
+    "confirm_pr_20_21_22_23_merged",
+    "confirm_pr_24_open_plan_only",
+    "create_feat_grok_full_repair_from_main",
+    "live_insforge_health_2_3_1",
+    "live_insforge_table_list",
+    "live_insforge_private_bucket",
+    "official_docs_llms_txt",
+    "fetch_docs_instructions_via_rest",
+    "fetch_docs_db_storage_functions_rest_api",
+    "http_adapter_no_redirect_ssrf_breaker",
+    "storage_upload_strategy_with_put_fallback",
+    "visual_file_path_confinement",
+    "create_asset_writes_project_id",
+    "visual_sync_reads_backend_user_mappings",
+    "interrupt_does_not_overwrite_review_status",
+    "analyze_uses_confined_asset_file",
+    "api_query_limit_capped",
+    "fal_llm_no_follow_redirects",
+    "background_analyze_logs_failures",
+    "observation_rerun_preserves_verified_and_ignored",
+    "sqlite_busy_timeout_10s",
+    "data_sync_uses_resolved_insforge_owner",
+    "visual_usage_audit",
+    "organize_writes_project_id",
+    "page_query_bounds",
+    "local_inventory_no_windows_media",
+    "chat_artifact_session_security_regression"
+  ],
+  "in_progress_steps": [
+    "defect_scan_remaining_non_p0"
+  ],
+  "failed_steps": [],
+  "blocked_by_external_dependency": [
+    {
+      "name": "insforge_mcp_fetch_docs",
+      "reason": "Grok TUI MCP servers are github, google_drive, tasks only; used GET /api/docs/instructions (same backend as MCP fetch-docs)"
+    },
+    {
+      "name": "windows_media_trees",
+      "reason": "D:\\\\柏能資料\\\\淡大劇本 and sibling folders are not present on this Linux runner"
+    }
+  ],
+  "network_dependencies": [
+    "https://ge5cr87f.us-east.insforge.app",
+    "https://docs.insforge.dev"
+  ],
+  "insforge_state": {
+    "base_url_host": "ge5cr87f.us-east.insforge.app",
+    "version": "2.3.1",
+    "health": "ok",
+    "tables": [
+      "activities",
+      "activity_tasks",
+      "artifacts",
+      "asset_entities",
+      "data_inventory_reports",
+      "data_lineage",
+      "embeddings",
+      "entities",
+      "entity_relationships",
+      "events",
+      "knowledge_chunks",
+      "knowledge_documents",
+      "project_asset_links",
+      "project_context_nodes",
+      "projects",
+      "research_sources",
+      "review_queue",
+      "sources",
+      "sync_runs",
+      "visual_assets"
+    ],
+    "storage_buckets": [{"name": "visual-assets", "public": false}],
+    "counts": {
+      "visual_assets": 1,
+      "projects": 11,
+      "knowledge_documents": 517,
+      "knowledge_chunks": 2430,
+      "embeddings": 1,
+      "review_queue": 0,
+      "entities": 0,
+      "sync_runs": 0
+    },
+    "api_key_in_git": false
+  },
+  "test_results": [
+    {"name": "visual_insforge_fal_phase1", "passed": 42, "failed": 0, "at": "2026-08-26T13:40:00Z"},
+    {"name": "phase1_observation_sqlite_sync", "passed": 48, "failed": 0, "at": "2026-08-26T14:20:00Z"},
+    {"name": "api_session_artifact_frontend_org_regression", "passed": 97, "failed": 0, "at": "2026-08-26T14:55:00Z"},
+    {"name": "organization_insforge_sync_after_project_id", "passed": 19, "failed": 0, "at": "2026-08-26T15:10:00Z"}
+  ],
+  "commands_executed": [
+    "git clone https://github.com/aa0968111723-prog/tku-zen-agent.git",
+    "gh pr list --state all",
+    "GET /api/health (InsForge)",
+    "GET /api/database/tables",
+    "GET /api/storage/buckets",
+    "GET /api/docs/instructions",
+    "GET /api/docs/db/rest-api",
+    "GET /api/docs/storage/rest-api",
+    "GET /api/docs/functions/rest-api"
+  ],
+  "commits": [],
+  "pull_requests": [
+    {"number": 24, "role": "plan-only-do-not-implement-here", "state": "open"},
+    {"number": 25, "role": "implementation", "state": "open"}
+  ],
+  "next_action": "continue remaining phase1 items without adding a worker; Windows media import remains blocked"
+}

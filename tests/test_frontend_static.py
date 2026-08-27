@@ -52,7 +52,7 @@ def test_gate_copy_uses_access_phrase_not_account_words():
 def test_quick_actions_at_most_six():
     block = _block(HTML, "quick-actions")
     buttons = re.findall(r"<button\b", block)
-    assert 1 <= len(buttons) <= 6
+    assert 1 <= len(buttons) <= 3, f"首屏快速操作最多 3 個，找到 {len(buttons)}"
 
 
 def test_index_has_no_hardcoded_model_names():
@@ -110,8 +110,11 @@ def test_social_render_contract_present():
 
 
 def test_guided_input_and_preflight_contract_present():
-    for label in ("問 AI", "直接生成", "製作範本", "執行計畫", "填入：做網宣"):
+    for label in ("問 AI", "直接生成", "製作範本", "執行計畫", "做網宣"):
         assert label in HTML
+    assert 'role="tablist"' in HTML
+    assert 'role="tab"' in HTML
+    assert 'role="tabpanel"' in HTML
     for label in ("確認開始", "先跳過", "返回修改", "在開始前，還需要確認"):
         assert label in HTML or label in JS
     assert "questions: questions.slice(0, 3)" in JS
@@ -136,7 +139,7 @@ def test_accessibility_contract_for_new_sheets_and_composer():
 def test_attachment_entry_supports_images_without_persisting_them_in_ui_state():
     assert "image/jpeg" in HTML and "image/png" in HTML and "image/webp" in HTML
     assert "只會傳給這次任務，不會保存" in JS
-    assert "fal.ai 視覺服務" in JS
+    assert "AI 視覺服務" in JS
     assert "attachments" in JS
 
 
@@ -158,3 +161,48 @@ def test_home_screen_markup_hides_internal_jargon(forbidden):
     gate = _block(HTML, "gate")
     assert forbidden not in home
     assert forbidden not in gate
+
+
+# ── 假可信度防線（對抗稽核 46／47／48） ──────────────────────
+
+def _js_function_body(name: str) -> str:
+    """取出 app.js 頂層 function 的原始碼（到行首的 } 為止）。"""
+    start = JS.find(f"function {name}(")
+    assert start >= 0, f"app.js 找不到 function {name}"
+    end = JS.find("\n}", start)
+    assert end > start, f"function {name} 沒有正常結尾"
+    return JS[start:end]
+
+
+def test_text_url_links_carry_no_credibility_markers():
+    """46：訊息文字裡的網址只能變成一般連結；驗證狀態標示只能來自後端 source_cards 事件。"""
+    body = _js_function_body("renderTextSourceLinks")
+    assert 'el("a", null, url)' in body, "連結必須是無樣式的一般 <a>"
+    assert "source-card" not in body, "不得替訊息內網址套用來源卡樣式"
+    assert "可信度" not in body, "不得替訊息內網址加可信度說明文字"
+    assert "來源日期" not in body, "不得替訊息內網址捏造來源日期"
+    assert "st-" not in body, "不得替訊息內網址套用任何狀態章 class"
+
+
+def test_research_cards_require_backend_research_events():
+    """47：只有本輪真的收過 source_cards / research_status 事件，訊息才可拆成研究卡樣式。"""
+    assert "researchEventsSeen ? splitResearch(" in JS, "splitResearch 呼叫點必須先檢查旗標"
+    assert re.search(r'case "source_cards":\s+researchEventsSeen = true;', JS), "source_cards 事件要設旗標"
+    assert re.search(r'case "research_status":\s+researchEventsSeen = true;', JS), "research_status 事件要設旗標"
+    assert "researchEventsSeen = false;" in JS, "新任務開始時要重置旗標"
+    body = _js_function_body("renderResearch")
+    assert "lastResearchStatus" in body, "研究卡要引用後端研究狀態"
+    assert "研究狀態" in body, "研究卡頂部要顯示研究狀態標籤"
+
+
+def test_task_completed_green_requires_allow_verdict():
+    """48：task_completed 只有審核放行且研究狀態完成／內部才算全綠成功。"""
+    start = JS.find('case "task_completed": {')
+    assert start >= 0, "app.js 找不到 task_completed 分支"
+    body = JS[start:JS.find("break;", start)]
+    assert 'ev.verdict === "allow"' in body, "全綠判斷式必須含 verdict"
+    okdone_line = next(line for line in body.splitlines() if "const okDone" in line)
+    assert "partially_verified" not in okdone_line, "partially_verified 不得直接算成功全綠"
+    assert 'rs === "partially_verified" || rs === "unverified"' in body, "部分驗證／尚未驗證要獨立成黃色層級"
+    assert 'setOrb("asking"' in body, "部分驗證要用既有黃色狀態呈現"
+    assert 'setOrb("error")' in body, "未通過驗證要用既有紅色狀態呈現"

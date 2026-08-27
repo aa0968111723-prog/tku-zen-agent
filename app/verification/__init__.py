@@ -275,7 +275,11 @@ def _check_required_sections(text: str, report: Report, task_type: str) -> None:
 
 def _external_reference_material() -> tuple[list[str], set[str]]:
     texts: list[str] = []
-    names: set[str] = set()
+    # 外校可識別名稱以 entity registry 為準（學校、正式社團名、帳號、網址），
+    # 涵蓋「有資料的外校」與「常被問到但沒資料的學校」（政大、台大…）。
+    from ..research.entities import external_name_lexicon
+
+    names: set[str] = set(external_name_lexicon())
     directory = config.EXTERNAL_REFERENCE_DIR
     if not directory.exists():
         return texts, names
@@ -285,7 +289,6 @@ def _external_reference_material() -> tuple[list[str], set[str]]:
         except OSError:
             continue
         texts.append(value)
-        names.update(re.findall(r"(?:北科|北藝|台大|政大|清大|交大|禪心社|領袖社|禪學社)", value))
         names.update(re.findall(r"https?://[^\s)]+", value))
         for line in value.splitlines():
             stripped = line.lstrip("#>- ").strip()

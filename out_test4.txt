@@ -1,0 +1,4 @@
+(meta: 'ChunkMeta', path: 'Path', label: 'str', text: 'str') -> 'None'
+label-HOME case: tku-lead-zen 淡江大學 False
+multi: tku-lead-zen False
+beyond 6000: tku-lead-zen

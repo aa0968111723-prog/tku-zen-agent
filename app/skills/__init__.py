@@ -84,7 +84,7 @@ SKILLS: tuple[Skill, ...] = (
         ),
         weak=("活動", "企劃", "企畫", "流程"),
         tools=(
-            "create_activity", "get_activity_status", "create_document", "create_spreadsheet", "create_slides",
+            "create_activity", "get_activity_status", "search_visual_library", "create_document", "create_spreadsheet", "create_slides",
         ),
         task_type="event_planning",
         artifacts_expected=("document",),
@@ -98,14 +98,24 @@ SKILLS: tuple[Skill, ...] = (
     Skill(
         name="social_research",
         label="外校社群研究",
-        deliverables=("研究", "比較", "分析", "定位"),
+        deliverables=("研究", "比較", "分析", "定位", "借鏡", "參考做法"),
+        # 注意：這裡**不可以**放我們自己的稱呼（禪學社、領袖社、淡江…）。
+        # 曾經因為放了「禪學社」，「請用一句話介紹淡江大學領袖禪學社」
+        # 被誤判成外校研究。外校研究另外有 _EXTERNAL_INTENT 硬性閘門把關。
         keywords=(
-            "其他學校", "外校", "北科", "北藝", "禪心社", "領袖社", "禪學社", "策略比較", "社群研究",
+            "其他學校", "外校", "他校", "別的學校", "跨校", "各校",
+            "北科", "北藝", "北醫", "台大", "臺大", "政大", "東吳", "世新", "東華",
+            "策略比較", "社群研究", "公開 IG", "公開IG", "公開ig",
         ),
         tools=("search_social_references", "compare_social_strategies", "analyze_social_positioning"),
         task_type="social_research",
         playbook_hints=("外校社群比較", "社群研究"),
-        extra_guidance="外校資料只能當公開參考；研究結果必須附學校名與來源檔名，禁止照抄或當作淡江事實。",
+        extra_guidance=(
+            "外校資料只能當公開參考；研究結果必須完整保留工具回傳的來源清單"
+            "（含網址、發布者、檢索日期），不得寫出清單以外的校名、社團、講師或活動；"
+            "禁止照抄或當作淡江事實。這些資料來自內部整理的公開參考庫，"
+            "不是即時網路搜尋，不可以寫成「剛搜尋到」或「目前現況」。"
+        ),
     ),
     Skill(
         name="social_publicity",
@@ -115,6 +125,7 @@ SKILLS: tuple[Skill, ...] = (
             "網宣", "IG", "ig", "貼文", "限動", "輪播", "Reels", "社群", "招生文宣", "文宣",
         ),
         tools=(
+            "search_visual_library",
             "create_social_post", "create_social_carousel", "create_social_story",
             "create_reels_script", "create_social_content_calendar",
         ),
@@ -131,7 +142,7 @@ SKILLS: tuple[Skill, ...] = (
         keywords=("新生", "入社", "ig", "instagram", "臉書", "社群", "宣傳", "擺攤"),
         weak=("fb",),
         tools=(
-            "search_previous_examples", "create_document", "create_spreadsheet", "create_google_form",
+            "search_previous_examples", "search_visual_library", "create_document", "create_spreadsheet", "create_google_form",
         ),
         task_type="recruitment",
         artifacts_expected=("document",),
@@ -195,7 +206,7 @@ SKILLS: tuple[Skill, ...] = (
         keywords=("簡報", "投影片", "ppt", "邀請函", "公文"),
         weak=("文件", "報告", "word", "excel", "表格", "清單", "排程"),
         tools=(
-            "get_activity_status", "create_document", "create_spreadsheet", "create_slides",
+            "get_activity_status", "search_visual_library", "create_document", "create_spreadsheet", "create_slides",
         ),
         task_type="documents",
         artifacts_expected=("document",),
@@ -216,6 +227,15 @@ SKILL_BY_NAME = {s.name: s for s in SKILLS}
 DEFAULT_SKILL = SKILL_BY_NAME["documents"]
 KNOWLEDGE_SKILL = SKILL_BY_NAME["knowledge"]
 
+# 按需暴露的工具：平常不佔 schema（工具數會拖垮開源模型的選擇正確率），
+# 使用者明確要求時（「做 AB 兩版」「給我圖片提示詞」）才單獨暴露。
+# 這三個原本註冊了卻沒有任何 skill 收錄（稽核半成品 #28）。
+ON_DEMAND_TOOLS: dict[str, tuple[str, ...]] = {
+    "social_publicity": (
+        "create_social_ab_test", "create_social_image_prompt", "create_social_video_prompt",
+    ),
+}
+
 # 明確要求「做出檔案」
 _MAKE_VERBS = re.compile(
     r"(幫我(做|寫|生|建|列|排|規劃|整理|產)|做一?[份個張]|產出|產生|生成|建立|寫一?[份篇]|"
@@ -229,12 +249,29 @@ _FACT_LOOKUP = re.compile(
     r"在哪(裡|間|邊)?|哪間教室|報名連結|報名網址|怎麼報名|地點在)"
 )
 
-# 問「我們是什麼樣的社團」—— 認識性問題，答案在知識庫，不用產檔
+# 問「我們是什麼樣的社團」—— 認識性問題，答案在知識庫，不用產檔。
+# 「介紹」不限「介紹一下」：「請用一句話介紹淡江大學領袖禪學社」也是認識性問題。
+# 會撞到「幫我寫一份社團介紹文宣」嗎？不會 —— is_lookup 先檢查 wants_artifact。
 _IDENTITY_QUESTION = re.compile(
-    r"(是什麼|什麼樣的|是不是|為什麼|介紹一下|通常怎麼|有哪些活動|在做什麼|做些什麼|怎麼回)"
+    r"(是什麼|什麼樣的|是不是|為什麼|介紹|認識一下|通常怎麼|有哪些活動|在做什麼|做些什麼|怎麼回)"
 )
 
-_QUERY_INTENT = re.compile(r"(查詢|查一下|查查看|列出|目前有|有哪些|請問)")
+_QUERY_INTENT = re.compile(r"(^查|幫我查|查詢|查一下|查查看|查個|列出|目前有|有哪些|請問)")
+
+# 外校研究的硬性閘門：沒有明確提到「別的學校」就絕不啟動外部研究。
+# 光是「研究」「比較」「介紹」出現，或訊息裡有我們自己的名字
+# （淡江、禪學社、領袖社），都不算外校意圖。
+# 學校名稱與泛稱詞彙的比對都交給 research.entities（registry 含全名
+# 「政治大學」與詞界防護「完成大合照 ≠ 成大」；泛稱詞彙與 decide_scope
+# 共用同一份 _EXTERNAL_HINTS）——清單只維護一份，兩邊不會漂移。
+def has_external_intent(message: str) -> bool:
+    """使用者是否明確想研究「別的學校」。這是外校研究的必要條件。"""
+    from ..research import entities as research_entities
+
+    return (
+        research_entities.has_generic_external_hint(message)
+        or research_entities.mentions_external_school(message)
+    )
 
 _ACTIVITY_OPERATION_QUERY = re.compile(
     r"(活動.*(?:缺什麼|進度|待辦|分工|負責|逾期|還剩|未完成)|"
@@ -267,6 +304,9 @@ def is_lookup(message: str) -> bool:
     """只是要一句話答案，不是要檔案。"""
     if wants_artifact(message):
         return False
+    # 明確提到別的學校時不算純查詢 —— 「研究其他學校怎麼招生」要走外校研究
+    if has_external_intent(message):
+        return False
     return bool(_FACT_LOOKUP.search(message) or _IDENTITY_QUESTION.search(message) or _QUERY_INTENT.search(message))
 
 
@@ -298,15 +338,19 @@ class Routing:
             if not skill:
                 continue
             candidates = skill.tool_names()
-            if self.preferred_tool and name == self.skill.name and self.preferred_tool in candidates:
-                scoped = [*BASE_TOOLS]
-                if self.continuation:
-                    scoped.append("read_artifact")
-                scoped.append(self.preferred_tool)
+            if self.preferred_tool and name == self.skill.name and (
+                self.preferred_tool in candidates
+                or self.preferred_tool in ON_DEMAND_TOOLS.get(name, ())
+            ):
+                scoped = [*BASE_TOOLS, self.preferred_tool]
                 candidates = tuple(dict.fromkeys(scoped))
             for tool in candidates:
                 if tool not in names:
                     names.append(tool)
+        # 續接／改稿一律可讀舊產出——prompt 要求模型「先讀上一份再改」，
+        # 工具卻沒暴露就是自相矛盾（稽核半成品 #29）。
+        if self.continuation and "read_artifact" not in names:
+            names.append("read_artifact")
         return tuple(names)
 
     @property
@@ -317,6 +361,12 @@ class Routing:
 def route(message: str) -> Routing:
     """把使用者輸入分到一個 skill，決定這一輪要暴露哪些工具。"""
     scores = {s.name: _score(message, s) for s in SKILLS}
+
+    # 外校研究是唯一會去翻外部參考資料的技能，必須有明確的外校意圖
+    # 才能參與競爭 —— 不能因為出現「介紹」「比較」就贏過知識庫查詢。
+    if not has_external_intent(message):
+        scores["social_research"] = 0.0
+
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     continuation = bool(re.search(r"(接續|繼續|剛才|上一份|上次|沿用|改成|轉成|轉為)", message))
     preferred_tool, preferred_artifact = _preferred_output(message)
@@ -404,6 +454,12 @@ def _preferred_output(message: str) -> tuple[str, str]:
     """把明確的轉檔要求縮到單一產出工具，避免模型看到不相關工具。"""
     if re.search(r"(改成|轉成|轉為|做成).*(簡報|投影片|ppt)", message, re.I):
         return "create_slides", "slides"
+    if re.search(r"(AB\s?測試|A/B|兩個版本|做兩版|雙版本)", message, re.I):
+        return "create_social_ab_test", "document"
+    if re.search(r"(圖片|貼文圖|封面圖).{0,6}(提示詞|prompt)", message, re.I):
+        return "create_social_image_prompt", "document"
+    if re.search(r"(影片|短片).{0,6}(提示詞|prompt)", message, re.I):
+        return "create_social_video_prompt", "document"
     if re.search(r"(改成|轉成|轉為|做成).*(Reels|短影片|影片腳本)", message, re.I):
         return "create_reels_script", "document"
     if "輪播" in message:

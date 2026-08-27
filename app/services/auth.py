@@ -58,7 +58,7 @@ def _set_admin_cookie(response: Response) -> None:
         max_age=config.ADMIN_COOKIE_MAX_AGE,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="strict",  # 管理 cookie 不需要任何跨站情境，直接用最嚴格的
         path="/",
     )
 
@@ -77,11 +77,24 @@ def check_admin_token(token: str | None) -> bool:
     return hmac.compare_digest(token.strip(), expected)
 
 
-def _request_dimensions(request: Request, cookie_name: str) -> tuple[tuple[str, str], tuple[str, str]]:
-    ip = request.client.host if request.client else "unknown"
+def _request_dimensions(request: Request, cookie_name: str) -> tuple[tuple[str, str], ...]:
+    """鎖定計數的維度。
+
+    沒帶 cookie 的請求**不能**共用一個 "anonymous" 桶——那會讓任何人
+    連錯 5 次就把全部新使用者鎖 15 分鐘（稽核不可靠 #30 的 DoS）。
+    無 cookie 時只用 IP 維度。
+    """
+    # 反向代理後 socket IP 是代理位址——用它當鎖定維度等於 5 次錯碼
+    # 鎖全站 15 分鐘（grok 審查發現 4）。改用與限流相同的真實 IP 判定。
+    from .clientip import client_ip
+
+    ip = client_ip(request)
     raw_cookie = request.cookies.get(cookie_name, "")
-    cookie_key = hashlib.sha256(raw_cookie.encode("utf-8")).hexdigest() if raw_cookie else "anonymous"
-    return ("ip", f"{cookie_name}:{ip}"), ("cookie", f"{cookie_name}:{cookie_key}")
+    dims: list[tuple[str, str]] = [("ip", f"{cookie_name}:{ip}")]
+    if raw_cookie:
+        cookie_key = hashlib.sha256(raw_cookie.encode("utf-8")).hexdigest()
+        dims.append(("cookie", f"{cookie_name}:{cookie_key}"))
+    return tuple(dims)
 
 
 def _check_locked(request: Request, cookie_name: str) -> None:
@@ -125,9 +138,12 @@ def _invalid_token(request: Request, cookie_name: str) -> HTTPException:
 
 def login(request: Request, response: Response, token: str | None) -> None:
     _check_locked(request, COOKIE_NAME)
+    store = get_store()
+    # 空字串、純空白、null 一律視同錯誤授權碼：同樣走 401 + 失敗計數，
+    # 不提早 return —— 回應形狀一致才不會洩漏「授權碼是否存在」。
+    # 稽核在 main.py 的端點層寫入（auth.login / auth.admin_login）。
     if not check_token(token):
         raise _invalid_token(request, COOKIE_NAME)
-    store = get_store()
     current = request.cookies.get(COOKIE_NAME) or request.cookies.get(LEGACY_COOKIE_NAME)
     user_id = current if current and store.user_exists(current) else store.ensure_user()
     _set_cookie(response, user_id)

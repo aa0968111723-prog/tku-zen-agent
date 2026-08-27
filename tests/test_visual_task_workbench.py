@@ -31,7 +31,8 @@ def test_question_card_supports_required_control_kinds():
 def test_workbench_cards_and_human_tool_labels_exist():
     for label in ("任務理解", "任務摘要", "正在製作", "產出結果", "接下來你可以"):
         assert label in JS
-    for label in ("建立社群貼文", "建立 IG 輪播", "查找社團資料", "檢查內容", "自動修正", "產出檔案"):
+    # 工具中文名與後端 app/tools/__init__.py LABELS 對齊（第五階段）
+    for label in ("建立貼文草稿", "建立輪播草稿", "查找社團資料", "檢查內容", "自動修正", "產出檔案"):
         assert label in JS
 
 

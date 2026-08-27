@@ -83,7 +83,10 @@ def test_auth_rate_limit(secured_client):
 
 def test_instagram_status_is_draft_until_connected(secured_client):
     secured_client.post("/api/auth", json={"token": "app-code"})
-    assert secured_client.get("/api/instagram/status").json() == {"connected": False, "mode": "draft"}
+    data = secured_client.get("/api/instagram/status").json()
+    assert data["connected"] is False
+    assert data["mode"] == "draft"
+    assert data["publish_enabled"] is False
 
 
 def test_deployment_without_token_fails_fast():
@@ -100,6 +103,21 @@ def test_deployment_without_token_fails_fast():
         timeout=10,
     )
     assert result.returncode != 0
+    # 容器平台會不斷重啟，訊息若只進 stderr 很容易被 BackOff 洗掉，
+    # 所以 stdout 也要有一份，而且要講清楚該設哪個變數。
+    assert "APP_ACCESS_TOKEN" in result.stdout
+    assert "APP_ACCESS_TOKEN" in result.stderr
+
+
+def test_secret_env_values_tolerate_pasted_quotes(monkeypatch):
+    monkeypatch.setenv("APP_ACCESS_TOKEN", '"  code-with-quotes  "')
+    assert config._secret("APP_ACCESS_TOKEN") == "code-with-quotes"
+    monkeypatch.setenv("APP_ACCESS_TOKEN", "'code'")
+    assert config._secret("APP_ACCESS_TOKEN") == "code"
+    monkeypatch.setenv("APP_ACCESS_TOKEN", "pl41n-c0de")
+    assert config._secret("APP_ACCESS_TOKEN") == "pl41n-c0de"
+    monkeypatch.delenv("APP_ACCESS_TOKEN")
+    assert config._secret("APP_ACCESS_TOKEN") == ""
 
 
 def test_social_routes_and_tool_permissions():

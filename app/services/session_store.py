@@ -137,6 +137,8 @@ CREATE TABLE IF NOT EXISTS research_sources (
     verification   TEXT NOT NULL DEFAULT 'needs_verification',
     source_type    TEXT NOT NULL DEFAULT 'external_reference',
     source_file    TEXT NOT NULL DEFAULT '',
+    entity_id      TEXT NOT NULL DEFAULT '',
+    school         TEXT NOT NULL DEFAULT '',
     created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_research_sources_project ON research_sources(project_id, created_at DESC);
@@ -178,6 +180,20 @@ CREATE TABLE IF NOT EXISTS activity_tasks (
     updated_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_activity_tasks_activity ON activity_tasks(activity_id, status, due_at);
+
+-- PR-01: append-only audit log（不記完整 token）
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_user_id TEXT NOT NULL DEFAULT '',
+    action        TEXT NOT NULL,
+    resource      TEXT NOT NULL DEFAULT '',
+    detail        TEXT NOT NULL DEFAULT '',
+    ip            TEXT NOT NULL DEFAULT '',
+    ok            INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, created_at DESC);
 """
 
 
@@ -213,15 +229,27 @@ class SessionStore:
         self.path = Path(path or config.DB_PATH)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        self._conn = sqlite3.connect(str(self.path), timeout=10.0, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout=10000")
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._migrate()
             self._conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """既有資料庫的欄位補齊。CREATE TABLE IF NOT EXISTS 不會替舊表加欄位。"""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(research_sources)")}
+        # 政大事故後：每筆研究來源都要標注屬於哪個實體與學校，
+        # 才能在來源卡與驗證時對照「來源對象是否等於研究對象」。
+        if "entity_id" not in cols:
+            self._conn.execute("ALTER TABLE research_sources ADD COLUMN entity_id TEXT NOT NULL DEFAULT ''")
+        if "school" not in cols:
+            self._conn.execute("ALTER TABLE research_sources ADD COLUMN school TEXT NOT NULL DEFAULT ''")
 
     def close(self) -> None:
         with self._lock:
@@ -544,7 +572,8 @@ class SessionStore:
                 ids.append(sid)
                 self._conn.execute(
                     "INSERT INTO research_sources(id, project_id, session_id, title, url, source_date, summary,"
-                    " credibility, verification, source_type, source_file, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " credibility, verification, source_type, source_file, entity_id, school, created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         sid, project_id, session_id,
                         str(source.get("title") or source.get("source") or "未命名來源")[:300],
@@ -555,6 +584,8 @@ class SessionStore:
                         str(source.get("verification") or "needs_verification"),
                         str(source.get("source_type") or "external_reference"),
                         str(source.get("source_file") or "")[:300],
+                        str(source.get("entity_id") or "")[:80],
+                        str(source.get("school") or source.get("organization_school") or "")[:120],
                         _now(),
                     ),
                 )
@@ -623,6 +654,7 @@ class SessionStore:
         project_id: str | None = None,
         status: str = "",
         semester: str = "",
+        academic_year: str = "",
         activity_type: str = "",
         limit: int = 50,
     ) -> list[dict[str, Any]]:
@@ -632,6 +664,7 @@ class SessionStore:
             ("project_id", project_id or ""),
             ("status", status),
             ("semester", semester),
+            ("academic_year", academic_year),
             ("activity_type", activity_type),
         ):
             if value:
@@ -738,16 +771,78 @@ class SessionStore:
             self._conn.commit()
         return self.get_activity_task(task_id, user_id)
 
+    # ── safe backend sync snapshot ─────────────────────────
+
+    def export_sync_snapshot(
+        self, user_id: str, *, project_id: str | None = None, limit: int = 500,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Return durable, user-owned records that are safe to synchronize.
+
+        Chat messages, working memory, retrieval cache, audit IP addresses and
+        authentication material are deliberately absent.  Artifact absolute
+        paths are returned only to the server-side sync service and must never
+        be included in a public manifest or remote metadata payload.
+        """
+        capped = max(1, min(int(limit), 5000))
+        if project_id and not self.get_project(project_id, user_id):
+            raise ValueError("project 不屬於目前使用者")
+        project_clause = " AND id=?" if project_id else ""
+        project_params: tuple[Any, ...] = (user_id, project_id, capped) if project_id else (user_id, capped)
+        child_clause = " AND project_id=?" if project_id else ""
+        child_params: tuple[Any, ...] = (user_id, project_id, capped) if project_id else (user_id, capped)
+        with self._lock:
+            projects = self._conn.execute(
+                f"SELECT * FROM projects WHERE user_id=?{project_clause} ORDER BY updated_at DESC LIMIT ?",
+                project_params,
+            ).fetchall()
+            artifacts = self._conn.execute(
+                f"SELECT * FROM artifacts WHERE user_id=?{child_clause} ORDER BY created_at DESC,version DESC LIMIT ?",
+                child_params,
+            ).fetchall()
+            activities = self._conn.execute(
+                f"SELECT * FROM activities WHERE user_id=?{child_clause} ORDER BY updated_at DESC LIMIT ?",
+                child_params,
+            ).fetchall()
+            activity_tasks = self._conn.execute(
+                "SELECT t.* FROM activity_tasks t JOIN activities a ON a.id=t.activity_id "
+                "WHERE a.user_id=?" + (" AND a.project_id=?" if project_id else "") +
+                " ORDER BY t.updated_at DESC LIMIT ?",
+                child_params,
+            ).fetchall()
+            research_sources = self._conn.execute(
+                "SELECT r.* FROM research_sources r JOIN projects p ON p.id=r.project_id "
+                "WHERE p.user_id=?" + (" AND r.project_id=?" if project_id else "") +
+                " ORDER BY r.created_at DESC LIMIT ?",
+                child_params,
+            ).fetchall()
+        artifact_rows = [dict(row) for row in artifacts]
+        for row in artifact_rows:
+            try:
+                row["meta"] = json.loads(row.get("meta") or "{}")
+            except (TypeError, ValueError):
+                row["meta"] = {}
+        return {
+            "projects": [dict(row) for row in projects],
+            "artifacts": artifact_rows,
+            "activities": [dict(row) for row in activities],
+            "activity_tasks": [dict(row) for row in activity_tasks],
+            "research_sources": [dict(row) for row in research_sources],
+        }
+
     # ── working memory ───────────────────────────────────────
 
-    def remember(self, project_id: str, key: str, value: str, source: str = "") -> None:
+    def remember(
+        self, project_id: str, key: str, value: str, source: str = "", max_len: int = 4000
+    ) -> None:
+        # max_len：一般事實維持 4000；orchestration state 這類結構化 JSON
+        # 由呼叫端放寬——截斷 JSON 會讓整份狀態讀不回來。
         with self._lock:
             self._conn.execute(
                 "INSERT INTO working_memory(project_id, key, value, source, updated_at)"
                 " VALUES(?,?,?,?,?)"
                 " ON CONFLICT(project_id, key) DO UPDATE SET value=excluded.value,"
                 " source=excluded.source, updated_at=excluded.updated_at",
-                (project_id, key[:120], value[:4000], source, _now()),
+                (project_id, key[:120], value[:max_len], source, _now()),
             )
             self._conn.commit()
 
@@ -763,6 +858,57 @@ class SessionStore:
         with self._lock:
             self._conn.execute("DELETE FROM working_memory WHERE project_id=? AND key=?", (project_id, key))
             self._conn.commit()
+
+    # ── audit logs (PR-01) ────────────────────────────────────
+
+    def append_audit(
+        self,
+        *,
+        actor_user_id: str = "",
+        action: str,
+        resource: str = "",
+        detail: str = "",
+        ip: str = "",
+        ok: bool = True,
+    ) -> None:
+        """Append-only；失敗由呼叫端（audit.write_audit）吞掉，此處只負責寫入。"""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO audit_logs(actor_user_id, action, resource, detail, ip, ok, created_at)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (
+                    actor_user_id or "",
+                    (action or "")[:120],
+                    (resource or "")[:240],
+                    (detail or "")[:2000],
+                    ip or "",
+                    1 if ok else 0,
+                    _now(),
+                ),
+            )
+            self._conn.commit()
+
+    def list_audit(self, limit: int = 50) -> list[dict[str, Any]]:
+        """最新在前。僅供管理／測試使用。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, actor_user_id, action, resource, detail, ip, ok, created_at"
+                " FROM audit_logs ORDER BY id DESC LIMIT ?",
+                (min(max(limit, 1), 500),),
+            ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "actor_user_id": r["actor_user_id"],
+                "action": r["action"],
+                "resource": r["resource"],
+                "detail": r["detail"],
+                "ip": r["ip"],
+                "ok": bool(r["ok"]),
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
 
 
 _store: SessionStore | None = None

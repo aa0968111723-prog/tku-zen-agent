@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from ..research.entities import ResearchMode, ResearchScope, entity_by_id
+from ..research.verifier import INTERNAL_ATTRIBUTION
 from ..services import current_term as term_service
 from ..skills import Routing
 from .state import OrchestrationState
@@ -66,7 +68,86 @@ DEST_LABEL = {"local": "只存本機", "drive": "上傳 Google 雲端硬碟", "b
 RAG_PRIORITY = (
     "本學期真實資料 > 規範／劇本 > 淡江歷年 > 外校公開參考 > 模型常識。"
     "外校公開參考只能用於比較分析，禁止照抄，也不是淡江資料。"
+    "反過來也一樣：除了標明【外校】的段落，檢索內容**全部是淡江大學領袖禪學社的資料**；"
+    "使用者問其他學校時，不可以把這些內容說成該校的做法——查不到該校資料就明說沒有。"
 )
+
+
+INTERNAL_MODE_BLOCK = (
+    "## 研究模式：淡江內部資料\n\n"
+    "這一輪只能使用：本學期真實資料、淡江社團知識庫與劇本、淡江歷年檔案、"
+    "使用者明確提供的內容。\n"
+    "**不可以對任何其他學校的社團下事實結論**——沒有查外校來源，就不知道外校的事。\n"
+    f"回答的結尾必須附上一行：「{INTERNAL_ATTRIBUTION}」"
+)
+
+
+def _external_target_lines(scope: ResearchScope) -> list[str]:
+    lines: list[str] = []
+    for eid in scope.target_entities:
+        entity = entity_by_id(eid)
+        if entity is None:
+            continue
+        bits = [entity.name]
+        if entity.school:
+            bits.append(f"（{entity.school}）")
+        if entity.instagram_url:
+            bits.append(f"官方 IG：{entity.instagram_url}")
+        lines.append("- " + " ".join(bits))
+    for school in scope.target_schools:
+        if not any(school in l for l in lines):
+            lines.append(f"- {school}（尚未確認正式社團）")
+    if not lines:
+        lines.append("- 不限定單一學校的外校公開資料")
+    return lines
+
+
+def external_mode_block(scope: ResearchScope) -> str:
+    lines = [
+        "## 研究模式：外部研究",
+        "",
+        "研究對象：",
+        *_external_target_lines(scope),
+        "",
+        "硬規則：",
+        "- 外校事實**只能**來自〈外校已驗證資料〉區塊的摘錄，逐項附上學校名稱。",
+        "- 淡江的知識庫、劇本、歷年檔案**不是**外校資料，一個字都不可以拿來描述外校。",
+        "- 摘錄裡沒有的細節（日期、講師、活動名、報名方式）一律不可以補寫。",
+        "- 沒有可驗證來源時，直接輸出：「目前沒有足夠公開來源確認此資訊，因此不提供確定結論。」",
+        "",
+        "輸出格式（照這個順序分段）：",
+        "【研究對象】明確列出學校與正式社團名稱",
+        "【已驗證資料】只放有來源支持的事實，每項標學校",
+        "【來源整理】每項資料附來源（帳號／網址／檢索日期）",
+        "【可能推測】明確標記為 AI 推測的內容",
+        "【淡江可採用建議】給淡江的策略——不代表外校事實",
+        "【尚待確認】沒有足夠證據的部分",
+    ]
+    return "\n".join(lines)
+
+
+def comparative_mode_block(scope: ResearchScope) -> str:
+    lines = [
+        "## 研究模式：比較分析",
+        "",
+        "研究對象：",
+        *_external_target_lines(scope),
+        "",
+        "硬規則：兩邊資料必須完全分開。",
+        "- 【外校已驗證資料】只能引用外校來源摘錄，逐項標學校名稱。",
+        "- 【淡江內部資料】只能引用淡江自己的資料。",
+        "- **建議是給淡江的策略，不得寫成外校已經實際使用的做法。**",
+        "- 淡江的活動名稱（例如浮游花手作）不可以出現在外校段落裡。",
+        "",
+        "輸出格式（照這個順序分段）：",
+        "【研究對象】",
+        "【外校已驗證資料】",
+        "【淡江內部資料】",
+        "【兩者差異】",
+        "【淡江可採用建議】",
+        "【尚待確認】",
+    ]
+    return "\n".join(lines)
 
 
 def build_system_prompt(
@@ -81,6 +162,16 @@ def build_system_prompt(
     activity_context: str = "",
 ) -> str:
     parts = [BASE, "## 資料優先序\n\n" + RAG_PRIORITY]
+
+    # 0. 研究模式（決定資料能不能用在哪一邊）
+    scope = ResearchScope.from_dict(state.research_scope) if state.research_scope else None
+    if scope is not None:
+        if scope.mode == ResearchMode.EXTERNAL:
+            parts.append(external_mode_block(scope))
+        elif scope.mode == ResearchMode.COMPARATIVE:
+            parts.append(comparative_mode_block(scope))
+        elif scope.internal_only_requested:
+            parts.append(INTERNAL_MODE_BLOCK)
 
     # 1. 當期真實資料（最高優先）
     parts.append(term_service.load().prompt_block())

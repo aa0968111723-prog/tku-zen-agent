@@ -1,16 +1,81 @@
-"""讓代理查社團知識庫與任務劇本。"""
+"""讓代理查社團知識庫與任務劇本。
+
+政大事故後：這個工具**只有淡江大學領袖禪學社的資料**。
+外部研究模式下呼叫它，會拿到明確拒絕而不是淡江資料——
+淡江的浮游花手作被冒充成政大茶會做法，入口之一就是這裡沒把過關。
+"""
 
 from __future__ import annotations
 
+from ..research import entities as research_entities
+from ..services import context as ctx_mod
 from .. import retrieval
 
 MAX_SNIPPET = 1200
+
+
+def _current_scope() -> "research_entities.ResearchScope | None":
+    raw = ctx_mod.research_scope()
+    if not raw:
+        return None
+    return research_entities.ResearchScope.from_dict(raw)
+
+
+def _scope_target_label(scope: "research_entities.ResearchScope") -> str:
+    names: list[str] = []
+    for eid in scope.target_entities:
+        entity = research_entities.entity_by_id(eid)
+        if entity is not None:
+            names.append(entity.name)
+    names += [s for s in scope.target_schools if s not in names]
+    return "、".join(names) or "研究對象"
+
+
+def internal_data_guard(tool_label: str) -> dict | None:
+    """外部研究模式下，內部檢索工具一律拒絕（不能拿淡江資料當外校證據）。"""
+    scope = _current_scope()
+    if scope is not None and scope.mode == research_entities.ResearchMode.EXTERNAL:
+        target = _scope_target_label(scope)
+        return {
+            "ok": False,
+            "code": "scope_blocked",
+            "message": (
+                f"目前是外校研究模式（研究對象：{target}）。"
+                f"{tool_label}只有淡江大學領袖禪學社的內部資料，"
+                f"不能作為{target}的證據，也不得把其中內容寫成{target}的做法。"
+                "請改用外校研究工具查公開參考資料；查不到就誠實說找不到可靠來源。"
+            ),
+        }
+    return None
+
+
+def _attribution_notes(query: str) -> tuple[str, str]:
+    """回傳（開頭歸屬聲明, 查詢學校錯配警告）。"""
+    scope = _current_scope()
+    header = ""
+    if scope is not None and scope.mode == research_entities.ResearchMode.COMPARATIVE:
+        target = _scope_target_label(scope)
+        header = (
+            "【資料歸屬】以下段落全部來自淡江大學領袖禪學社的內部資料，"
+            f"只能放進【淡江內部資料】區塊，不得寫成{target}的做法或外校事實。\n\n"
+        )
+    mismatch = ""
+    if research_entities.mentions_external_school(query):
+        mismatch = (
+            "【注意】這個查詢提到了其他學校，但知識庫**沒有**任何其他學校的資料；"
+            "以下段落全部屬於淡江大學領袖禪學社，不可用來回答其他學校的情況。\n\n"
+        )
+    return header, mismatch
 
 
 def search_knowledge(query: str, top_k: int = 5) -> dict:
     query = (query or "").strip()
     if not query:
         return {"ok": False, "message": "query 是空的。請說明你要查什麼，例如「招生管道」「十二項特質」「社課籌備流程」。"}
+
+    blocked = internal_data_guard("知識庫")
+    if blocked is not None:
+        return blocked
 
     top_k = max(1, min(int(top_k or 5), 10))
     index = retrieval.get_index()
@@ -52,14 +117,18 @@ def search_knowledge(query: str, top_k: int = 5) -> dict:
         text = chunk.text.strip()
         if len(text) > MAX_SNIPPET:
             text = text[:MAX_SNIPPET] + "…（內容過長已截斷）"
-        blocks.append(f"【來源：{chunk.source}】\n{text}")
+        blocks.append(f"【來源：{chunk.source}｜淡江內部資料】\n{text}")
 
+    header, mismatch = _attribution_notes(query)
     return {
         "ok": True,
         "low_confidence": False,
         "hit_count": len(hits),
         "message": (
-            "以下是知識庫裡最相關的段落，請以這些內容為準：\n\n"
+            header
+            + mismatch
+            + "以下是知識庫裡最相關的段落，請以這些內容為準（全部屬於淡江大學領袖禪學社，"
+            "不得寫成其他學校的資料）：\n\n"
             + "\n\n───────────\n\n".join(blocks)
             + reminder
         ),

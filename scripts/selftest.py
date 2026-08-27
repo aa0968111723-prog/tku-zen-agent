@@ -1,7 +1,7 @@
 """快速自我檢查：不需要 API 金鑰，確認整條鏈路都活著。
 
 完整測試請跑：
-    python -m pytest          # 261 個測試
+    python -m pytest          # 700+ 個測試
     python -m evals           # 54 個真實情境的 evals
 """
 
