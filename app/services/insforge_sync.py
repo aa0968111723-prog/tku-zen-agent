@@ -31,6 +31,19 @@ def _vector(value: Any, size: int = 1536) -> list[float]:
     return (result + [0.0] * size)[:size] if result else []
 
 
+def _vector_strict(values: Any, size: int = 1536) -> list[float]:
+    """知識庫向量專用：維度不符就吵，不要默默補零。
+
+    _vector() 對舊的視覺色彩直方圖（48 維）是刻意寬鬆的，但知識庫欄位是
+    vector(1536)。真實 embedding 模型若回 768/1024/3072 維，補零或截斷會產出
+    看起來正常、實際上錯誤的 cosine 距離，而且不會有任何錯誤或 log。
+    """
+    result = _vector(values, size=size) if not isinstance(values, list) else [float(v) for v in values]
+    if len(result) != size:
+        raise ValueError(f"embedding 維度 {len(result)} != {size}；請確認 EMBEDDING_DIMENSIONS 與資料庫欄位一致")
+    return result
+
+
 def resolved_insforge_owner(store: VisualAssetStore, user_id: str) -> str:
     """Shared owner mapping for visual sync and optional InsForge search."""
     rows = store._rows(

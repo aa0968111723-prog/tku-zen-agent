@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -28,6 +29,89 @@ def _sha(data: bytes) -> str:
 
 def _pgvector(values: list[float]) -> str | None:
     return dumps(values) if values else None
+
+
+# --- PostgreSQL 型別邊界 -------------------------------------------------
+# 本機 SQLite 每一欄都是 TEXT，空字串寫得進去；遠端 InsForge 是真的 Postgres，
+# date / time / timestamptz / FK 欄位收到 "" 會整批 400。本機資料不動，只在
+# 送出前把 "" 正規化成 NULL，並把 epoch 數字時間轉成 ISO-8601。
+_REMOTE_TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
+    "sources": ("captured_at",),
+    "review_queue": ("reviewed_at",),
+}
+_REMOTE_DATE_COLUMNS: dict[str, tuple[str, ...]] = {"events": ("date",)}
+_REMOTE_TIME_COLUMNS: dict[str, tuple[str, ...]] = {"events": ("time",)}
+# text 欄位但帶 REFERENCES：""  不是合法的 FK 值，必須是 NULL。
+# 只列「遠端可為 NULL 且帶 REFERENCES」的欄位。entity_relationships.source_id 與
+# data_lineage.source_id 是 NOT NULL DEFAULT ''，把它們設成 None 反而會違反 NOT NULL。
+_REMOTE_NULLABLE_FK_COLUMNS: dict[str, tuple[str, ...]] = {
+    "entities": ("source_id",),
+    "events": ("club_id", "school_id", "source_id"),
+}
+ENTITY_TYPES = ("person", "club", "school", "event", "scene", "place", "object")
+
+
+def _pg_timestamp(value: Any) -> str | None:
+    """把本機的時間表示轉成 Postgres 收得下的 ISO-8601，空值一律 NULL。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        # st_mtime_ns 是 19 位奈秒；也可能是秒或毫秒。
+        number = int(text)
+        for divisor in (1_000_000_000, 1_000_000, 1_000, 1):
+            seconds = number / divisor
+            if 0 < seconds < 4_102_444_800:  # < 2100-01-01
+                return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+        return None
+    return text
+
+
+def _pg_date(value: Any) -> str | None:
+    text = _pg_timestamp(value)
+    if not text:
+        return None
+    return text[:10] if len(text) >= 10 else None
+
+
+def _pg_time(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    match = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?", text)
+    if not match:
+        return None
+    hour, minute, second = int(match.group(1)), int(match.group(2)), int(match.group(3) or 0)
+    if hour > 23 or minute > 59 or second > 59:
+        return None
+    return f"{hour:02d}:{minute:02d}:{second:02d}"
+
+
+def _conform_to_postgres(table: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """同步前的最後一道型別閘門。只改送出的 payload，不動本機資料。"""
+    for column in _REMOTE_TIMESTAMP_COLUMNS.get(table, ()):
+        if column in payload:
+            payload[column] = _pg_timestamp(payload[column])
+    for column in _REMOTE_DATE_COLUMNS.get(table, ()):
+        if column in payload:
+            payload[column] = _pg_date(payload[column])
+    for column in _REMOTE_TIME_COLUMNS.get(table, ()):
+        if column in payload:
+            payload[column] = _pg_time(payload[column])
+    for column in _REMOTE_NULLABLE_FK_COLUMNS.get(table, ()):
+        if column in payload and not str(payload.get(column) or "").strip():
+            payload[column] = None
+    if table == "entities":
+        kind = str(payload.get("type") or "").strip()
+        if kind not in ENTITY_TYPES:
+            # 'date' 之類的候選型別在遠端 CHECK 之外；就近歸到語意最相近的桶，
+            # 一列不合法會讓整批 50 筆 upsert 失敗。
+            payload["type"] = "event" if kind == "date" else "object"
+    return payload
 
 
 def _sanitize(value: Any) -> Any:
@@ -232,12 +316,21 @@ class InsForgeDataSyncAdapter:
             ("entity_relationships", ("evidence",)),
             ("project_context_nodes", ("requirements",)),
             ("project_asset_links", ("reasons",)),
+            ("asset_entities", ("evidence",)),
         )
         resources: list[SyncResource] = []
         for table, json_fields in specs:
-            if table == "project_asset_links":
-                sql = "SELECT l.* FROM project_asset_links l JOIN project_context_nodes n ON n.id=l.context_node_id AND n.owner_id=l.owner_id WHERE l.owner_id=?"
+            if table == "asset_entities":
+                # 這張表兩邊都沒有 owner_id（PK 是 asset_id+entity_id+relation_type），
+                # 擁有權要從 visual_assets 繞出來，也不能硬塞 owner_id 欄位上去。
+                sql = "SELECT e.* FROM asset_entities e JOIN visual_assets a ON a.id=e.asset_id WHERE a.owner_id=?"
                 params: tuple[Any, ...] = (user_id,)
+                if project_id:
+                    sql += " AND a.project_id=?"
+                    params += (project_id,)
+            elif table == "project_asset_links":
+                sql = "SELECT l.* FROM project_asset_links l JOIN project_context_nodes n ON n.id=l.context_node_id AND n.owner_id=l.owner_id WHERE l.owner_id=?"
+                params = (user_id,)
                 if project_id:
                     sql += " AND n.project_id=?"
                     params += (project_id,)
@@ -250,7 +343,8 @@ class InsForgeDataSyncAdapter:
             sql += f" LIMIT {int(config.INSFORGE_SYNC_LIMIT)}"
             for row in self.visual_store._rows(sql, params):
                 payload = dict(row)
-                payload["owner_id"] = remote_owner
+                if table != "asset_entities":
+                    payload["owner_id"] = remote_owner
                 for field_name in json_fields:
                     value = payload.get(field_name)
                     if isinstance(value, str):
@@ -263,10 +357,13 @@ class InsForgeDataSyncAdapter:
                     if value and Path(value).is_absolute():
                         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
                         payload[path_field] = str(metadata.get("relative_path") or Path(value).name)
+                identity_keys = ("resource_type", "resource_id", "context_node_id", "asset_id")
+                if table == "asset_entities":
+                    identity_keys += ("entity_id", "relation_type")
                 identity = str(payload.get("id") or hashlib.sha256(
-                    dumps([table] + [payload.get(key) for key in ("resource_type", "resource_id", "context_node_id", "asset_id")]).encode()
+                    dumps([table] + [payload.get(key) for key in identity_keys]).encode()
                 ).hexdigest()[:32])
-                resources.append(SyncResource(f"organization_{table}", identity, table, _sanitize(payload)))
+                resources.append(SyncResource(f"organization_{table}", identity, table, _conform_to_postgres(table, _sanitize(payload))))
         return resources
 
     def discover(self, user_id: str, *, groups: set[str], project_id: str = "") -> list[SyncResource]:

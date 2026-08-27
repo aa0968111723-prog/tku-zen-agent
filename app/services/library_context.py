@@ -57,6 +57,48 @@ class LibraryContextResolver:
             self.visual_store._conn.commit()
         return self.get_node(node_id, user_id) or {}
 
+    def upsert_link(self, user_id: str, *, context_node_id: str, asset_id: str, match_score: float = 0.0, reasons: list[str] | None = None, verification_status: str = "probable") -> None:
+        """把「這個素材命中了這個 scene/shot」寫下來。
+
+        project_context_nodes 一直都有 writer，這張姊妹表卻沒有，所以
+        `_organization_resources` 的匯出規格雖然早就列了 project_asset_links，
+        本機永遠是空的。這裡補上唯一的寫入口。
+
+        排名結果是系統推薦而不是人工確認，因此預設 `probable`，不是 `verified`。
+        """
+        if not context_node_id or not asset_id:
+            return
+        with self.visual_store._lock:
+            self.visual_store._conn.execute(
+                "INSERT INTO project_asset_links(context_node_id,asset_id,owner_id,match_score,reasons,verification_status,created_at)"
+                " VALUES(?,?,?,?,?,?,?)"
+                " ON CONFLICT(context_node_id,asset_id,owner_id) DO UPDATE SET"
+                " match_score=excluded.match_score,reasons=excluded.reasons,verification_status=excluded.verification_status",
+                (context_node_id, asset_id, user_id, float(match_score or 0.0), dumps(list(reasons or [])), verification_status, now()),
+            )
+            self.visual_store._conn.commit()
+
+    def list_links(self, user_id: str, context_node_id: str) -> list[dict[str, Any]]:
+        rows = self.visual_store._rows(
+            "SELECT * FROM project_asset_links WHERE owner_id=? AND context_node_id=? ORDER BY match_score DESC",
+            (user_id, context_node_id),
+        )
+        for row in rows:
+            row["reasons"] = self._loads_list(row.get("reasons"))
+        return rows
+
+    @staticmethod
+    def _loads_list(value: object) -> list[Any]:
+        import json
+
+        if isinstance(value, list):
+            return value
+        try:
+            parsed = json.loads(str(value or "[]"))
+        except ValueError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+
     def get_node(self, node_id: str, user_id: str) -> dict[str, Any] | None:
         rows = self.visual_store._rows("SELECT * FROM project_context_nodes WHERE id=? AND owner_id=?", (node_id, user_id))
         if not rows:
@@ -162,5 +204,18 @@ class LibraryContextResolver:
         for item in items:
             item.setdefault("recommendation_reasons", []).insert(0, "符合 Library → Project → Scene → Shot 任務脈絡")
             item["context"] = {"project_id": project.get("id", ""), "scene_position": scene_position, "shot_position": shot_position}
+        # resolve() 在找不到節點時會合成一個沒有 id 的假節點；只有真的被使用者
+        # 建立過的節點才落地連結，才不會把臨時查詢寫成脈絡資料。
+        node = context.get("shot") or context.get("scene") or {}
+        node_id = str(node.get("id") or "") if isinstance(node, dict) else ""
+        if node_id:
+            for item in items:
+                self.upsert_link(
+                    user_id,
+                    context_node_id=node_id,
+                    asset_id=str(item.get("asset_id") or item.get("id") or ""),
+                    match_score=float(item.get("match_score") or 0.0),
+                    reasons=list(item.get("recommendation_reasons") or []),
+                )
         return {"context": context, "items": items, "total": total, "page": page, "limit": capped, "parsed_conditions": parsed, "acl_first": True}
 

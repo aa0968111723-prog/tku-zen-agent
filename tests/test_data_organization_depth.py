@@ -445,3 +445,46 @@ def test_failed_filesystem_mapping_is_lineaged_and_not_reported_as_new_candidate
 def test_acl_id_queries_are_chunked_for_large_asset_scopes():
     chunks = list(DataOrganizationService._id_chunks((f"asset-{index}" for index in range(1001))))
     assert [len(chunk) for chunk in chunks] == [400, 400, 201]
+
+
+def test_context_scoped_search_persists_project_asset_links(organization_env):
+    """project_asset_links 以前沒有任何本機 writer，所以匯出規格永遠匯出 0 筆。"""
+    sessions, store, _service = organization_env
+    user = sessions.ensure_user("link_owner")
+    project = sessions.create_project(user, "淡江招生影片", "recruitment")
+    asset = store.create_asset(user_id=user, filename="校園.png", mime_type="image/png", content=picture(size=(1600, 900), color=(170, 200, 210)), school="淡江大學", club="領袖禪學社")
+    store._conn.execute("UPDATE visual_assets SET quality_score=90,brightness_score=80 WHERE id=?", (asset["asset_id"],))
+    _observation(store, asset["asset_id"], "scene", "", "校園", "verified")
+
+    resolver = LibraryContextResolver(sessions, store)
+    node = resolver.upsert_node(user, project_id=project, node_type="scene", title="第二幕 校園", position=2, requirements={"scene": "校園", "ratio": "16:9"})
+
+    result = resolver.search(user, query="幫我找適合淡江招生影片第二幕的照片", project_id=project)
+    assert [item["asset_id"] for item in result["items"]] == [asset["asset_id"]]
+
+    links = resolver.list_links(user, node["id"])
+    assert [link["asset_id"] for link in links] == [asset["asset_id"]]
+    assert links[0]["context_node_id"] == node["id"]
+    assert links[0]["owner_id"] == user
+    # 排名是系統推薦，不是人工確認，不得自我升級成 verified
+    assert links[0]["verification_status"] == "probable"
+    assert links[0]["reasons"] and isinstance(links[0]["reasons"], list)
+
+    # 同一組 (node, asset, owner) 重跑只更新，不會長出第二列
+    resolver.search(user, query="幫我找適合淡江招生影片第二幕的照片", project_id=project)
+    assert len(resolver.list_links(user, node["id"])) == 1
+
+
+def test_search_without_a_real_context_node_writes_no_links(organization_env):
+    """resolve() 找不到節點時會合成沒有 id 的假節點，臨時查詢不該落地成脈絡資料。"""
+    sessions, store, _service = organization_env
+    user = sessions.ensure_user("no_link_owner")
+    project = sessions.create_project(user, "淡江招生影片", "recruitment")
+    asset = store.create_asset(user_id=user, filename="校園.png", mime_type="image/png", content=picture(size=(1600, 900), color=(170, 200, 210)), school="淡江大學", club="領袖禪學社")
+    store._conn.execute("UPDATE visual_assets SET quality_score=90,brightness_score=80 WHERE id=?", (asset["asset_id"],))
+    _observation(store, asset["asset_id"], "scene", "", "校園", "verified")
+
+    resolver = LibraryContextResolver(sessions, store)
+    resolver.search(user, query="幫我找適合淡江招生影片第二幕的照片", project_id=project)
+    rows = store._rows("SELECT * FROM project_asset_links WHERE owner_id=?", (user,))
+    assert rows == []
