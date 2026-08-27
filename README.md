@@ -26,6 +26,9 @@
 pgvector 與 private Storage。聊天、工作記憶、快取、audit IP 與憑證預設永不同步；
 遠端不可用時本機功能照常運作。
 
+網站頁面、API、資料來源、環境變數、Zeabur 持久化與上線檢查表已整理在
+[網站資訊與營運手冊](docs/WEBSITE_OPERATIONS.md)。
+
 ---
 
 ## 三分鐘上手
