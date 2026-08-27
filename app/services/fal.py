@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -82,6 +83,33 @@ async def describe_images(attachments: list[dict[str, str]]) -> str:
     if not isinstance(output, str) or not output.strip():
         raise FalError("圖片理解沒有取得可用結果，請換一張圖片或補充文字描述。", code="vision_empty")
     return output.strip()[:6000]
+
+
+async def analyze_images(attachments: list[dict[str, str]], *, prompt: str) -> str:
+    """Return a bounded structured vision response for an approved integration.
+
+    The URLs are short-lived Supabase signed URLs supplied by duigao.  They are
+    used for this request only and are never written to the session store or
+    logs.  Keeping this beside ``describe_images`` lets the integration reuse
+    the existing fal policy/timeout/error handling without changing chat.
+    """
+    urls = [item.get("data_url", "") for item in attachments if item.get("data_url")]
+    if not urls:
+        return ""
+    data = await _post_json(
+        "https://fal.run/openrouter/router/vision",
+        {
+            "image_urls": urls,
+            "prompt": prompt,
+            "model": config.FAL_VISION_MODEL,
+        },
+    )
+    output = data.get("output")
+    if isinstance(output, dict):
+        return json.dumps(output, ensure_ascii=False)[:12000]
+    if not isinstance(output, str) or not output.strip():
+        raise FalError("視覺服務回傳空內容，請稍後重試。", code="vision_empty")
+    return output.strip()[:12000]
 
 
 async def generate_image(prompt: str) -> list[dict[str, Any]]:

@@ -20,6 +20,7 @@ from .services import auth, context as ctx_mod
 from .services import activities as activity_service
 from .services import current_term as term_service
 from .services import fal as fal_service
+from .services import duigao_integration
 from .services import memory as memory_service
 from .services.session_store import get_store
 from .orchestrator.state import Stage, WorkflowStatus
@@ -120,6 +121,9 @@ class ActivityTaskUpdateRequest(BaseModel):
 
 general_router = APIRouter(prefix="/api", dependencies=[Depends(auth.require_user)])
 admin_router = APIRouter(prefix="/api", dependencies=[Depends(auth.require_admin)])
+# This router is authenticated by an HMAC shared with duigao's Edge Function,
+# not by the interactive cookie login used by the human workbench.
+duigao_router = APIRouter(prefix="/api/v1", dependencies=[Depends(duigao_integration.require_duigao_signature)])
 
 
 def current_user(request: Request, response: Response) -> str:
@@ -517,6 +521,21 @@ async def chat(req: ChatRequest, user_id: str = Depends(current_user)) -> Stream
     )
 
 
+@duigao_router.post("/room-context/answer", response_model=duigao_integration.DuigaoAnswer)
+async def answer_duigao_room_context(req: duigao_integration.DuigaoContextRequest) -> duigao_integration.DuigaoAnswer:
+    """Answer only from duigao's already permission-filtered context."""
+    try:
+        return await duigao_integration.answer_room_context(req)
+    except duigao_integration.LLMError as exc:
+        raise HTTPException(status_code=503, detail="AI 文字服務目前無法回應") from exc
+
+
+@duigao_router.post("/asset-analysis", response_model=duigao_integration.DuigaoAssetAnalysisResponse)
+async def analyze_duigao_asset(req: duigao_integration.DuigaoAssetAnalysisRequest) -> duigao_integration.DuigaoAssetAnalysisResponse:
+    """Analyze an approved image/keyframe request without persisting the URL."""
+    return await duigao_integration.analyze_asset(req)
+
+
 @general_router.get("/instagram/status")
 async def instagram_status() -> dict[str, Any]:
     connected = bool(config.INSTAGRAM_ACCESS_TOKEN and config.INSTAGRAM_BUSINESS_ACCOUNT_ID)
@@ -546,3 +565,4 @@ async def instagram_send() -> None:
 
 app.include_router(general_router)
 app.include_router(admin_router)
+app.include_router(duigao_router)
