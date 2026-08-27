@@ -551,7 +551,8 @@ _COMPARE_HINTS = re.compile(r"(比較|對比|差異|參考|借鏡|學習|淡江�
 # dispatch 閘門再把工具全擋掉（對抗審查抓到的回歸）。
 _EXTERNAL_HINTS = re.compile(
     r"(其他學校|其他大學|外校|他校|別的學校|別校|跨校|各校|大專院校|"
-    r"公開\s*IG|公開\s*ig|公開帳號|官方IG|官方 IG|官方帳號)"
+    r"公開\s*IG|公開\s*ig|公開帳號|官方IG|官方 IG|官方帳號|"
+    r"公開網路|Perplexity|hashtag|標籤|Instagram\s*公開|instagram\s*公開)"
 )
 
 

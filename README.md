@@ -228,6 +228,12 @@ Google 沒有可以直接呼叫的表單建立 API。代理改成產一支 Apps 
 - 管理功能（`/api/reindex`、修改本學期資料、`/api/admin/*`）需要第二組 `ADMIN_ACCESS_TOKEN`
 - Instagram 未連接官方 API 前一律「草稿模式」：只產草稿，不會、也不能自動發布
 
+### 公開研究服務（可選）
+
+Perplexity 與 Meta Instagram 公開搜尋都只在 server-side 啟用且完成授權後執行；金鑰不可放前端、Git、資料庫或 log。Perplexity 搜尋結果會以 `pending_review`／`probable` 來源保存於所屬 project，並受 project ACL 隔離；未設定金鑰或外部服務不可用時會回報 `BLOCKED_BY_EXTERNAL_DEPENDENCY`，不會假造成功。
+
+必要設定請以 `.env.example` 為準：`PERPLEXITY_API_KEY`、`PERPLEXITY_BASE_URL`、`PERPLEXITY_SEARCH_ENABLED`、`PERPLEXITY_SEARCH_TIMEOUT_SECONDS`、`PERPLEXITY_SEARCH_ATTEMPTS`、`PERPLEXITY_SEARCH_COST_PER_1000`。成本單價未設定時只記錄 invocation 與成本未知，不宣稱免費。
+
 #### 權限分成四種，不是只有「是不是管理者」
 
 | 權限 | 誰有 | 管到什麼 |

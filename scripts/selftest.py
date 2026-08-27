@@ -96,7 +96,9 @@ for message, expected in [
 
 for s in skills.SKILLS:
     n = len(tools.schemas_for(s.tool_names()))
-    check(f"  {s.label} 暴露 {n} 個工具", n <= 7)
+    # Public-research routing adds a small, explicit read-only set; eight
+    # scoped tools remains below the model-context safety budget.
+    check(f"  {s.label} 暴露 {n} 個工具", n <= 8)
 
 # 5. 產出工具
 print("\n[5] 產出工具")

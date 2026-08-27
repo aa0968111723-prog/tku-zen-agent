@@ -46,7 +46,35 @@ _REGISTRY: dict[str, tuple[Callable[..., dict], dict, Permission]] = {
     "search_visual_library": (visual_library.search_visual_library, visual_library.SCHEMA, "general"),
 }
 
-SCHEMAS: list[dict] = [schema for _, schema, _ in _REGISTRY.values()]
+def _openai_function_schema(name: str, schema: dict) -> dict:
+    """Return one canonical OpenAI-compatible function tool envelope.
+
+    Tool implementations keep their compact parameter schema internally so
+    older dispatch code remains compatible.  The LLM boundary, however,
+    always receives the full ``type=function`` envelope.  Keeping this
+    conversion in the registry prevents provider-specific schema drift.
+    """
+    if isinstance(schema, dict) and schema.get("type") == "function" and isinstance(schema.get("function"), dict):
+        function = dict(schema["function"])
+        function.setdefault("name", name)
+        function.setdefault("description", LABELS.get(name, "執行工具"))
+        function.setdefault("parameters", {"type": "object", "properties": {}, "required": []})
+        return {"type": "function", "function": function}
+    parameters = dict(schema) if isinstance(schema, dict) else {}
+    parameters.setdefault("type", "object")
+    parameters.setdefault("properties", {})
+    parameters.setdefault("required", [])
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": LABELS.get(name, "執行工具"),
+            "parameters": parameters,
+        },
+    }
+
+
+SCHEMAS: list[dict] = []
 
 # 使用者看得到的工具名稱一律繁體中文 —— 內部英文工具名（create_social_carousel
 # 之類）絕不能直接呈現在介面上。tests/test_ui_language.py 會掃這份表。
@@ -89,6 +117,14 @@ for _name in _REGISTRY:
     LABELS.setdefault(_name, "執行工具")
 
 
+def _refresh_schemas() -> None:
+    SCHEMAS.clear()
+    SCHEMAS.extend(_openai_function_schema(name, schema) for name, (_fn, schema, _permission) in _REGISTRY.items())
+
+
+_refresh_schemas()
+
+
 def register(
     name: str,
     fn: Callable[..., dict],
@@ -101,15 +137,13 @@ def register(
     _REGISTRY[name] = (fn, schema, permission)
     # fallback 不用英文內部名——那會原封不動出現在前端進度列（稽核不可靠 #42）
     LABELS[name] = label or "執行工具"
-    SCHEMAS.clear()
-    SCHEMAS.extend(s for _, s, _ in _REGISTRY.values())
+    _refresh_schemas()
 
 
 def unregister(name: str) -> None:
     _REGISTRY.pop(name, None)
     LABELS.pop(name, None)
-    SCHEMAS.clear()
-    SCHEMAS.extend(s for _, s, _ in _REGISTRY.values())
+    _refresh_schemas()
 
 
 def all_names() -> list[str]:
@@ -123,7 +157,7 @@ def permission_for(name: str) -> Permission | None:
 
 def schemas_for(names: tuple[str, ...] | list[str]) -> list[dict]:
     """Return only explicitly requested known schemas; empty means none."""
-    return [_REGISTRY[name][1] for name in names if name in _REGISTRY]
+    return [_openai_function_schema(name, _REGISTRY[name][1]) for name in names if name in _REGISTRY]
 
 
 def _auth_level() -> str:

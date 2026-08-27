@@ -30,9 +30,11 @@ PERPLEXITY_API_KEY=your_server_only_key
 PERPLEXITY_SEARCH_ENABLED=true
 PERPLEXITY_SEARCH_TIMEOUT_SECONDS=20
 PERPLEXITY_SEARCH_ATTEMPTS=2
+PERPLEXITY_SEARCH_COST_PER_1000=
 ~~~
 
 Perplexity Search API 回傳結構化的排名結果，包含標題、網址、摘要與日期；代理仍必須把原始網址當作證據，不可把搜尋摘要直接視為已確認事實。可用網域與 hour/day/week/month/year 篩選。
+每筆結果會保存 `provider`、`search_id`、`retrieved_at`、發布日期與 `pending_review`／`probable` 狀態；相同 project 的相同查詢會短期快取，不同 project 不共用。可重試錯誤為網路逾時、429 與 5xx，401／403 不重試。設定缺少時回傳 `BLOCKED_BY_EXTERNAL_DEPENDENCY` 並附 `error_code=CONFIG_MISSING`。
 
 API endpoint：
 

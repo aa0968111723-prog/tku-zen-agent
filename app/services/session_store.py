@@ -25,7 +25,7 @@ from typing import Any
 
 from .. import config
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _now() -> str:
@@ -125,6 +125,24 @@ CREATE TABLE IF NOT EXISTS retrieval_cache (
     PRIMARY KEY(project_id, cache_key)
 );
 
+-- Read-only external searches are cached separately from internal RAG context.
+-- The project key is part of the primary key so one project can never read a
+-- different project's public-web research, even when the query is identical.
+CREATE TABLE IF NOT EXISTS external_search_cache (
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    cache_key     TEXT NOT NULL,
+    provider      TEXT NOT NULL,
+    query_hash    TEXT NOT NULL,
+    query_text    TEXT NOT NULL,
+    params        TEXT NOT NULL DEFAULT '{}',
+    payload       TEXT NOT NULL DEFAULT '{}',
+    expires_at    TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    PRIMARY KEY(project_id, cache_key)
+);
+CREATE INDEX IF NOT EXISTS idx_external_cache_project ON external_search_cache(project_id, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS research_sources (
     id             TEXT PRIMARY KEY,
     project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -139,6 +157,13 @@ CREATE TABLE IF NOT EXISTS research_sources (
     source_file    TEXT NOT NULL DEFAULT '',
     entity_id      TEXT NOT NULL DEFAULT '',
     school         TEXT NOT NULL DEFAULT '',
+    provider       TEXT NOT NULL DEFAULT '',
+    published_at   TEXT NOT NULL DEFAULT '',
+    last_updated_at TEXT NOT NULL DEFAULT '',
+    retrieved_at   TEXT NOT NULL DEFAULT '',
+    search_id      TEXT NOT NULL DEFAULT '',
+    confidence     TEXT NOT NULL DEFAULT '',
+    verification_status TEXT NOT NULL DEFAULT '',
     created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_research_sources_project ON research_sources(project_id, created_at DESC);
@@ -250,6 +275,17 @@ class SessionStore:
             self._conn.execute("ALTER TABLE research_sources ADD COLUMN entity_id TEXT NOT NULL DEFAULT ''")
         if "school" not in cols:
             self._conn.execute("ALTER TABLE research_sources ADD COLUMN school TEXT NOT NULL DEFAULT ''")
+        for column, ddl in (
+            ("provider", "TEXT NOT NULL DEFAULT ''"),
+            ("published_at", "TEXT NOT NULL DEFAULT ''"),
+            ("last_updated_at", "TEXT NOT NULL DEFAULT ''"),
+            ("retrieved_at", "TEXT NOT NULL DEFAULT ''"),
+            ("search_id", "TEXT NOT NULL DEFAULT ''"),
+            ("confidence", "TEXT NOT NULL DEFAULT ''"),
+            ("verification_status", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if column not in cols:
+                self._conn.execute(f"ALTER TABLE research_sources ADD COLUMN {column} {ddl}")
 
     def close(self) -> None:
         with self._lock:
@@ -572,8 +608,9 @@ class SessionStore:
                 ids.append(sid)
                 self._conn.execute(
                     "INSERT INTO research_sources(id, project_id, session_id, title, url, source_date, summary,"
-                    " credibility, verification, source_type, source_file, entity_id, school, created_at)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " credibility, verification, source_type, source_file, entity_id, school, provider, published_at,"
+                    " last_updated_at, retrieved_at, search_id, confidence, verification_status, created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         sid, project_id, session_id,
                         str(source.get("title") or source.get("source") or "未命名來源")[:300],
@@ -586,6 +623,13 @@ class SessionStore:
                         str(source.get("source_file") or "")[:300],
                         str(source.get("entity_id") or "")[:80],
                         str(source.get("school") or source.get("organization_school") or "")[:120],
+                        str(source.get("provider") or "")[:80],
+                        str(source.get("published_at") or source.get("date") or "")[:80],
+                        str(source.get("last_updated_at") or "")[:80],
+                        str(source.get("retrieved_at") or source.get("captured_at") or "")[:80],
+                        str(source.get("search_id") or "")[:160],
+                        str(source.get("confidence") or "")[:40],
+                        str(source.get("verification_status") or source.get("verification") or "")[:40],
                         _now(),
                     ),
                 )
@@ -646,6 +690,55 @@ class SessionStore:
                 "SELECT * FROM activities WHERE id=? AND user_id=?", (activity_id, user_id)
             ).fetchone()
         return dict(row) if row else None
+
+    # ── external public-search cache ───────────────────────
+
+    def get_external_search_cache(self, project_id: str, cache_key: str) -> dict[str, Any] | None:
+        """Return a non-expired project-scoped public-search result."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM external_search_cache WHERE project_id=? AND cache_key=?",
+                (project_id, cache_key),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        expires_at = str(item.get("expires_at") or "")
+        if expires_at and expires_at < _now():
+            return None
+        try:
+            item["params"] = json.loads(item.get("params") or "{}")
+            item["payload"] = json.loads(item.get("payload") or "{}")
+        except (TypeError, ValueError):
+            return None
+        return item
+
+    def save_external_search_cache(
+        self,
+        project_id: str,
+        cache_key: str,
+        *,
+        provider: str,
+        query_hash: str,
+        query_text: str,
+        params: dict[str, Any],
+        payload: dict[str, Any],
+        expires_at: str = "",
+    ) -> None:
+        now = _now()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO external_search_cache(project_id,cache_key,provider,query_hash,query_text,params,payload,expires_at,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,cache_key) DO UPDATE SET "
+                "provider=excluded.provider,query_hash=excluded.query_hash,query_text=excluded.query_text,params=excluded.params,payload=excluded.payload,expires_at=excluded.expires_at,updated_at=excluded.updated_at",
+                (
+                    project_id, cache_key, provider[:40], query_hash[:128], query_text[:500],
+                    json.dumps(params, ensure_ascii=False, default=str),
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    expires_at[:80], now, now,
+                ),
+            )
+            self._conn.commit()
 
     def list_activities(
         self,

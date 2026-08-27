@@ -243,6 +243,11 @@ PERPLEXITY_BASE_URL = (os.getenv("PERPLEXITY_BASE_URL") or "https://api.perplexi
 PERPLEXITY_SEARCH_ENABLED = _bool("PERPLEXITY_SEARCH_ENABLED", False)
 PERPLEXITY_SEARCH_TIMEOUT_SECONDS = max(3.0, float(os.getenv("PERPLEXITY_SEARCH_TIMEOUT_SECONDS") or 20))
 PERPLEXITY_SEARCH_ATTEMPTS = max(1, min(3, int(os.getenv("PERPLEXITY_SEARCH_ATTEMPTS") or 2)))
+_perplexity_cost_raw = (os.getenv("PERPLEXITY_SEARCH_COST_PER_1000") or "").strip()
+try:
+    PERPLEXITY_SEARCH_COST_PER_1000 = max(0.0, float(_perplexity_cost_raw)) if _perplexity_cost_raw else None
+except ValueError:
+    PERPLEXITY_SEARCH_COST_PER_1000 = None
 INSTAGRAM_API_TIMEOUT_SECONDS = max(3.0, float(os.getenv("INSTAGRAM_API_TIMEOUT_SECONDS") or 15))
 PUBLIC_SOURCE_TIMEOUT_SECONDS = max(3.0, float(os.getenv("PUBLIC_SOURCE_TIMEOUT_SECONDS") or 12))
 PUBLIC_SOURCE_MAX_BYTES = max(100_000, min(5_000_000, int(os.getenv("PUBLIC_SOURCE_MAX_BYTES") or 2_000_000)))
