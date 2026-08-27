@@ -26,7 +26,7 @@ from .. import config, retrieval, tools, verification
 from ..llm import LLMError, NvidiaClient, Reply, estimate_cost, select_model
 from ..research import entities as research_entities
 from ..research import verifier as research_verifier
-from ..research.claims import SourceRecord
+from ..research.types import SourceRecord
 from ..research.entities import ResearchMode, ResearchScope
 from ..services import activities as activity_service
 from ..services import context as ctx_mod
