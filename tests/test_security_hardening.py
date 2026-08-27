@@ -106,6 +106,12 @@ def test_same_origin_post_is_allowed(client):
     assert resp.status_code == 200
 
 
+def test_null_origin_post_is_blocked(client):
+    resp = client.post("/api/session", json={}, headers={"Origin": "null"})
+    assert resp.status_code == 403
+    assert "來源網域不符" in resp.json()["detail"]
+
+
 # ── 登入 token 驗證 ──────────────────────────────────────────
 
 @pytest.mark.parametrize("payload", [{"token": ""}, {"token": None}, {}, {"token": "   "}])

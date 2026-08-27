@@ -33,15 +33,15 @@ def visual_env(tmp_db,monkeypatch):
     shutil.rmtree(root,ignore_errors=True)
 
 
-def folder_payload(entries: list[dict], files: list[tuple], *, key: str, resync: bool = False):
-    return {
-        "files": [("files", item) for item in files],
-        "data": {
-            "manifest": json.dumps({"total_count": len(entries), "items": entries}, ensure_ascii=False),
-            "idempotency_key": key, "root_name": "社團相簿", "school": "淡江大學",
-            "club": "領袖禪學社", "auto_analyze": "false", "resync": str(resync).lower(),
-        },
+def folder_payload(entries: list[dict], files: list[tuple], *, key: str, resync: bool = False, project_id: str = ""):
+    data = {
+        "manifest": json.dumps({"total_count": len(entries), "items": entries}, ensure_ascii=False),
+        "idempotency_key": key, "root_name": "社團相簿", "school": "淡江大學",
+        "club": "領袖禪學社", "auto_analyze": "false", "resync": str(resync).lower(),
     }
+    if project_id:
+        data["project_id"] = project_id
+    return {"files": [("files", item) for item in files], "data": data}
 
 
 def test_migration_ledger_and_document_media_are_persistent(visual_env):
@@ -57,7 +57,7 @@ def test_migration_ledger_and_document_media_are_persistent(visual_env):
         assert "期初茶會" in item["ocr_text"]
         store = visual_assets.get_visual_store()
         versions = {row[0] for row in store._conn.execute("SELECT version FROM visual_schema_migrations")}
-        assert versions == {"0001_initial_visual_schema","0002_phase1_media_import","0003_insforge_visual_backend","0004_insforge_core_data_sync","0005_data_organization_depth"}
+        assert versions == {"0001_initial_visual_schema","0002_phase1_media_import","0003_insforge_visual_backend","0004_insforge_core_data_sync","0005_data_organization_depth","0006_audit_job_and_project_scope","0007_import_project_and_cancel"}
         assert store._conn.execute("SELECT length(storage_path)>0 FROM visual_assets WHERE id=?",(item["asset_id"],)).fetchone()[0] == 1
         assert store._conn.execute("SELECT typeof(storage_path) FROM visual_assets WHERE id=?",(item["asset_id"],)).fetchone()[0] == "text"
 
@@ -138,6 +138,34 @@ def test_folder_import_partial_failure_resume_idempotency_and_resync(visual_env)
         replacement = changed.json()["items"][0]
         assert replacement["supersedes_asset_id"]
         assert replacement["relative_path"] == "茶會/第二張.png"
+        previous_id = replacement["supersedes_asset_id"]
+        auto_version = client.post("/api/visual-assets/import", **folder_payload(
+            [entries[1]], [("第二張.png",picture(color=(10,10,10)),"image/png")], key=key,
+        ))
+        assert auto_version.status_code == 201
+        newest = auto_version.json()["items"][0]
+        assert newest["asset_id"] != previous_id
+        assert newest["supersedes_asset_id"]
+        assert client.get(f"/api/visual-assets/{previous_id}").status_code == 200
+
+
+def test_folder_import_writes_validated_project_id(visual_env, tmp_db):
+    user_id = tmp_db.ensure_user("u_local", is_local=True)
+    project_id = tmp_db.create_project(user_id, "招生影片", "promotion")
+    entries = [{"client_key": "p1", "relative_path": "校園/入口.png"}]
+    with TestClient(main.app) as client:
+        denied = client.post(
+            "/api/visual-assets/import",
+            **folder_payload(entries, [("入口.png", picture(), "image/png")], key="folder-project-denied", project_id="p_not_owned"),
+        )
+        assert denied.status_code == 422
+        ok = client.post(
+            "/api/visual-assets/import",
+            **folder_payload(entries, [("入口.png", picture(), "image/png")], key="folder-project-ok", project_id=project_id),
+        )
+        assert ok.status_code == 201
+        item = ok.json()["items"][0]
+        assert item["project_id"] == project_id
 
 
 def test_exact_phase1_routes_review_confirm_retry_and_external_marker(visual_env,monkeypatch):
@@ -237,3 +265,115 @@ def test_insforge_sync_is_durable_and_does_not_send_private_asset_without_explic
         assert rollback.json()["rollback_status"] == "complete"
     store = visual_assets.get_visual_store()
     assert store._rows("SELECT status FROM visual_asset_backend_refs WHERE asset_id=?",(asset_id,))[0]["status"] == "rolled_back_local"
+
+
+def test_local_asset_file_cannot_escape_visual_dir(visual_env):
+    with TestClient(main.app) as client:
+        item = upload(client, picture(), auto=False).json()["items"][0]
+        asset_id = item["asset_id"]
+        original = client.get(item["original_url"])
+        assert original.status_code == 200
+        store = visual_assets.get_visual_store()
+        bait = visual_env / "secret.txt"
+        bait.write_text("should-not-be-served", encoding="utf-8")
+        store._conn.execute("UPDATE visual_assets SET storage_path=? WHERE id=?", (str(bait), asset_id))
+        store._conn.commit()
+        escaped = store.asset_file(asset_id, store._rows("SELECT user_id FROM visual_assets WHERE id=?", (asset_id,))[0]["user_id"], "original")
+        assert escaped is None
+        assert client.get(item["original_url"]).status_code == 404
+        assert bait.read_text(encoding="utf-8") == "should-not-be-served"
+
+
+def test_upload_records_project_id_when_provided(visual_env, tmp_db):
+    project_id = tmp_db.create_project(tmp_db.ensure_user("u_local", is_local=True), "招生計畫", "promotion")
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/visual-assets/upload",
+            files=[("files", ("tea.png", picture(), "image/png"))],
+            data={"auto_analyze": "false", "school": "淡江大學", "club": "領袖禪學社", "project_id": project_id},
+        )
+        assert response.status_code == 201
+        item = response.json()["items"][0]
+        assert item["project_id"] == project_id
+        store = visual_assets.get_visual_store()
+        row = store._rows("SELECT project_id,owner_id FROM visual_assets WHERE id=?", (item["asset_id"],))[0]
+        assert row["project_id"] == project_id
+        assert row["owner_id"]
+
+
+def test_process_restart_does_not_downgrade_verified_review_status(visual_env):
+    with TestClient(main.app) as client:
+        item = upload(client, picture(), auto=False).json()["items"][0]
+        asset_id = item["asset_id"]
+    store = visual_assets.get_visual_store()
+    store.create_job(asset_id)
+    with store._lock:
+        store._conn.execute("UPDATE visual_assets SET review_status='verified' WHERE id=?", (asset_id,))
+        store._conn.commit()
+    store.close()
+    visual_assets._visual_store = None
+    reopened = visual_assets.get_visual_store()
+    row = reopened._rows("SELECT review_status,processing_state FROM visual_assets WHERE id=?", (asset_id,))[0]
+    assert row["review_status"] == "verified"
+    assert row["processing_state"] == "failed"
+    job = reopened._rows(
+        "SELECT status,error_code FROM visual_analysis_jobs WHERE asset_id=? ORDER BY created_at DESC LIMIT 1",
+        (asset_id,),
+    )[0]
+    assert job["status"] == "failed"
+    assert job["error_code"] == "interrupted_process"
+
+
+def test_analyze_does_not_read_escaped_storage_path(visual_env):
+    with TestClient(main.app) as client:
+        item = upload(client, picture(), auto=False).json()["items"][0]
+        asset_id = item["asset_id"]
+        store = visual_assets.get_visual_store()
+        bait = visual_env / "secret-for-vision.txt"
+        bait.write_text("do-not-send-to-vision", encoding="utf-8")
+        store._conn.execute("UPDATE visual_assets SET storage_path=? WHERE id=?", (str(bait), asset_id))
+        store._conn.commit()
+        response = client.post(f"/api/visual-assets/{asset_id}/analyze")
+        assert response.status_code == 404
+        assert bait.read_text(encoding="utf-8") == "do-not-send-to-vision"
+
+
+def test_visual_search_limit_is_rejected_above_cap(visual_env):
+    with TestClient(main.app) as client:
+        response = client.get("/api/visual-assets/search", params={"limit": 1000})
+        assert response.status_code == 422
+
+
+def test_rerun_does_not_downgrade_verified_or_ignored_observations(visual_env):
+    with TestClient(main.app) as client:
+        item = upload(client, picture(), auto=False).json()["items"][0]
+        asset_id = item["asset_id"]
+    store = visual_assets.get_visual_store()
+    verified_id = store.add_observation(
+        asset_id, "scene", label="社課", status="probable",
+        confidence=0.7, source="directory_taxonomy_v1",
+        evidence={"path": "場景/上學期社課"},
+    )
+    with store._lock:
+        store._conn.execute("UPDATE visual_observations SET status='verified' WHERE id=?", (verified_id,))
+        store._conn.commit()
+    store.add_observation(
+        asset_id, "scene", label="社課", status="probable",
+        confidence=0.4, source="directory_taxonomy_v1",
+        evidence={"path": "場景/上學期社課"},
+    )
+    assert store._rows("SELECT status,confidence FROM visual_observations WHERE id=?", (verified_id,))[0]["status"] == "verified"
+    ignored_id = store.add_observation(
+        asset_id, "scene", label="其他", status="probable",
+        confidence=0.5, source="directory_taxonomy_v1",
+    )
+    with store._lock:
+        store._conn.execute("UPDATE visual_observations SET review_action='ignored' WHERE id=?", (ignored_id,))
+        store._conn.commit()
+    store.add_observation(
+        asset_id, "scene", label="其他", status="probable",
+        confidence=0.9, source="directory_taxonomy_v1",
+    )
+    row = store._rows("SELECT status,review_action FROM visual_observations WHERE id=?", (ignored_id,))[0]
+    assert row["review_action"] == "ignored"
+    assert store._rows("SELECT COUNT(*) AS n FROM visual_observations WHERE asset_id=? AND label='其他'", (asset_id,))[0]["n"] == 1

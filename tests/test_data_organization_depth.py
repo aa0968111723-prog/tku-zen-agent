@@ -100,11 +100,11 @@ def test_inventory_and_mapping_are_real_idempotent_non_destructive_and_owner_sco
     real_map = service._map_resource
     failed_once = {"value": False}
 
-    def fail_asset_once(owner_id, resource_type, resource_id, row):
+    def fail_asset_once(owner_id, resource_type, resource_id, row, project_id=""):
         if resource_type == "visual_asset" and not failed_once["value"]:
             failed_once["value"] = True
             raise RuntimeError("synthetic mapping boundary failure")
-        return real_map(owner_id, resource_type, resource_id, row)
+        return real_map(owner_id, resource_type, resource_id, row, project_id=project_id)
 
     monkeypatch.setattr(service, "_map_resource", fail_asset_once)
     partial = service.run(user_a, idempotency_key="organization-partial")
@@ -260,11 +260,12 @@ def test_external_media_import_keeps_original_path_and_only_writes_derivatives(o
     image_path.write_bytes(picture(size=(320, 180)))
     video_path.write_bytes(b"video-original-bytes")
     monkeypatch.setattr(config, "DATA_ORGANIZATION_IMPORT_ROOTS", (source_root,))
+    project_id = sessions.create_project(user_id, "社課影像", "promotion")
 
-    result = service.run(user_id, idempotency_key="external-media-import")
+    result = service.run(user_id, idempotency_key="external-media-import", project_id=project_id)
     assert result["status"] == "completed", result.get("error_log")
     rows = store._conn.execute(
-        "SELECT original_filename,storage_path,thumbnail_path,asset_type FROM visual_assets WHERE user_id=? ORDER BY original_filename",
+        "SELECT original_filename,storage_path,thumbnail_path,asset_type,project_id FROM visual_assets WHERE user_id=? ORDER BY original_filename",
         (user_id,),
     ).fetchall()
     assert {row["original_filename"] for row in rows} == {"社課照片.png", "社課花絮.mp4"}
@@ -274,12 +275,40 @@ def test_external_media_import_keeps_original_path_and_only_writes_derivatives(o
     assert image_path.read_bytes() == picture(size=(320, 180))
     assert video_path.read_bytes() == b"video-original-bytes"
     assert Path(by_name["社課照片.png"]["thumbnail_path"]).exists()
+    assert {row["project_id"] for row in rows} == {project_id}
     rendition = store.asset_file(
         store._conn.execute("SELECT id FROM visual_assets WHERE user_id=? AND original_filename=?", (user_id, "社課照片.png")).fetchone()[0],
         user_id,
         "16:9",
     )
     assert rendition and Path(rendition[0]).parent.is_relative_to(Path(config.VISUAL_ASSET_DIR).resolve())
+
+
+def test_same_path_new_sha_is_inventoried_and_does_not_overwrite_previous_asset(organization_env, monkeypatch):
+    sessions, store, service = organization_env
+    user_id = sessions.ensure_user("replace_content", is_local=True)
+    source_root = Path(config.VISUAL_ASSET_DIR).parent / "replace-media"
+    source_root.mkdir(parents=True, exist_ok=True)
+    image_path = source_root / "入口.png"
+    first_bytes = picture(size=(320, 180), color=(20, 80, 160))
+    image_path.write_bytes(first_bytes)
+    monkeypatch.setattr(config, "DATA_ORGANIZATION_IMPORT_ROOTS", (source_root,))
+    first = service.run(user_id, idempotency_key="replace-content-1")
+    assert first["status"] == "completed", first.get("error_log")
+    original_id = store._conn.execute("SELECT id FROM visual_assets WHERE user_id=?", (user_id,)).fetchone()[0]
+    original_sha = store._conn.execute("SELECT sha256 FROM visual_assets WHERE id=?", (original_id,)).fetchone()[0]
+    image_path.write_bytes(picture(size=(320, 180), color=(180, 40, 40)))
+    preview = service.inventory(user_id, persist=False)
+    assert preview["manifest"]["unregistered_candidates"] >= 1
+    second = service.run(user_id, idempotency_key="replace-content-2")
+    assert second["status"] == "completed", second.get("error_log")
+    rows = store._rows("SELECT id,sha256,supersedes_asset_id FROM visual_assets WHERE user_id=? ORDER BY created_at", (user_id,))
+    assert len(rows) == 2
+    assert any(row["id"] == original_id and row["sha256"] == original_sha for row in rows)
+    newest = rows[-1]
+    assert newest["id"] != original_id
+    assert newest["supersedes_asset_id"] == original_id
+    assert newest["sha256"] != original_sha
 
 
 def test_curated_scene_tree_becomes_reviewable_taxonomy_and_searchable(organization_env, monkeypatch):

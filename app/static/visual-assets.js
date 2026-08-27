@@ -223,6 +223,8 @@ function uploadFiles() {
   data.append("privacy", $("upload-privacy").value);
   data.append("commercial_use", $("upload-commercial").value);
   data.append("auto_analyze", "true");
+  const uploadProject = $("upload-project-id") && $("upload-project-id").value.trim();
+  if (uploadProject) data.append("project_id", uploadProject);
   const signature = visualState.uploadFiles.map((file) => `${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`).join("|");
   let hash = 2166136261; for (let i = 0; i < signature.length; i += 1) hash = Math.imul(hash ^ signature.charCodeAt(i), 16777619);
   const idempotencyKey = `browser-${(hash >>> 0).toString(16)}-${visualState.uploadFiles.length}`;
@@ -262,7 +264,8 @@ function uploadFiles() {
 async function uploadFolderBatches() {
   const files = visualState.uploadFiles;
   const allItems = files.map((file, index) => ({ client_key: file.webkitRelativePath || `${index}:${file.name}`, relative_path: file.webkitRelativePath || file.name, filename: file.name, size: file.size, last_modified: new Date(file.lastModified).toISOString() }));
-  const signature = allItems.map((item) => `${item.relative_path}:${item.size}:${item.last_modified}`).join("|");
+  const rootName = (files[0].webkitRelativePath || "folder").split("/")[0];
+  const signature = `${rootName}|${allItems.map((item) => item.relative_path).sort().join("|")}`;
   let hash = 2166136261; for (let i = 0; i < signature.length; i += 1) hash = Math.imul(hash ^ signature.charCodeAt(i), 16777619);
   const key = `folder-${(hash >>> 0).toString(16)}-${files.length}`;
   const created = []; const errors = [];
@@ -275,6 +278,8 @@ async function uploadFolderBatches() {
     data.append("school", $("upload-school").value.trim()); data.append("club", $("upload-club").value.trim());
     data.append("source", $("upload-source").value.trim() || "folder_import"); data.append("privacy", $("upload-privacy").value);
     data.append("commercial_use", $("upload-commercial").value); data.append("auto_analyze", "true"); data.append("resync", "false");
+    const folderProject = $("upload-project-id") && $("upload-project-id").value.trim();
+    if (folderProject) data.append("project_id", folderProject);
     $("upload-progress-text").textContent = `資料夾匯入 ${Math.min(offset + chunk.length, files.length)} / ${files.length}`;
     let response;
     try { response = await fetch("/api/visual-assets/import", { method: "POST", body: data }); }
@@ -306,7 +311,7 @@ function analysisRow(asset) {
 
 function analysisProgressText(asset) {
   const job = asset.analysis_job;
-  if (job && job.status === "running") return `${statusLabel(asset.analysis_status)} · ${job.progress}% · ${job.stage}`;
+  if (job && ["running","processing","queued","retrying"].includes(job.status)) return `${statusLabel(asset.analysis_status)} · ${job.progress}% · ${job.stage}`;
   return `${statusLabel(asset.analysis_status)} · 畫質 ${Math.round(asset.quality_score || 0)}`;
 }
 
@@ -328,7 +333,7 @@ function searchParams() {
   const mapping = {
     q: "search-query", person: "filter-person", scene: "filter-scene", school: "filter-school", club: "filter-club",
     event: "filter-event", ratio: "filter-ratio", quality_min: "filter-quality", commercial_use: "filter-commercial",
-    date_from: "filter-date-from", date_to: "filter-date-to", duplicate: "filter-duplicate",
+    date_from: "filter-date-from", date_to: "filter-date-to", duplicate: "filter-duplicate", project_id: "filter-project",
   };
   const params = new URLSearchParams();
   Object.entries(mapping).forEach(([key, id]) => { const value = $(id).value.trim(); if (value && !(key === "quality_min" && value === "0")) params.set(key, value); });
@@ -409,7 +414,8 @@ async function organizeExisting() {
   setStatus("正在建立來源、lineage、Entity Graph 與 review queue…");
   $("organize-existing").disabled = true;
   try {
-    const result = await requestJSON("/api/data-organization/organize", { method: "POST", body: JSON.stringify({ idempotency_key: `organize-${Date.now()}`, project_id: "" }) });
+    const organizeProject = $("upload-project-id") && $("upload-project-id").value.trim();
+    const result = await requestJSON("/api/data-organization/organize", { method: "POST", body: JSON.stringify({ idempotency_key: `organize-${Date.now()}`, project_id: organizeProject || "" }) });
     visualState.organizationRun = result.id;
     await loadOrganization(true);
     $("organization-run-status").textContent = `最近同步：${result.status} · 成功 ${result.imported_count || 0} · 失敗 ${result.failed_count || 0}`;

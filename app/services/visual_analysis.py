@@ -40,16 +40,20 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
             }
             store.add_observation(asset_id,"scene",label="文件",entity_id=store.scene_id("文件"),status="verified",confidence=1.0,source="local_document_parser",evidence={"mime_type":asset.get("mime_type")})
             store.set_analysis(asset_id,result,status="complete")
-            store.update_job(job_id,status="complete",stage="complete",progress=100)
+            store.update_job(job_id,status="completed",stage="complete",progress=100)
             return store.get_asset(asset_id,user_id) or {}
         if asset.get("asset_type") == "video":
             raise fal.FalError("影片已安全匯入，但伺服器未配置影格解碼器。",code="video_decoder_not_configured")
-        target_url = _data_url(asset["storage_path"],asset["mime_type"])
-        store.update_job(job_id,status="running",stage="ocr_and_scene",progress=25)
+        confined = store.asset_file(asset_id, user_id, "original")
+        if not confined:
+            raise VisualAssetError("圖片檔案目前無法取得", code="not_found")
+        source_path, source_mime, _filename = confined
+        target_url = _data_url(source_path, source_mime or asset["mime_type"])
+        store.update_job(job_id,status="processing",stage="ocr_and_scene",progress=25)
         result = await fal.analyze_visual_asset(target_url)
         source = f"fal_vision:{config.FAL_VISION_MODEL}"
         store.set_analysis(asset_id,result,status="processing_entities")
-        store.update_job(job_id,status="running",stage="entities",progress=62)
+        store.update_job(job_id,status="processing",stage="entities",progress=62)
 
         for scene in result.get("scenes",[]) if isinstance(result.get("scenes"),list) else []:
             if not isinstance(scene,dict):
@@ -128,14 +132,20 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
         references = []
         for ref in store.confirmed_person_references(user_id):
             try:
+                confined_ref = store._confine_visual_file(
+                    Path(ref["storage_path"]), str(ref.get("mime_type") or "image/jpeg"), "reference",
+                    allow_external=True,
+                )
+                if not confined_ref:
+                    continue
                 references.append({
                     "person_id":ref["person_id"],"name":ref["name"],
-                    "data_url":_data_url(ref["storage_path"],ref["mime_type"]),
+                    "data_url":_data_url(confined_ref[0], confined_ref[1]),
                 })
             except OSError:
                 continue
         if references and int(people.get("count") or len(descriptions) or 0) > 0:
-            store.update_job(job_id,status="running",stage="confirmed_people_comparison",progress=78)
+            store.update_job(job_id,status="processing",stage="confirmed_people_comparison",progress=78)
             for match in await fal.compare_confirmed_people(target_url,references):
                 ref = next((r for r in references if r["person_id"] == match.get("person_id")),None)
                 confidence = _confidence(match.get("confidence"))
@@ -147,7 +157,7 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
                     )
 
         store.set_analysis(asset_id,result,status="complete")
-        store.update_job(job_id,status="complete",stage="complete",progress=100)
+        store.update_job(job_id,status="completed",stage="complete",progress=100)
         store.record_learning(user_id,"analysis_completed",asset_id=asset_id,payload={"model":config.FAL_VISION_MODEL},outcome="success")
         return store.get_asset(asset_id,user_id) or {}
     except fal.FalError as exc:
@@ -155,6 +165,10 @@ async def analyze_asset(asset_id: str, user_id: str, *, store: VisualAssetStore 
         store.mark_analysis_status(asset_id,partial)
         store.update_job(job_id,status="failed",stage="vision",progress=100,error_code="BLOCKED_BY_EXTERNAL_DEPENDENCY",error_message=f"{exc.code}: {exc}")
         store.record_learning(user_id,"tool_failed",asset_id=asset_id,payload={"tool":"vision","error_code":exc.code},outcome="failed")
+        raise
+    except VisualAssetError as exc:
+        store.mark_analysis_status(asset_id,"analysis_failed")
+        store.update_job(job_id,status="failed",stage="file",progress=100,error_code=exc.code,error_message=str(exc)[:500])
         raise
     except Exception as exc:
         store.mark_analysis_status(asset_id,"analysis_failed")

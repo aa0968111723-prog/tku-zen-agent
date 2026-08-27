@@ -13,7 +13,7 @@ from typing import Any
 
 from .. import config, retrieval
 from .insforge_adapters import BLOCKED_BY_EXTERNAL_DEPENDENCY, InsForgeAdapters, InsForgeUnavailable, get_insforge_adapters
-from .insforge_sync import InsForgeSyncAdapter, _vector
+from .insforge_sync import InsForgeSyncAdapter, _vector, resolved_insforge_owner
 from .session_store import SessionStore, get_store
 from .visual_assets import VisualAssetStore, dumps, get_visual_store, new_id, now, semantic_embedding
 
@@ -82,11 +82,7 @@ class InsForgeDataSyncAdapter:
         self.adapters = adapters or get_insforge_adapters()
 
     def _remote_owner(self, user_id: str) -> str:
-        rows = self.visual_store._rows(
-            "SELECT remote_owner_id FROM backend_user_mappings WHERE local_user_id=? AND backend='insforge' AND status='verified'",
-            (user_id,),
-        )
-        return str(rows[0]["remote_owner_id"]) if rows else (config.INSFORGE_OWNER_ID or "")
+        return resolved_insforge_owner(self.visual_store, user_id)
 
     def _remember_owner_mapping(self, user_id: str, remote_owner: str) -> None:
         if not remote_owner:

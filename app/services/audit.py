@@ -46,8 +46,9 @@ def mask_secrets(text: str | None, keep: int = 4) -> str:
 def _client_ip(request: Request | None) -> str:
     if request is None:
         return ""
-    # 部署在反向代理後可再讀 X-Forwarded-For；此處先用直接 peer
-    return request.client.host if request.client else ""
+    from .clientip import client_ip as real_client_ip
+
+    return real_client_ip(request)
 
 
 def write_audit(
@@ -73,5 +74,8 @@ def write_audit(
             ip=_client_ip(request),
             ok=ok,
         )
+    except TypeError:
+        # Contract mismatch must not be swallowed; callers and tests see it.
+        raise
     except Exception:  # noqa: BLE001
         logger.exception("audit write failed action=%s", action)

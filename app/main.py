@@ -91,7 +91,11 @@ async def security_middleware(request: Request, call_next):
     # cookie 的 SameSite 已經擋掉跨站自動帶 cookie 的情況。
     if request.method in _STATE_CHANGING:
         origin = request.headers.get("origin")
-        if origin and origin.lower() != "null":
+        if origin:
+            if origin.lower() == "null":
+                return JSONResponse(
+                    {"detail": "來源網域不符，請從工作台頁面操作"}, status_code=403
+                )
             origin_host = urlsplit(origin).netloc
             if origin_host and origin_host != request.headers.get("host", ""):
                 return JSONResponse(

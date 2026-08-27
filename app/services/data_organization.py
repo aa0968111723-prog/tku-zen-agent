@@ -309,6 +309,35 @@ class DataOrganizationService:
         relative = str(row.get("relative_path") or "").replace(chr(92), "/").strip("/")
         return f"{str(row.get('root') or '').strip()}:{relative}"
 
+    @staticmethod
+    def _source_sha_map(assets: list[dict[str, Any]]) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for row in assets:
+            key = DataOrganizationService._source_key(row)
+            digest = str(row.get("sha256") or "")
+            if key and digest:
+                mapping[key] = digest
+        return mapping
+
+    def _content_is_unregistered(
+        self,
+        row: dict[str, Any],
+        registered_source_keys: set[str],
+        registered_paths: set[str],
+        source_sha: dict[str, str],
+    ) -> bool:
+        source_key = self._filesystem_source_key(row)
+        digest = str(row.get("sha256") or "")
+        if source_key and source_key in source_sha and digest and source_sha[source_key] != digest:
+            return True
+        if source_key in registered_source_keys:
+            return False
+        try:
+            resolved = str((Path(str(row.get("_base_path") or config.OUTPUT_DIR)) / row["relative_path"]).resolve())
+        except (OSError, RuntimeError, TypeError, ValueError):
+            resolved = ""
+        return resolved not in registered_paths
+
     def _lineage_source_keys(self, user_id: str, *, include_failed: bool = True) -> set[str]:
         """Return source keys recorded for loose files, including SHA dedupes.
 
@@ -477,6 +506,7 @@ class DataOrganizationService:
         return records
 
     def inventory(self, user_id: str, *, project_id: str = "", persist: bool = True) -> dict[str, Any]:
+        self._filesystem_scan_cache.clear()
         if project_id and not self.session_store.get_project(project_id, user_id):
             raise ValueError("project 不屬於目前使用者")
         if persist:
@@ -506,11 +536,11 @@ class DataOrganizationService:
         # Failed files already have an auditable lineage record, so inventory
         # does not report them as new candidates.
         registered_source_keys.update(self._lineage_source_keys(user_id))
+        source_sha = self._source_sha_map(all_assets)
         unregistered = [
             row for row in filesystem
             if row["root"] != "knowledge"
-            and self._filesystem_source_key(row) not in registered_source_keys
-            and str((Path(str(row.get("_base_path") or config.OUTPUT_DIR)) / row["relative_path"]).resolve()) not in registered_paths
+            and self._content_is_unregistered(row, registered_source_keys, registered_paths, source_sha)
         ]
         asset_types = Counter(str(row.get("asset_type") or "image") for row in assets)
         filesystem_types = Counter(row["kind"] for row in unregistered)
@@ -728,6 +758,14 @@ class DataOrganizationService:
         }
         # Failed lineage remains retryable; do not hide it from the catalog.
         registered_source_keys.update(self._lineage_source_keys(user_id, include_failed=False))
+        source_sha = {
+            key: str(row.get("sha256") or "")
+            for row in self.visual_store._rows(
+                "SELECT source_metadata,sha256 FROM visual_assets WHERE user_id=?" + (" AND project_id=?" if project_id else ""),
+                (user_id, project_id) if project_id else (user_id,),
+            )
+            if (key := self._source_key(row))
+        }
         for candidate in self._filesystem_candidates(user_id):
             if candidate["root"] == "knowledge":
                 continue
@@ -736,9 +774,19 @@ class DataOrganizationService:
                 continue
             resolved = (root / str(candidate["relative_path"])).resolve()
             source_key = self._filesystem_source_key(candidate)
-            if str(resolved) in registered_paths or source_key in registered_source_keys:
+            known_sha = source_sha.get(source_key, "")
+            if known_sha and known_sha == str(candidate.get("sha256") or ""):
                 continue
-            candidate = {**candidate, "path": resolved}
+            if not known_sha and (str(resolved) in registered_paths or source_key in registered_source_keys):
+                continue
+            previous = ""
+            if known_sha and known_sha != str(candidate.get("sha256") or ""):
+                previous_rows = self.visual_store._rows(
+                    "SELECT id FROM visual_assets WHERE user_id=? AND sha256=? ORDER BY created_at DESC LIMIT 1",
+                    (user_id, known_sha),
+                )
+                previous = str(previous_rows[0]["id"]) if previous_rows else ""
+            candidate = {**candidate, "path": resolved, "replaces_asset_id": previous}
             resource_id = _stable_id("loose_file", user_id, candidate["root"], candidate["relative_path"], candidate["sha256"])
             catalog.append(("filesystem_asset", resource_id, candidate))
         snapshot = self.session_store.export_sync_snapshot(user_id, project_id=project_id or None, limit=5000)
@@ -839,7 +887,7 @@ class DataOrganizationService:
                 evidence=json.dumps(evidence, ensure_ascii=False),
             )
 
-    def _map_resource(self, user_id: str, resource_type: str, resource_id: str, row: dict[str, Any]) -> None:
+    def _map_resource(self, user_id: str, resource_type: str, resource_id: str, row: dict[str, Any], project_id: str = "") -> None:
         if resource_type == "filesystem_asset":
             path = Path(str(row.get("path") or "")).resolve(strict=True)
             if not path.is_file():
@@ -878,6 +926,19 @@ class DataOrganizationService:
             mime_type = EXTRA_MIME_BY_EXTENSION.get(suffix) or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             if mime_type not in ALLOWED_MIME or mime_type == "application/octet-stream":
                 mime_type = next((candidate for candidate, allowed_suffix in ALLOWED_MIME.items() if allowed_suffix == suffix), mime_type)
+            if mapped_asset_id and project_id:
+                existing_scope = self.visual_store._rows(
+                    "SELECT project_id FROM visual_assets WHERE id=? AND user_id=?",
+                    (mapped_asset_id, user_id),
+                )
+                current_project = str((existing_scope[0]["project_id"] if existing_scope else "") or "")
+                if not current_project.strip():
+                    # Never guess project scope for old unscoped rows.
+                    self._review(
+                        user_id, mapped_asset_id,
+                        {"reason": "missing_project_id", "action": "needs_organization", "not_auto_assigned_to": project_id},
+                        0.0,
+                    )
             if not mapped_asset_id and mime_type in ALLOWED_MIME:
                 # Keep large local videos and already-organized photo trees in
                 # place.  We inspect image/document bytes for metadata, but
@@ -898,6 +959,8 @@ class DataOrganizationService:
                     source="existing_data_import", relative_path=str(row.get("relative_path") or ""),
                     source_metadata=source_metadata,
                     external_path=str(path), sha256_override=str(row.get("sha256") or ""),
+                    project_id=project_id,
+                    supersedes_asset_id=str(row.get("replaces_asset_id") or ""),
                 )
                 mapped_asset_id = str(imported["asset_id"])
             source_id = self._source(
@@ -922,7 +985,7 @@ class DataOrganizationService:
                 confidence=1.0, status="verified", evidence={"sha256": row.get("sha256"), "relative_path": row.get("relative_path")}, source_id=source_id,
             )
             asset_row = self.visual_store._rows("SELECT * FROM visual_assets WHERE id=? AND user_id=?", (mapped_asset_id, user_id))[0]
-            self._map_resource(user_id, "visual_asset", mapped_asset_id, asset_row)
+            self._map_resource(user_id, "visual_asset", mapped_asset_id, asset_row, project_id=project_id)
             return
 
         if resource_type == "visual_asset":
@@ -1039,6 +1102,7 @@ class DataOrganizationService:
         self._lineage(user_id, resource_type, resource_id, original_path=source_path, original_source=resource_type, source_id=source_id, sha256=digest, confidence=float(row.get("credibility") or (1.0 if status == "verified" else 0.5)), verification_status=status, updated_at=str(row.get("updated_at") or row.get("created_at") or ""))
 
     def run(self, user_id: str, *, idempotency_key: str, project_id: str = "", resource_filter: set[tuple[str, str]] | None = None, resumed_from: str = "") -> dict[str, Any]:
+        self._filesystem_scan_cache.clear()
         if project_id and not self.session_store.get_project(project_id, user_id):
             raise ValueError("project 不屬於目前使用者")
         raw_key = idempotency_key.strip()
@@ -1069,7 +1133,7 @@ class DataOrganizationService:
         for resource_type, resource_id, row in catalog:
             try:
                 with self.visual_store._lock:
-                    self._map_resource(user_id, resource_type, resource_id, row)
+                    self._map_resource(user_id, resource_type, resource_id, row, project_id=project_id)
                     self.visual_store._conn.execute(
                         "UPDATE backend_sync_items SET status='completed',remote_id=?,attempts=attempts+1,updated_at=? WHERE sync_run_id=? AND resource_type=? AND resource_id=?",
                         (resource_id, now(), run_id, resource_type, resource_id),
