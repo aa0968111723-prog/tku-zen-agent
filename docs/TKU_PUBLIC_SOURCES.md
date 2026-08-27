@@ -11,14 +11,34 @@
 | fetch_tku_public_source | 讀取指定官方來源，含網域白名單與雜湊 |
 | search_instagram_public_hashtag | 透過 Meta Graph API 搜尋授權範圍內的公開 hashtag 內容 |
 | search_instagram_public_account | 讀取指定公開專業帳號的公開資料與貼文 |
+| search_perplexity_web | 搜尋最新公開網路資訊並保留 Perplexity 結果與來源 |
 
 ## 安全邊界
 
 - 只讀取 HTTPS 與淡江官方網域白名單。
-- Instagram token 只在 server-side 設定；不放入 tool schema、system prompt 或前端回應。
+- Instagram 與 Perplexity token 只在 server-side 設定；不放入 tool schema、system prompt 或前端回應。
 - 不抓私人帳號、不繞過登入、不用爬蟲模擬個人帳號、不猜測照片中的真實人物。
 - 外部公開內容必須保留來源、擷取時間與內容雜湊，且不能直接標記為淡江已確認事實。
 - API endpoint 仍受既有使用者認證保護；未來若寫入知識庫，必須再套用 project/source ACL 與人工 review。
+
+## Perplexity 設定
+
+在部署環境設定：
+
+~~~dotenv
+PERPLEXITY_API_KEY=your_server_only_key
+PERPLEXITY_SEARCH_ENABLED=true
+PERPLEXITY_SEARCH_TIMEOUT_SECONDS=20
+PERPLEXITY_SEARCH_ATTEMPTS=2
+~~~
+
+Perplexity Search API 回傳結構化的排名結果，包含標題、網址、摘要與日期；代理仍必須把原始網址當作證據，不可把搜尋摘要直接視為已確認事實。網域與最新時間篩選由 tool 參數控制，最多 20 個網域。
+
+API endpoint：
+
+- POST /api/public-web-search
+
+Perplexity 是外部網路研究層，不是 Instagram API 替代品；Instagram 貼文仍由 Meta 權限範圍決定。
 
 ## Meta 設定
 
