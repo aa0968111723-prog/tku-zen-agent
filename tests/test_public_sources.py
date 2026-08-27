@@ -32,3 +32,4 @@ def test_public_tools_are_registered():
     assert "search_tku_public_info" in names
     assert "fetch_tku_public_source" in names
     assert "search_instagram_public_hashtag" in names
+    assert "search_instagram_public_account" in names
