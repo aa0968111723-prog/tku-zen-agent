@@ -29,6 +29,7 @@ from .services import fal as fal_service
 from .services import memory as memory_service
 from .services import permissions, ratelimit
 from .services import public_sources as public_sources_service
+from .services import perplexity as perplexity_service
 from .services.session_store import get_store
 from .orchestrator.state import Stage, WorkflowStatus
 from .visual_api import router as visual_router
@@ -1009,6 +1010,23 @@ async def search_instagram_public_account(req: InstagramPublicAccountRequest) ->
 @general_router.post("/instagram/public/hashtag-search")
 async def search_instagram_public_hashtag(req: InstagramHashtagSearchRequest) -> dict[str, Any]:
     return public_sources_service.search_instagram_public_hashtag(req.hashtag, req.limit)
+
+
+class PerplexitySearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    domains: list[str] = Field(default_factory=list, max_length=20)
+    recency: str | None = Field(default=None, pattern=r"^(hour|day|week|month|year)$")
+    max_results: int = Field(default=10, ge=1, le=20)
+
+
+@general_router.post("/public-web-search")
+async def search_public_web(req: PerplexitySearchRequest) -> dict[str, Any]:
+    return perplexity_service.search_web(
+        req.query,
+        domains=req.domains,
+        recency=req.recency,
+        max_results=req.max_results,
+    )
 
 
 @general_router.get("/instagram/status")
