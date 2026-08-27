@@ -28,6 +28,7 @@ from .services import current_term as term_service
 from .services import fal as fal_service
 from .services import memory as memory_service
 from .services import permissions, ratelimit
+from .services import public_sources as public_sources_service
 from .services.session_store import get_store
 from .orchestrator.state import Stage, WorkflowStatus
 from .visual_api import router as visual_router
@@ -964,6 +965,50 @@ async def chat_cancel(req: CancelRequest, request: Request, user_id: str = Depen
         request=request,
     )
     return {"ok": True, "cancelled": cancelled}
+
+
+class PublicSourceSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=200)
+    source_ids: list[str] = Field(default_factory=list, max_length=8)
+    limit: int = Field(default=4, ge=1, le=8)
+
+
+class InstagramPublicAccountRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=30)
+    limit: int = Field(default=10, ge=1, le=25)
+
+
+class InstagramHashtagSearchRequest(BaseModel):
+    hashtag: str = Field(min_length=1, max_length=100)
+    limit: int = Field(default=10, ge=1, le=25)
+
+
+@general_router.get("/public-sources")
+async def list_public_sources(query: str = "") -> dict[str, Any]:
+    return {"ok": True, "sources": public_sources_service.list_public_sources(query)}
+
+
+@general_router.post("/public-sources/search")
+async def search_public_sources(req: PublicSourceSearchRequest) -> dict[str, Any]:
+    return public_sources_service.search_public_info(req.query, req.source_ids, req.limit)
+
+
+@general_router.get("/public-sources/{source_id}")
+async def fetch_public_source(source_id: str, query: str = "") -> dict[str, Any]:
+    result = public_sources_service.fetch_public_source(source_id, query)
+    if not result.get("ok") and result.get("code") == "NOT_FOUND":
+        raise HTTPException(status_code=404, detail=result["message"])
+    return result
+
+
+@general_router.post("/instagram/public/account-search")
+async def search_instagram_public_account(req: InstagramPublicAccountRequest) -> dict[str, Any]:
+    return public_sources_service.search_instagram_public_account(req.username, req.limit)
+
+
+@general_router.post("/instagram/public/hashtag-search")
+async def search_instagram_public_hashtag(req: InstagramHashtagSearchRequest) -> dict[str, Any]:
+    return public_sources_service.search_instagram_public_hashtag(req.hashtag, req.limit)
 
 
 @general_router.get("/instagram/status")
