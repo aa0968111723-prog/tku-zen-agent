@@ -5,6 +5,9 @@
   1. 研究對象是誰？（entities —— 不確定就反問，不猜）
   2. 證據是什麼？（claims —— 沒有 source_url/title/excerpt 不得標 verified）
   3. 回答有沒有超出證據？（verifier —— 混淆、冒充、推測當事實，一律擋下）
+
+公開研究地圖（public_map）是附加層：只登記已核對的 HTTPS 公開入口，
+不是社團 SSOT，也不取代 entities.py。
 """
 
 from .entities import (  # noqa: F401
@@ -26,3 +29,9 @@ from .claims import (  # noqa: F401
     source_from_chunk,
 )
 from .verifier import AnswerReview, review_answer  # noqa: F401
+from . import public_map  # noqa: F401
+from .public_map import (  # noqa: F401
+    PUBLIC_SOURCE_ENTITIES,
+    REQUIRED_CATEGORIES,
+    is_fetchable_url,
+)
