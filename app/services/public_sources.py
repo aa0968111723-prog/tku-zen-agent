@@ -169,6 +169,75 @@ def _normalise_hashtag(value: str) -> str:
     return value
 
 
+def search_instagram_public_account(username: str, limit: int = 10) -> dict[str, Any]:
+    username = username.strip().lstrip("@")
+    if not re.fullmatch(r"[A-Za-z0-9_.]{1,30}", username):
+        return {"ok": False, "code": "INVALID_USERNAME", "message": "Instagram 使用者名稱格式不合法。"}
+    if not config.INSTAGRAM_PUBLIC_SEARCH_ENABLED or not config.INSTAGRAM_ACCESS_TOKEN:
+        return {
+            "ok": False,
+            "code": "BLOCKED_BY_EXTERNAL_DEPENDENCY",
+            "message": "Instagram 公開帳號搜尋尚未啟用；請完成 Meta App Review 並設定 server-only token。",
+            "username": username,
+        }
+    if not config.INSTAGRAM_BUSINESS_ACCOUNT_ID:
+        return {
+            "ok": False,
+            "code": "MISSING_BUSINESS_ACCOUNT",
+            "message": "Business Discovery 需要已連結的 Instagram 專業帳號 ID。",
+            "username": username,
+        }
+
+    nested_fields = (
+        "id,username,name,biography,website,followers_count,"
+        "media.limit(" + str(max(1, min(25, limit))) + ")"
+        "{id,caption,media_type,media_url,permalink,timestamp}"
+    )
+    params = {
+        "fields": "business_discovery.username(" + username + "){" + nested_fields + "}",
+        "access_token": config.INSTAGRAM_ACCESS_TOKEN,
+    }
+    version = config.INSTAGRAM_GRAPH_API_VERSION
+    try:
+        with httpx.Client(
+            timeout=config.INSTAGRAM_API_TIMEOUT_SECONDS,
+            headers={"User-Agent": "tku-zen-agent/1.0"},
+        ) as client:
+            response = client.get(
+                f"https://graph.facebook.com/{version}/{config.INSTAGRAM_BUSINESS_ACCOUNT_ID}",
+                params=params,
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        return {
+            "ok": False,
+            "code": "BLOCKED_BY_EXTERNAL_DEPENDENCY",
+            "message": f"Meta Business Discovery 目前無法使用：{type(exc).__name__}。",
+            "username": username,
+        }
+
+    profile = payload.get("business_discovery")
+    if not profile:
+        return {
+            "ok": True,
+            "username": username,
+            "profile": None,
+            "results": [],
+            "source": "meta_business_discovery",
+        }
+    return {
+        "ok": True,
+        "username": username,
+        "profile": {
+            key: value for key, value in profile.items() if key != "media"
+        },
+        "results": (profile.get("media") or {}).get("data", []),
+        "source": "meta_business_discovery",
+        "privacy_note": "僅回傳指定公開專業帳號的 Meta API 授權內容；不代表帳號所有者身分已驗證。",
+    }
+
+
 def search_instagram_public_hashtag(hashtag: str, limit: int = 10) -> dict[str, Any]:
     try:
         tag = _normalise_hashtag(hashtag)
