@@ -350,9 +350,28 @@ async def admin_logout(request: Request, response: Response) -> dict[str, bool]:
     return {"ok": True}
 
 
+def _workspace_html() -> HTMLResponse:
+    return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
-    return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
+    return _workspace_html()
+
+
+@app.get("/generate", response_class=HTMLResponse)
+async def generate_workspace() -> HTMLResponse:
+    return _workspace_html()
+
+
+@app.get("/templates", response_class=HTMLResponse)
+async def templates_workspace() -> HTMLResponse:
+    return _workspace_html()
+
+
+@app.get("/prompt-library", response_class=HTMLResponse)
+async def prompt_library_workspace() -> HTMLResponse:
+    return _workspace_html()
 
 
 @app.get("/visual-assets", response_class=HTMLResponse)

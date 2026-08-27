@@ -52,7 +52,7 @@ def test_gate_copy_uses_access_phrase_not_account_words():
 def test_quick_actions_at_most_six():
     block = _block(HTML, "quick-actions")
     buttons = re.findall(r"<button\b", block)
-    assert 1 <= len(buttons) <= 6
+    assert 1 <= len(buttons) <= 3, f"首屏快速操作最多 3 個，找到 {len(buttons)}"
 
 
 def test_index_has_no_hardcoded_model_names():
@@ -110,8 +110,11 @@ def test_social_render_contract_present():
 
 
 def test_guided_input_and_preflight_contract_present():
-    for label in ("問 AI", "直接生成", "製作範本", "執行計畫", "填入：做網宣"):
+    for label in ("問 AI", "直接生成", "製作範本", "執行計畫", "做網宣"):
         assert label in HTML
+    assert 'role="tablist"' in HTML
+    assert 'role="tab"' in HTML
+    assert 'role="tabpanel"' in HTML
     for label in ("確認開始", "先跳過", "返回修改", "在開始前，還需要確認"):
         assert label in HTML or label in JS
     assert "questions: questions.slice(0, 3)" in JS
