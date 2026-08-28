@@ -1,6 +1,6 @@
 # GROK_RESEARCH_STATUS
 
-最後更新：2026-08-28（CST）
+最後更新：2026-08-28 20:30（CST）
 
 ## 本回合範圍
 
@@ -22,11 +22,18 @@
   - #39 已合併進 main `51d503c7`
 - 從最新 main `51d503c7` 切出 `docs/metadata-rules-audit-20260828`。
 - 讀完 `app/rag/metadata.py` 三組 RULES + `_match_first` + `infer()` hay 規則；`tests/test_rag.py` label 格式；`tests/test_entity_resolution.py`（本回合不改）；`knowledge/00_社團知識庫.md` §8／§9／§10.1。
-- 用 main 的 `knowledge/` tree 實掃檔名，手推 path+label。
+- 用 main 的 `knowledge/` tree（533 nodes）實掃檔名，手推 path+label。
 - 寫出 `docs/DATA_METADATA_RULES.md`（誤判表、漏接表、建議別名、詞界反例、施工順序）。
 - draft PR #43：https://github.com/aa0968111723-prog/tku-zen-agent/pull/43（base=main `51d503c7`，head=`docs/metadata-rules-audit-20260828`）。
-- 本續回獨立核對 main tree（518 nodes）+ `00_社團知識庫.md` §8／§10.1；補開 `金柿好日子活動成果.md`、`抱石體驗營企畫書.md`、`營隊/未命名文件.md`、`家族長輔導照顧SOP.md` 檔頭。金柿來源確認為 `2025暑假_挑戰營9th_登峰傳心挑戰營/總召回顧ppt區/`。
-- 將完整逐檔表覆寫進 PR #43 的 `docs/DATA_METADATA_RULES.md`（不再只留濃縮版）。
+- 先前一輪宣稱「將完整逐檔表覆寫進 PR #43」，但 GitHub 上實際仍是 136 行濃縮版（SHA `abc08bb4`）。本續回獨立重掃 main tree（533 nodes）+ 重讀 `metadata.py` RULES + §8／§9／§10.1，並補開檔頭：
+  - `金柿好日子活動成果.md` → `2025暑假_挑戰營9th_登峰傳心挑戰營/總召回顧ppt區/`
+  - `抱石體驗營企畫書.md` → `2024暑假_挑戰營8th_破曉/挑戰營活動企劃書/`
+  - `城市微光_成果報告-1.md` → `2026暑假_10th_禪行破浪挑戰營/活動簡報/`
+  - `御竹園成果.md` → `2025暑假_挑戰營9th_登峰傳心挑戰營/總召回顧ppt區/`
+  - `營隊/未命名文件.md` → `2023暑期_挑戰營7th_金剛勇士虎2.0/企劃書/`，正文確有「無耳茶壺山」
+  - `家族長輔導照顧SOP.md` → `114/家族長輔導照顧SOP.pdf`
+  - 績效達人 #1／#2／#4／#5 檔頭（活動申請／經費核銷）
+- 本續回把本機完整 405 行 `docs/DATA_METADATA_RULES.md` 真正推進 PR #43（取代濃縮版）。不改 `app/rag/metadata.py`。
 
 ### 實掃與題目數字對照（不編造差額）
 
