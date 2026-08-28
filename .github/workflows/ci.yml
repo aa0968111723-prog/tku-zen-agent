@@ -31,5 +31,7 @@ jobs:
       - name: 開機檢查（等同部署入口）
         run: python -c "import app.main"
 
+      # pytest.ini 的 addopts 已經有 -q；命令列再加一個會變成 -qq，
+      # 連最後那行「N passed」都會被吃掉，CI log 就看不出到底跑了幾個測試。
       - name: 測試
-        run: python -m pytest -q
+        run: python -m pytest
