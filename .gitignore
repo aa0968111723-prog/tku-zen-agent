@@ -13,8 +13,11 @@ output/
 
 # data/ 放憑證、SQLite 與填了真實資料的本學期設定 —— 預設全部不上傳。
 # 只有不含真實資料的範本例外。
+# drive_docs_manifest.jsonl 是從檔頭來源路徑恢復出來的公開路徑清單，不含名冊內容。
 data/*
 !data/current_term.example.yaml
+!data/drive_docs_manifest.jsonl
+!data/DRIVE_MANIFEST_STATUS.md
 
 # LINE 語料是同學之間的私人對話，人名不會遮蔽 —— 不進版控。
 # 需要讓部署版也讀得到的話，自己確認過內容再把這行註解掉。
