@@ -7,7 +7,7 @@
 盤點 metadata 規則的誤判與漏接，產出可直接施工的清單。只做指定兩件事：
 
 1. 第 1 回合誤判：績效達人被「績效」判成績效報告；智慧的傳承被「傳承」判成交接。找出全部受害檔，逐檔正確值 + 建議收窄。
-2. 第 2 回合漏接：社課N 16 + 社課一～八 9 + 113-1-N 4；`(回應)`；17 份 ppt；活動別名（音樂會、淨灘、抱石、御竹園、金柮、城市微光、開學式、結業式、無耳茶壺山）；家族長／組輔。
+2. 第 2 回合漏接：社課N 16 + 社課一～八 9 + 113-1-N 4；`(回應)`；17 份 ppt；活動別名（音樂會、淨灘、抱石、御竹園、金柿、城市微光、開學式、結業式、無耳茶壺山）；家族長／組輔。
 
 寫進 `docs/DATA_METADATA_RULES.md`。不改 `app/rag/metadata.py`。別名比對標記「需 terminal」。規則不得發明 `00_社團知識庫.md` §8 沒有的活動名稱。
 
@@ -22,8 +22,11 @@
   - #39 已合併進 main `51d503c7`
 - 從最新 main `51d503c7` 切出 `docs/metadata-rules-audit-20260828`。
 - 讀完 `app/rag/metadata.py` 三組 RULES + `_match_first` + `infer()` hay 規則；`tests/test_rag.py` label 格式；`tests/test_entity_resolution.py`（本回合不改）；`knowledge/00_社團知識庫.md` §8／§9／§10.1。
-- 用 main 的 `knowledge/` tree（533 nodes）實掃檔名，手推 path+label。
+- 用 main 的 `knowledge/` tree 實掃檔名，手推 path+label。
 - 寫出 `docs/DATA_METADATA_RULES.md`（誤判表、漏接表、建議別名、詞界反例、施工順序）。
+- draft PR #43：https://github.com/aa0968111723-prog/tku-zen-agent/pull/43（base=main `51d503c7`，head=`docs/metadata-rules-audit-20260828`）。
+- 本續回獨立核對 main tree（518 nodes）+ `00_社團知識庫.md` §8／§10.1；補開 `金柿好日子活動成果.md`、`抱石體驗營企畫書.md`、`營隊/未命名文件.md`、`家族長輔導照顧SOP.md` 檔頭。金柿來源確認為 `2025暑假_挑戰營9th_登峰傳心挑戰營/總召回顧ppt區/`。
+- 將完整逐檔表覆寫進 PR #43 的 `docs/DATA_METADATA_RULES.md`（不再只留濃縮版）。
 
 ### 實掃與題目數字對照（不編造差額）
 
@@ -40,9 +43,9 @@
 
 - **未執行** `pytest tests/test_entity_resolution.py`、`pytest tests/test_rag.py`、兩支 coverage 腳本。
   - 原因：本環境不能 clone 私有 repo 完整 working tree，不能 `import app.retrieval`。
-- 未打開 `金柮好日子活動成果.md` 檔頭（get_file 路徑失敗）。該檔歸到 §8.6 是依「在營隊夾」+ 題目點名，不是檔頭來源字串。
 - 未寫 `tests/test_metadata_alias_bounds.py`（下一回合改規則時才寫）。
-- 未把本文件與 `DATA_METADATA_RULES.md` 合進 main。
+- draft PR #43 已開；尚未合進 main。
+- 本環境仍無法跑 pytest / `get_index()`。
 
 ## 下一回合從哪裡接
 
