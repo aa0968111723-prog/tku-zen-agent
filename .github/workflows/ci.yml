@@ -1,0 +1,35 @@
+# 每個 PR 與 main 的每次推送都要跑過，才不會再把開不起來的版本合進去。
+#
+# 2026-08-27 的線上當機（app/research/public_map.py 沒被合進來，容器一直
+# BackOff 重啟）之所以能上線，就是因為當時沒有任何 CI 擋在合併前面。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 對齊 Dockerfile 的 python:3.11-slim
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: 安裝相依套件
+        run: pip install -r requirements-dev.txt
+
+      # 部署用的是 `uvicorn app.main:app`，先單獨跑一次同一條 import 路徑：
+      # 開不起來的話這一步就會紅，訊息比整包測試好讀。
+      - name: 開機檢查（等同部署入口）
+        run: python -c "import app.main"
+
+      - name: 測試
+        run: python -m pytest -q
