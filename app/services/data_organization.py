@@ -49,6 +49,17 @@ IGNORED_IMPORT_DIRS = {
 }
 
 
+ENTITY_TYPES = ("person", "club", "school", "event", "scene", "place", "object")
+
+
+def _entity_type(kind: str) -> str:
+    """把候選實體型別收斂成遠端 CHECK 允許的集合。"""
+    normalized = str(kind or "").strip().lower()
+    if normalized in ENTITY_TYPES:
+        return normalized
+    return "event" if normalized == "date" else "object"
+
+
 def _stable_id(prefix: str, *parts: object) -> str:
     raw = "\x1f".join(str(part or "") for part in parts)
     return f"{prefix}_{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:24]}"
@@ -697,6 +708,10 @@ class DataOrganizationService:
         return _stable_id("mapped_entity", owner_id, kind, original_id)
 
     def _entity(self, owner_id: str, entity_id: str, kind: str, name: str, *, aliases: Iterable[str] = (), description: str = "", confidence: float = 0.0, status: str = "pending_review", source_id: str = "") -> str:
+        # entities.type 在遠端有 CHECK IN (person/club/school/event/scene/place/object)。
+        # 事件分支會傳 'date' 進來，一列不合法就會讓整批 50 筆 upsert 失敗，
+        # 所以在這個唯一的寫入口統一收斂，本機與遠端才會是同一組 id。
+        kind = _entity_type(kind)
         mapped_id = self._mapped_entity_id(owner_id, kind, entity_id)
         self.visual_store._conn.execute(
             "INSERT INTO entities(id,type,name,aliases,description,confidence,verification_status,owner_id,source_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET type=excluded.type,name=excluded.name,aliases=excluded.aliases,description=excluded.description,confidence=excluded.confidence,verification_status=excluded.verification_status,owner_id=excluded.owner_id,source_id=excluded.source_id,updated_at=excluded.updated_at",
