@@ -61,7 +61,7 @@ SCHEMA = {
         "name": "get_current_term",
         "description": (
             "查本學期（今年）的真實資料：學年度、學期、社長、幹部、社課時間地點、"
-            "社費、招生期間、報名連結、共用雲端資料夾。"
+            "社費、招生期間、本學期週次表、報名連結、共用雲端資料夾。"
             "**只要問題牽涉到「今年」「這學期」「現在」的具體事實，就一定要先呼叫這個工具**，"
             "不可以用 search_knowledge 查到的歷年檔案內容代替 —— 那些是往年的資料。"
             "查不到就是還沒設定，直接說明並請使用者補，絕對不要自己編一個。"
@@ -75,7 +75,7 @@ SCHEMA = {
                         "想查哪些欄位，用逗號分隔；留空就全部回傳。"
                         "可用：academic_year, semester, club_name, president, officers, "
                         "regular_meeting_time, regular_meeting_location, club_fee, "
-                        "recruitment_period, signup_url, primary_drive_folder"
+                        "recruitment_period, weekly_schedule, signup_url, primary_drive_folder, source_note"
                     ),
                 }
             },
