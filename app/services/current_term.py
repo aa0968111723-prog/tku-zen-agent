@@ -47,7 +47,8 @@ FIELDS: tuple[Field, ...] = (
     Field("regular_meeting_time", "社課時間", "例如 每週三 18:30–21:30", "text"),
     Field("regular_meeting_location", "社課地點", "例如 H116", "text"),
     Field("club_fee", "社費", "例如 每學期 300 元", "text"),
-    Field("recruitment_period", "招生期間", "例如 9/8–9/30", "text"),
+    Field("recruitment_period", "招生期間", "例如 2026/9/14–9/27", "text"),
+    Field("weekly_schedule", "本學期週次表", "W1–W18 招生／社課／茶會／演講，一行一週", "longtext"),
     Field("signup_url", "報名連結", "Google 表單或社群連結", "text"),
     Field("primary_drive_folder", "共用雲端資料夾", "Drive 資料夾 ID 或網址", "text"),
     Field("source_note", "資料來源備註", "這些資料是誰在什麼時候確認的", "longtext"),
@@ -72,8 +73,6 @@ class TermState:
     updated_at: str | None
     path: Path
     exists: bool
-
-    # ── 查詢 ─────────────────────────────────────────────
 
     def get(self, key: str) -> str | None:
         """回傳已確認的值；沒有就 None。不會猜。"""
@@ -105,8 +104,6 @@ class TermState:
         if year:
             return f"{year} 學年度"
         return "（本學期未設定）"
-
-    # ── 給模型看的區塊 ────────────────────────────────────
 
     def prompt_block(self) -> str:
         known = self.known()
@@ -144,8 +141,6 @@ class TermState:
             ]
         return "\n".join(lines)
 
-
-# ── 讀寫 ─────────────────────────────────────────────────────
 
 _cache: TermState | None = None
 _cache_key: tuple[str, float] | None = None

@@ -82,8 +82,6 @@ def test_term_label(clean_term):
     assert term.load().term_label() == "115 學年度上學期"
 
 
-# ── 工具 ─────────────────────────────────────────────────────
-
 def test_tool_reports_unknown_without_guessing(clean_term):
     r = term_tool.get_current_term(keys="president")
     assert r["ok"]
@@ -119,3 +117,28 @@ def test_as_form_shape(clean_term):
     assert form["exists"] is True
     year = next(f for f in form["fields"] if f["key"] == "academic_year")
     assert year["known"] is True and year["value"] == "115"
+
+
+def test_weekly_schedule_is_registered_and_round_trips(clean_term):
+    assert "weekly_schedule" in term.FIELD_BY_KEY
+    assert term.FIELD_BY_KEY["weekly_schedule"].kind == "longtext"
+    table = (
+        "W1  2026/9/14–9/20     招生期\n"
+        "W3  2026/9/30（三）     期初茶會\n"
+        "W4  2026/10/7（三）     期初演講\u300019:00–21:30\u3000講師盧玫竹"
+    )
+    term.update({"weekly_schedule": table, "recruitment_period": "2026/9/14–9/27"})
+    state = term.load()
+    assert "期初茶會" in (state.get("weekly_schedule") or "")
+    assert "盧玫竹" in (state.get("weekly_schedule") or "")
+    form = term.as_form()
+    field = next(f for f in form["fields"] if f["key"] == "weekly_schedule")
+    assert field["kind"] == "longtext"
+    assert field["known"] is True
+    block = state.prompt_block()
+    assert "本學期週次表" in block
+    assert "期初演講" in block
+    by_key = term_tool.get_current_term(keys="weekly_schedule")
+    assert "期初茶會" in by_key["message"]
+    by_label = term_tool.get_current_term(keys="週次")
+    assert "盧玫竹" in by_label["message"]
