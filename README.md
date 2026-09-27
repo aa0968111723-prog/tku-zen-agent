@@ -1,3 +1,9 @@
+# 已併入 TKU AI
+
+產品主線在 [hermes-console](https://github.com/aa0968111723-prog/hermes-console)。
+介面是 Hermes Console，執行層只有 Hermes，模型走 xAI Grok OAuth。
+這個倉庫保留歷年知識與產出工具，不再當第二套代理大腦。
+
 # 淡江大學領袖禪學社 · 專屬 AI 代理
 
 一個知道社團是誰、會照社團規矩做事，而且**會實際把檔案做出來**的 AI 助理。
